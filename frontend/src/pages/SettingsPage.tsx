@@ -4,6 +4,7 @@ import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Plus, Trash2 } from "lucide-react";
 import { api } from "../lib/api";
+import { APP_VERSION, checkUpdate, type UpdateInfo } from "../lib/version";
 import type { ProviderInfo } from "../lib/types";
 
 export default function SettingsPage() {
@@ -13,6 +14,7 @@ export default function SettingsPage() {
   const [display, setDisplay] = useState("");
   const [apiKey, setApiKey] = useState("");
   const [keyFor, setKeyFor] = useState<string | null>(null);
+  const [updateInfo, setUpdateInfo] = useState<UpdateInfo | null>(null);
 
   const providers = useQuery({
     queryKey: ["providers"],
@@ -57,6 +59,27 @@ export default function SettingsPage() {
         <h1 className="text-lg font-semibold">设置 · 模型服务商</h1>
       </div>
       <div className="flex-1 overflow-auto p-6">
+        <div className="mb-6 flex items-center gap-3 rounded border border-(--color-border) bg-(--color-panel) px-4 py-3 text-sm">
+          <span className="text-(--color-muted)">当前版本 v{APP_VERSION}</span>
+          <button
+            onClick={async () => setUpdateInfo(await checkUpdate(true))}
+            className="rounded border border-(--color-border) px-3 py-1 text-xs hover:border-(--color-accent)"
+          >
+            检查更新
+          </button>
+          {updateInfo?.has_update && updateInfo.download_url && (
+            <a href={updateInfo.download_url} target="_blank" rel="noreferrer"
+              className="text-(--color-accent)">
+              发现新版本 v{updateInfo.latest}，去下载 →
+            </a>
+          )}
+          {updateInfo && !updateInfo.has_update && (
+            <span className="text-emerald-400">
+              {updateInfo.error ? `检查失败：${updateInfo.error}` : "已是最新版本"}
+            </span>
+          )}
+        </div>
+
         <div className="mb-6 flex flex-wrap items-end gap-2">
           <label className="text-xs text-(--color-muted)">
             名称

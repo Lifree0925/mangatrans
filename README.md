@@ -16,7 +16,7 @@
 
 从 [Releases](https://github.com/Lifree0925/mangatrans/releases) 下载 `mangatrans_x.x.x_x64-setup.exe` 安装即可（Windows 10/11 x64，无需安装 Python/Node/Docker）。
 
-> 未做代码签名的构建首次运行可能被 SmartScreen 提示"未知发布者"，点"仍要运行"即可。
+> 自签名证书构建的安装包首次运行可能被 SmartScreen 提示"未知发布者"，点"仍要运行"即可；正式发布建议配置受信任的代码签名证书（仓库 Secrets：`WINDOWS_SIGN_PFX_BASE64` / `WINDOWS_SIGN_PASSWORD`）。
 
 ## 🚀 使用流程
 

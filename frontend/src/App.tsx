@@ -2,6 +2,8 @@
 
 import { NavLink, Route, Routes } from "react-router-dom";
 import { Clapperboard, FolderOpen, ListChecks, Settings } from "lucide-react";
+import UpdateNotice from "./components/UpdateNotice";
+import { APP_VERSION } from "./lib/version";
 import ProjectsPage from "./pages/ProjectsPage";
 import ProjectPage from "./pages/ProjectPage";
 import TasksPage from "./pages/TasksPage";
@@ -39,8 +41,9 @@ export default function App() {
             </NavLink>
           ))}
         </nav>
+        <UpdateNotice />
         <div className="border-t border-(--color-border) px-4 py-3 font-mono text-xs text-(--color-muted)">
-          v0.1.0 · 本地运行
+          v{APP_VERSION} · 本地运行
         </div>
       </aside>
       <main className="flex-1 overflow-hidden">

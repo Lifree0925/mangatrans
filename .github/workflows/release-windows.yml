@@ -59,6 +59,27 @@ jobs:
           ../frontend/node_modules/.bin/tauri build 2>&1 | tee tauri-build.log
 
 
+      - name: Sign installer (skip if no certificate secrets)
+        shell: pwsh
+        env:
+          PFX_B64: ${{ secrets.WINDOWS_SIGN_PFX_BASE64 }}
+          PFX_PASS: ${{ secrets.WINDOWS_SIGN_PASSWORD }}
+        run: |
+          $exe = Get-ChildItem src-tauri/target/release/bundle/nsis/*.exe | Select-Object -First 1
+          if (-not $exe) { throw "未找到 NSIS 安装包" }
+          if ($env:PFX_B64 -and $env:PFX_PASS) {
+            $pfx = Join-Path $env:RUNNER_TEMP "sign.pfx"
+            [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:PFX_B64))
+            $signtool = Get-ChildItem "C:\Program Files (x86)\Windows Kitsin" -Recurse -Filter signtool.exe |
+              Where-Object { $_.FullName -match 'x64' } | Sort-Object FullName -Descending | Select-Object -First 1
+            if (-not $signtool) { throw "未找到 signtool.exe" }
+            & $signtool.FullName sign /f $pfx /p $env:PFX_PASS /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 $exe.FullName
+            & $signtool.FullName verify /pa $exe.FullName
+            Write-Host "已签名: $($exe.Name)"
+          } else {
+            Write-Host "未配置签名证书 Secrets，跳过签名"
+          }
+
       - name: Generate SHA-256
         shell: pwsh
         run: |
