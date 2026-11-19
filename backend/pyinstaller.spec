@@ -14,7 +14,7 @@ a = Analysis(
     ["app/main.py"],
     pathex=[],
     binaries=[],
-    datas=[("migrations", "migrations")],
+    datas=[("migrations", "migrations"), ("alembic.ini", ".")],
     hiddenimports=hiddenimports,
     hookspath=[],
     runtime_hooks=[],

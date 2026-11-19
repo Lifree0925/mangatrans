@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# Linux 开发占位 sidecar：浏览器开发模式请直接运行 backend/run_dev.sh
+echo "mangatrans-backend (linux dev placeholder)" >&2
+sleep infinity

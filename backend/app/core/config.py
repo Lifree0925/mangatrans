@@ -18,6 +18,8 @@ class Settings(BaseSettings):
     port: int = 0
     # 会话令牌：为空则启动时自动生成并打印到启动日志
     auth_token: str = ""
+    # sidecar 模式：启动时自动执行数据库迁移（1 开启）
+    migrate_on_start: str = ""
 
     @property
     def database_url(self) -> str:

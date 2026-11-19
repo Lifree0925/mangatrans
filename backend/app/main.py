@@ -24,11 +24,37 @@ ALLOWED_ORIGINS = [
 PUBLIC_PATHS = {"/health", "/docs", "/openapi.json", "/redoc"}
 
 
+def run_migrations_if_needed() -> None:
+    """打包环境（PyInstaller）启动时自动执行 Alembic 迁移。"""
+    import sys
+
+    from app.core.config import settings
+
+    if not settings.migrate_on_start:
+        return
+    from pathlib import Path
+
+    from alembic import command
+    from alembic.config import Config
+
+    if getattr(sys, "frozen", False):
+        base = Path(sys._MEIPASS)  # noqa: SLF001 PyInstaller 资源目录
+    else:
+        base = Path(__file__).resolve().parents[2]
+    ini = base / "alembic.ini"
+    script_dir = base / "migrations"
+    cfg = Config(str(ini))
+    cfg.set_main_option("script_location", str(script_dir))
+    cfg.set_main_option("sqlalchemy.url", settings.database_url)
+    command.upgrade(cfg, "head")
+
+
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
-    """启动持久 Worker；退出时取消。"""
+    """启动迁移与持久 Worker；退出时取消 Worker。"""
     from app.pipeline.worker import worker_loop
 
+    run_migrations_if_needed()
     worker_task = asyncio.create_task(worker_loop())
     try:
         yield
