@@ -48,8 +48,11 @@ jobs:
           Copy-Item backend/dist/mangatrans-backend/mangatrans-backend.exe `
             src-tauri/binaries/mangatrans-backend-x86_64-pc-windows-msvc.exe -Force
 
+      - name: Install Tauri CLI
+        run: cargo install tauri-cli --version 2.7.6 --locked
+
       - name: Tauri build
-        run: cargo tauri build -- --verbose
+        run: cargo tauri build
         working-directory: src-tauri
 
       - name: Generate SHA-256
