@@ -59,6 +59,7 @@ AI 漫剧剧本翻译系统（Windows 桌面版）：本地优先工作台，将
 7. **FastAPI 中间件顺序**：后注册的先执行；`auth_guard` 必须放行 `OPTIONS` 预检（预检不带自定义头）。
 8. **解析器约定**：`source_text` 保留原始行（含换行），偏移为 Unicode 码点；片段拼接必须能完整还原原文。
 9. **网络**：直连 GitHub/rustup 会超时，走本机 Clash 代理 `http://127.0.0.1:7890`（curl/cargo 用 `https_proxy`）。
+10. **Windows CI 构建**：`tauri.conf.json` 不得配置 `beforeBuildCommand`（tauri CLI 在仓库根执行它，仓库根无 package.json 会失败）；前端由 workflow 显式构建。CLI 用前端 `@tauri-apps/cli`（`../frontend/node_modules/.bin/tauri build`），不要 `cargo install tauri-cli`。bundle.targets 只打 `["nsis"]`。identifier 避免 `.app` 结尾。
 
 ## 数据模型速查
 
