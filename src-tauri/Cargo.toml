@@ -1,0 +1,25 @@
+[package]
+name = "mangatrans"
+version = "0.1.0"
+description = "AI 漫剧剧本翻译系统桌面应用"
+authors = ["you"]
+license = ""
+repository = ""
+edition = "2021"
+rust-version = "1.90"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[lib]
+name = "mangatrans_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2.7.6" }
+
+[dependencies]
+serde_json = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+log = "0.4"
+tauri = { version = "2.12.7" }
+tauri-plugin-log = "2"

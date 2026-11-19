@@ -1,0 +1,306 @@
+"""确定性剧本解析器：机械切分，不做语义分类。
+
+设计约束（文档 12.3）：
+- 只做形式分类：heading / dialogue / narrative / other。
+- 不判断旁白与动作的区别（统一 narrative），不推断无标签台词归属。
+- 每个识别结果保留 parser rule ID 与原文偏移（Unicode 码点）。
+- 复杂度 O(n)，8 万字 2 秒内完成。
+"""
+
+import re
+from dataclasses import dataclass, field
+
+_CN_NUM = "一二三四五六七八九十百千零两"
+
+# 规则 ID 常量
+RULE_MD_HEADING = "md_heading"
+RULE_CHAPTER = "chapter_title"
+RULE_SCENE_BRACKET = "scene_bracket"
+RULE_SCENE_LOC = "scene_location"
+RULE_SCENE_SEP = "scene_separator"
+RULE_DIALOGUE = "dialogue"
+RULE_PAREN = "parenthetical"
+RULE_NARRATIVE = "narrative"
+RULE_OTHER = "other"
+
+_CHAPTER_RE = re.compile(
+    rf"^第\s*[\d{_CN_NUM}]+\s*[集章回幕](?:[：:\s].*)?$|^Chapter\s+\d+.*$", re.IGNORECASE
+)
+_SCENE_BRACKET_RE = re.compile(r"^[【〔\[](.{1,80})[】〕\]]$")
+_SCENE_LOC_RE = re.compile(
+    r"^(内景|外景|日内|夜内|日外|夜外|场景|镜头|第\d+场|第[\u4e00-\u9fa5]+场)[：:\s]"
+)
+_SCENE_SEP_RE = re.compile(r"^[-—–]{3,}\s*$")
+_DIALOGUE_RE = re.compile(
+    r"^([^\s：:（）()【】\[.\]\"'’“”]{1,24})\s*(?:（[^）]{1,40}）)?[：:](\s*.*)$"
+)
+_PAREN_RE = re.compile(r"^（[^）]{1,200}）\s*$")
+
+
+@dataclass
+class SegmentBlock:
+    """解析出的片段。"""
+
+    type: str
+    text: str
+    start: int
+    end: int
+    rule_id: str
+    speaker: str | None = None
+    chapter_no: int = 0
+    scene_no: int = 0
+    confidence: str = "high"
+
+
+@dataclass
+class ChapterBlock:
+    no: int
+    title: str
+    start: int
+    end: int
+    rule_id: str
+
+
+@dataclass
+class SceneBlock:
+    chapter_no: int
+    no: int
+    heading: str | None
+    start: int
+    end: int
+    rule_id: str
+
+
+@dataclass
+class ParseReport:
+    total_chars: int = 0
+    covered_chars: int = 0
+    uncovered_chars: int = 0
+    chapter_count: int = 0
+    scene_count: int = 0
+    dialogue_count: int = 0
+    narrative_count: int = 0
+    heading_count: int = 0
+    other_count: int = 0
+    anomalies: list[str] = field(default_factory=list)
+    parser_version: str = "1.0.0"
+    coverage_ok: bool = False
+
+
+@dataclass
+class ParseResult:
+    chapters: list[ChapterBlock]
+    scenes: list[SceneBlock]
+    segments: list[SegmentBlock]
+    report: ParseReport
+
+
+def _classify_line(line: str) -> tuple[str, str, str | None]:
+    """返回 (类型, 规则ID, speaker)。"""
+    stripped = line.strip()
+    if not stripped:
+        return "blank", "", None
+    if _CHAPTER_RE.match(stripped):
+        return "heading", RULE_CHAPTER, None
+    if _SCENE_BRACKET_RE.match(stripped):
+        return "heading", RULE_SCENE_BRACKET, None
+    if _SCENE_LOC_RE.match(stripped) and len(stripped) <= 40:
+        return "heading", RULE_SCENE_LOC, None
+    if _SCENE_SEP_RE.match(stripped):
+        return "heading", RULE_SCENE_SEP, None
+    m = _DIALOGUE_RE.match(stripped)
+    if m:
+        tail = m.group(2)
+        if tail.strip():
+            return "dialogue", RULE_DIALOGUE, m.group(1)
+        # 冒号后无内容：可疑对白行
+        return "other", RULE_OTHER, m.group(1)
+    if _PAREN_RE.match(stripped):
+        return "narrative", RULE_PAREN, None
+    return "narrative", RULE_NARRATIVE, None
+
+
+def parse_script(text: str) -> ParseResult:
+    """全文解析：行级分类 + 覆盖校验。所有 segment 的 source_text 保留原始行（含换行），
+    保证片段拼接可完整还原原文。"""
+    lines = text.splitlines(keepends=True)
+    if not lines:
+        return ParseResult(chapters=[], scenes=[], segments=[], report=ParseReport())
+
+    chapters: list[ChapterBlock] = []
+    scenes: list[SceneBlock] = []
+    segments: list[SegmentBlock] = []
+    anomalies: list[str] = []
+
+    chapter_no = 0
+    scene_no = 0
+    pos = 0
+
+    # narrative 合并缓冲
+    buf = ""
+    buf_start = 0
+
+    def append_blank(pos_start: int, pos_end: int) -> None:
+        """空白行归属：并入最后一个 segment（延长 offset 与文本）。"""
+        nonlocal buf
+        if buf:
+            buf += text[pos_start:pos_end]
+        elif segments:
+            last = segments[-1]
+            last.end = pos_end
+            last.text += text[pos_start:pos_end]
+        else:
+            buf_start = pos_start
+            buf = text[pos_start:pos_end]
+
+    def flush_narrative(end: int) -> None:
+        nonlocal buf
+        if buf:
+            segments.append(
+                SegmentBlock(
+                    type="narrative",
+                    text=buf,
+                    start=buf_start,
+                    end=end,
+                    rule_id=RULE_NARRATIVE,
+                    chapter_no=chapter_no,
+                    scene_no=scene_no,
+                )
+            )
+            buf = ""
+
+    def ensure_chapter() -> None:
+        nonlocal chapter_no
+        if chapter_no == 0:
+            chapter_no = 1
+            chapters.append(ChapterBlock(no=1, title="", start=0, end=0, rule_id=RULE_OTHER))
+
+    for raw_line in lines:
+        line = raw_line.rstrip("\n")
+        content = line.strip()
+        ltype, rule, speaker = _classify_line(line)
+
+        if ltype == "blank":
+            append_blank(pos, pos + len(raw_line))
+            pos += len(raw_line)
+            continue
+
+        if ltype == "heading" and rule == RULE_CHAPTER:
+            flush_narrative(pos)
+            chapter_no += 1
+            scene_no = 0
+            chapters.append(
+                ChapterBlock(no=chapter_no, title=content, start=pos, end=pos + len(raw_line), rule_id=rule)
+            )
+            segments.append(
+                SegmentBlock(
+                    type="heading", text=raw_line, start=pos, end=pos + len(raw_line),
+                    rule_id=rule, chapter_no=chapter_no, scene_no=scene_no,
+                )
+            )
+            pos += len(raw_line)
+            continue
+
+        if ltype == "heading" and rule in (RULE_SCENE_BRACKET, RULE_SCENE_LOC):
+            flush_narrative(pos)
+            ensure_chapter()
+            scene_no += 1
+            scenes.append(
+                SceneBlock(
+                    chapter_no=chapter_no, no=scene_no, heading=content,
+                    start=pos, end=pos + len(raw_line), rule_id=rule,
+                )
+            )
+            segments.append(
+                SegmentBlock(
+                    type="heading", text=raw_line, start=pos, end=pos + len(raw_line),
+                    rule_id=rule, chapter_no=chapter_no, scene_no=scene_no,
+                )
+            )
+            pos += len(raw_line)
+            continue
+
+        if ltype == "heading" and rule == RULE_SCENE_SEP:
+            flush_narrative(pos)
+            ensure_chapter()
+            scene_no += 1
+            scenes.append(
+                SceneBlock(
+                    chapter_no=chapter_no, no=scene_no, heading=None,
+                    start=pos, end=pos + len(raw_line), rule_id=rule,
+                )
+            )
+            pos += len(raw_line)
+            continue
+
+        if ltype == "dialogue":
+            flush_narrative(pos)
+            ensure_chapter()
+            segments.append(
+                SegmentBlock(
+                    type="dialogue", text=raw_line, start=pos, end=pos + len(raw_line),
+                    rule_id=rule, speaker=speaker, chapter_no=chapter_no, scene_no=scene_no,
+                )
+            )
+            pos += len(raw_line)
+            continue
+
+        if ltype == "other":
+            flush_narrative(pos)
+            ensure_chapter()
+            segments.append(
+                SegmentBlock(
+                    type="other", text=raw_line, start=pos, end=pos + len(raw_line),
+                    rule_id=rule, chapter_no=chapter_no, scene_no=scene_no, confidence="low",
+                )
+            )
+            anomalies.append(f"偏移 {pos}：无法套用格式的行（已保留原文）：{content[:30]}")
+            pos += len(raw_line)
+            continue
+
+        # narrative
+        ensure_chapter()
+        if not buf:
+            buf_start = pos
+        buf += raw_line
+        pos += len(raw_line)
+
+    flush_narrative(pos)
+
+    # 章节 end 补齐：下一章起点或文末
+    for i, ch in enumerate(chapters):
+        ch.end = chapters[i + 1].start if i + 1 < len(chapters) else len(text)
+    # 场景 end 补齐：下一场景起点（同章）与本章结束取最小
+    for i, sc in enumerate(scenes):
+        ch_end = next((c.end for c in chapters if c.no == sc.chapter_no), len(text))
+        nxt = scenes[i + 1].start if i + 1 < len(scenes) else len(text)
+        sc.end = min(ch_end, nxt)
+
+    # 覆盖校验：段必须首尾相接且覆盖全文
+    covered = 0
+    prev_end = 0
+    ok = True
+    for seg in segments:
+        if seg.start != prev_end:
+            ok = False
+            anomalies.append(f"覆盖缺口：期望 {prev_end}，实际 {seg.start}")
+        prev_end = seg.end
+        covered += seg.end - seg.start
+    if prev_end != len(text):
+        ok = False
+        anomalies.append(f"覆盖缺口：末尾期望 {len(text)}，实际 {prev_end}")
+
+    report = ParseReport(
+        total_chars=len(text),
+        covered_chars=covered,
+        uncovered_chars=max(0, len(text) - covered),
+        chapter_count=len(chapters),
+        scene_count=len(scenes),
+        dialogue_count=sum(1 for s in segments if s.type == "dialogue"),
+        narrative_count=sum(1 for s in segments if s.type == "narrative"),
+        heading_count=sum(1 for s in segments if s.type == "heading"),
+        other_count=sum(1 for s in segments if s.type == "other"),
+        anomalies=anomalies,
+        coverage_ok=ok,
+    )
+    return ParseResult(chapters=chapters, scenes=scenes, segments=segments, report=report)

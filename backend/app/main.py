@@ -1,0 +1,78 @@
+"""Mangatrans 本地后端入口。
+
+仅监听 127.0.0.1；会话令牌由 Tauri 传入或自动生成。
+"""
+
+import asyncio
+from contextlib import asynccontextmanager
+
+from fastapi import FastAPI, Request
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+
+from app.api.v1 import documents, knowledge, projects, qa, settings_api, translation
+from app.core import security
+from app.core.config import settings
+
+ALLOWED_ORIGINS = [
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+    "tauri://localhost",
+    "https://tauri.localhost",
+]
+
+PUBLIC_PATHS = {"/health", "/docs", "/openapi.json", "/redoc"}
+
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    """启动持久 Worker；退出时取消。"""
+    from app.pipeline.worker import worker_loop
+
+    worker_task = asyncio.create_task(worker_loop())
+    try:
+        yield
+    finally:
+        worker_task.cancel()
+
+
+def create_app() -> FastAPI:
+    app = FastAPI(title="Mangatrans Local API", version="0.1.0", lifespan=lifespan)
+
+    # CORS 仅允许本机前端与 Tauri 来源
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=ALLOWED_ORIGINS,
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+
+    @app.middleware("http")
+    async def auth_guard(request: Request, call_next):
+        """所有请求（除公开路径）必须携带会话令牌。"""
+        # OPTIONS 预检不携带自定义头，放行；由 CORS 中间件处理
+        if request.method == "OPTIONS" or request.url.path in PUBLIC_PATHS:
+            return await call_next(request)
+        token = request.headers.get("x-auth-token")
+        if not security.check_token(token):
+            return JSONResponse(status_code=401, content={"detail": "unauthorized"})
+        return await call_next(request)
+
+    @app.get("/health")
+    def health() -> dict:
+        return {"status": "ok", "version": "0.1.0"}
+
+    app.include_router(projects.router, prefix="/api/v1")
+    app.include_router(documents.router, prefix="/api/v1")
+    app.include_router(knowledge.router, prefix="/api/v1")
+    app.include_router(translation.router, prefix="/api/v1")
+    app.include_router(qa.router, prefix="/api/v1")
+    app.include_router(settings_api.router, prefix="/api/v1")
+    return app
+
+
+# 会话令牌：Tauri 传入则使用，否则每次启动自动生成
+security.set_token(settings.auth_token or security.generate_token())
+
+app = create_app()

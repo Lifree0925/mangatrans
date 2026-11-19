@@ -1,0 +1,24 @@
+@import "tailwindcss";
+
+/* Claude Code 风格视觉基调：暗色、低对比、暖色强调 */
+@theme {
+  --color-bg: #17181c;
+  --color-panel: #1e2026;
+  --color-panel2: #24262d;
+  --color-border: #32343c;
+  --color-text: #d8d8d8;
+  --color-muted: #8b8f98;
+  --color-accent: #d97757; /* 琥珀/珊瑚强调色 */
+  --color-accent-hover: #e68a6a;
+  --font-mono: "JetBrains Mono", "Cascadia Code", "SFMono-Regular", Menlo, monospace;
+}
+
+html, body, #root {
+  height: 100%;
+}
+
+body {
+  background: var(--color-bg);
+  color: var(--color-text);
+  font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+}
