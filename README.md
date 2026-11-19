@@ -39,9 +39,7 @@
 frontend/     React + TS + Tailwind（Claude Code 风格暗色 UI）
 backend/      FastAPI sidecar：解析、知识库、翻译管线、任务系统、QA、导出
 src-tauri/    Tauri 2 桌面壳：生命周期、sidecar 管理、安装包
-docs/         文档
-开发文档_AI漫剧剧本翻译系统.md   设计权威文档（先读它）
-AGENTS.md     开发执行速查与经验沉淀
+AGENTS.md     开发执行速查与工程原则
 ```
 
 ### 常用命令
@@ -66,5 +64,4 @@ cd backend && .venv/bin/alembic revision --autogenerate -m '说明' && .venv/bin
 
 ## 📄 文档
 
-- [开发文档](开发文档_AI漫剧剧本翻译系统.md)：产品边界、总体架构、数据模型、翻译方法论、验收标准
-- [AGENTS.md](AGENTS.md)：AI 编码执行约束与工程原则
+- [AGENTS.md](AGENTS.md)：工程原则、开发命令速查与执行约束
