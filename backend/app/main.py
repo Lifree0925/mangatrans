@@ -10,6 +10,7 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
+from app import __version__
 from app.api.v1 import documents, knowledge, projects, qa, settings_api, translation
 from app.core import security
 from app.core.config import settings
@@ -63,7 +64,7 @@ async def lifespan(_app: FastAPI):
 
 
 def create_app() -> FastAPI:
-    app = FastAPI(title="Mangatrans Local API", version="0.1.0", lifespan=lifespan)
+    app = FastAPI(title="Mangatrans Local API", version=__version__, lifespan=lifespan)
 
     # CORS 仅允许本机前端与 Tauri 来源
     app.add_middleware(
@@ -87,7 +88,7 @@ def create_app() -> FastAPI:
 
     @app.get("/health")
     def health() -> dict:
-        return {"status": "ok", "version": "0.1.0"}
+        return {"status": "ok", "version": __version__}
 
     app.include_router(projects.router, prefix="/api/v1")
     app.include_router(documents.router, prefix="/api/v1")

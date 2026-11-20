@@ -3,6 +3,11 @@
 from PyInstaller.utils.hooks import collect_submodules
 
 hiddenimports = collect_submodules("sqlalchemy.dialects.sqlite") + [
+    "multipart",
+    "python_multipart",
+    "docx",
+    "httpx",
+    "keyring",
     "uvicorn.logging",
     "uvicorn.loops.auto",
     "uvicorn.protocols.http.auto",
