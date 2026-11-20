@@ -1,6 +1,11 @@
 //! MangaTrans 桌面壳：管理 Python sidecar 生命周期（动态端口 + 随机会话令牌）。
+//!
+//! 启动策略：sidecar 启动后立即显示窗口，健康检查在后台任务中进行，
+//! 不阻塞窗口创建（one-file sidecar 首次启动解压可能需要数秒到数十秒）。
 
+use std::io::Write;
 use std::net::TcpListener;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::Duration;
 
@@ -39,19 +44,33 @@ fn generate_token() -> String {
         .collect()
 }
 
-/// 等待后端健康检查就绪（最多 30 秒，one-file sidecar 首次启动需解压）。
-fn wait_until_healthy(port: u16) -> bool {
+/// sidecar 日志路径：用户数据目录/logs/sidecar.log。
+fn sidecar_log_path(data_dir: &Path) -> PathBuf {
+    let dir = data_dir.join("logs");
+    let _ = std::fs::create_dir_all(&dir);
+    dir.join("sidecar.log")
+}
+
+fn append_log(path: &Path, line: &str) {
+    if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+        let _ = writeln!(file, "{line}");
+    }
+}
+
+/// 后台等待后端健康检查就绪（最多 60 秒，one-file sidecar 首次启动需解压）。
+fn wait_until_healthy(port: u16, log_path: &Path) {
     let url = format!("http://127.0.0.1:{port}/health");
-    for _ in 0..300 {
+    for _ in 0..600 {
         if reqwest::blocking::get(&url)
             .map(|r| r.status().is_success())
             .unwrap_or(false)
         {
-            return true;
+            append_log(log_path, "[health] backend ready");
+            return;
         }
         std::thread::sleep(Duration::from_millis(100));
     }
-    false
+    append_log(log_path, "[health] timeout after 60s");
 }
 
 pub fn run() {
@@ -64,6 +83,7 @@ pub fn run() {
             let data_dir = std::env::var("MT_DATA_DIR")
                 .map(std::path::PathBuf::from)
                 .unwrap_or_else(|_| app.path().app_data_dir().expect("无法获取应用数据目录"));
+            let log_path = sidecar_log_path(&data_dir);
 
             let sidecar = app
                 .shell()
@@ -74,24 +94,50 @@ pub fn run() {
                 .env("MT_DATA_DIR", data_dir.to_str().unwrap_or_default())
                 .env("MT_MIGRATE_ON_START", "1");
 
-            let (mut rx, child) = sidecar.spawn().expect("启动 sidecar 失败");
-            // 消费输出流，避免管道阻塞
-            tauri::async_runtime::spawn(async move {
-                while let Some(event) = rx.recv().await {
-                    if let CommandEvent::Error(err) = event {
-                        eprintln!("[sidecar] {err}");
-                    }
+            // sidecar 启动失败时不崩溃：记录日志，窗口照常显示，由前端提示错误
+            let child = match sidecar.spawn() {
+                Ok((mut rx, child)) => {
+                    let event_log = log_path.clone();
+                    tauri::async_runtime::spawn(async move {
+                        while let Some(event) = rx.recv().await {
+                            match event {
+                                CommandEvent::Stdout(line) => append_log(
+                                    &event_log,
+                                    &format!("[stdout] {}", String::from_utf8_lossy(&line)),
+                                ),
+                                CommandEvent::Stderr(line) => append_log(
+                                    &event_log,
+                                    &format!("[stderr] {}", String::from_utf8_lossy(&line)),
+                                ),
+                                CommandEvent::Error(err) => {
+                                    append_log(&event_log, &format!("[error] {err}"))
+                                }
+                                CommandEvent::Terminated(payload) => append_log(
+                                    &event_log,
+                                    &format!("[terminated] code={:?}", payload.code),
+                                ),
+                                _ => {}
+                            }
+                        }
+                    });
+                    Some(child)
                 }
+                Err(err) => {
+                    append_log(&log_path, &format!("[spawn-error] {err}"));
+                    None
+                }
+            };
+
+            // 健康检查后台执行：窗口先显示，前端带重试等待后端就绪
+            let health_log = log_path.clone();
+            tauri::async_runtime::spawn_blocking(move || {
+                wait_until_healthy(port, &health_log);
             });
 
-            let ready = wait_until_healthy(port);
-            if !ready {
-                eprintln!("[sidecar] 健康检查超时");
-            }
             app.manage(BackendState {
                 port,
                 token,
-                child: Mutex::new(Some(child)),
+                child: Mutex::new(child),
             });
             Ok(())
         })

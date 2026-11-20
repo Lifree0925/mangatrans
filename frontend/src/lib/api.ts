@@ -33,9 +33,28 @@ export class ApiError extends Error {
   }
 }
 
+/** 本地回环连接失败说明后端尚未就绪（sidecar 启动/解压中），自动重试。 */
+async function fetchWithRetry(
+  url: string,
+  init?: RequestInit,
+  timeoutMs = 60_000
+): Promise<Response> {
+  const start = Date.now();
+  let lastError: unknown;
+  for (;;) {
+    try {
+      return await fetch(url, init);
+    } catch (err) {
+      lastError = err;
+      if (Date.now() - start >= timeoutMs) throw lastError;
+      await new Promise((resolve) => setTimeout(resolve, 1200));
+    }
+  }
+}
+
 export async function api<T>(path: string, init?: RequestInit): Promise<T> {
   const { base, token } = await resolveConfig();
-  const res = await fetch(`${base}/api/v1${path}`, {
+  const res = await fetchWithRetry(`${base}/api/v1${path}`, {
     ...init,
     headers: {
       "content-type": "application/json",

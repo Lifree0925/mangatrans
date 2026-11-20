@@ -59,7 +59,9 @@ AI 漫剧剧本翻译系统（Windows 桌面版）：本地优先工作台，将
 8. **解析器约定**：`source_text` 保留原始行（含换行），偏移为 Unicode 码点；片段拼接必须能完整还原原文。
 9. **网络**：直连 GitHub/rustup 会超时，走本机 Clash 代理 `http://127.0.0.1:7890`（curl/cargo 用 `https_proxy`）。
 10. **PyInstaller sidecar**：必须用 **one-file**（one-folder 的 `_internal` 目录无法随 Tauri `externalBin` 分发，安装后报 "Failed to load Python DLL"）；`app/main.py` 必须保留 `if __name__ == "__main__": uvicorn.run(...)` 入口，否则打包后立即静默退出。
-11. **Windows CI 构建**：`tauri.conf.json` 不得配置 `beforeBuildCommand`（tauri CLI 在仓库根执行它，仓库根无 package.json 会失败）；前端由 workflow 显式构建。CLI 用前端 `@tauri-apps/cli`（`../frontend/node_modules/.bin/tauri build`），不要 `cargo install tauri-cli`。bundle.targets 只打 `["nsis"]`。identifier 避免 `.app` 结尾。
+11. **Tauri 启动**：setup 中禁止同步等待 sidecar 健康检查（会阻塞窗口数十秒）；用 `spawn_blocking` 后台检查，前端 fetch 对本地回环失败自动重试 60 秒。sidecar 日志写入 `数据目录/logs/sidecar.log`，spawn 失败不得 panic。
+12. **更新检查**：使用仓库根 `update.json`（raw.githubusercontent + jsDelivr 双源），不用 GitHub API（匿名请求会 403 限流）。发版时同步更新 `update.json` 的 version。
+13. **Windows CI 构建**：`tauri.conf.json` 不得配置 `beforeBuildCommand`（tauri CLI 在仓库根执行它，仓库根无 package.json 会失败）；前端由 workflow 显式构建。CLI 用前端 `@tauri-apps/cli`（`../frontend/node_modules/.bin/tauri build`），不要 `cargo install tauri-cli`。bundle.targets 只打 `["nsis"]`。identifier 避免 `.app` 结尾。
 
 ## 数据模型速查
 

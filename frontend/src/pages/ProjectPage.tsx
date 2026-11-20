@@ -5,7 +5,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ArrowLeft, Download, FileUp, ScanText, ShieldCheck, Zap } from "lucide-react";
 import { Link, useParams } from "react-router-dom";
 import { api } from "../lib/api";
-import type { Chapter, ExportResult, ParseReport, Project, QAIssueInfo, Scene, Segment, TaskInfo } from "../lib/types";
+import type { Chapter, ExportResult, ParseReport, Project, ProviderInfo, QAIssueInfo, Scene, Segment, TaskInfo } from "../lib/types";
 
 const typeColor: Record<string, string> = {
   heading: "text-(--color-accent)",
@@ -26,6 +26,19 @@ export default function ProjectPage() {
   const project = useQuery({
     queryKey: ["project", id],
     queryFn: () => api<Project>(`/projects/${id}`),
+  });
+  const providers = useQuery({
+    queryKey: ["providers"],
+    queryFn: () => api<ProviderInfo[]>("/settings/providers"),
+  });
+  const defaultProvider = providers.data?.find((p) => p.is_default) ?? providers.data?.[0];
+  const setDefaultProvider = useMutation({
+    mutationFn: (pid: string) =>
+      api(`/settings/providers/${pid}`, {
+        method: "PATCH",
+        body: JSON.stringify({ is_default: true }),
+      }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["providers"] }),
   });
   const chapters = useQuery({
     queryKey: ["chapters", id],
@@ -109,6 +122,26 @@ export default function ProjectPage() {
           <ArrowLeft size={16} />
         </Link>
         <h1 className="font-semibold">{project.data?.name ?? "…"}</h1>
+        {providers.data && providers.data.length > 0 ? (
+          <label className="flex items-center gap-1.5 text-xs text-(--color-muted)">
+            模型
+            <select
+              value={defaultProvider?.id ?? ""}
+              onChange={(e) => setDefaultProvider.mutate(e.target.value)}
+              className="rounded border border-(--color-border) bg-(--color-panel) px-2 py-1 font-mono text-xs outline-none focus:border-(--color-accent)"
+            >
+              {providers.data.map((p) => (
+                <option key={p.id} value={p.id}>
+                  {p.display_name || p.model_name}
+                </option>
+              ))}
+            </select>
+          </label>
+        ) : (
+          <Link to="/settings" className="text-xs text-(--color-accent)">
+            未配置模型 → 去设置
+          </Link>
+        )}
         <div className="ml-auto flex items-center gap-2">
           <button
             onClick={() => fileRef.current?.click()}

@@ -1,4 +1,4 @@
-/** 应用版本与更新检查（检查 GitHub Releases，静默失败，一天缓存）。 */
+/** 应用版本与更新检查（静态 update.json，避免 GitHub API 限流 403；一天缓存）。 */
 
 declare const __APP_VERSION__: string;
 
@@ -6,7 +6,15 @@ export const APP_VERSION: string = __APP_VERSION__;
 
 const CACHE_KEY = "mt-update-check";
 const CACHE_TTL_MS = 24 * 60 * 60 * 1000;
-const RELEASES_API = "https://api.github.com/repos/Lifree0925/mangatrans/releases/latest";
+const MANIFESTS = [
+  "https://raw.githubusercontent.com/Lifree0925/mangatrans/main/update.json",
+  "https://cdn.jsdelivr.net/gh/Lifree0925/mangatrans@main/update.json",
+];
+
+interface UpdateManifest {
+  version: string;
+  download_url: string;
+}
 
 export interface UpdateInfo {
   current: string;
@@ -16,38 +24,51 @@ export interface UpdateInfo {
   error?: string;
 }
 
-export async function checkUpdate(force = false): Promise<UpdateInfo> {
-  const current = APP_VERSION;
+async function fetchManifest(force: boolean): Promise<UpdateManifest> {
   if (!force) {
     const cached = localStorage.getItem(CACHE_KEY);
     if (cached) {
       try {
-        const { ts, info } = JSON.parse(cached);
-        if (Date.now() - ts < CACHE_TTL_MS) return info as UpdateInfo;
+        const { ts, manifest } = JSON.parse(cached);
+        if (Date.now() - ts < CACHE_TTL_MS && manifest) return manifest as UpdateManifest;
       } catch {
         /* 忽略坏缓存 */
       }
     }
   }
+  let lastError: unknown;
+  for (const url of MANIFESTS) {
+    try {
+      const ctrl = new AbortController();
+      const timer = setTimeout(() => ctrl.abort(), 8_000);
+      const res = await fetch(url, { signal: ctrl.signal, cache: "no-store" });
+      clearTimeout(timer);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = (await res.json()) as UpdateManifest;
+      if (!data.version) throw new Error("invalid manifest");
+      try {
+        localStorage.setItem(CACHE_KEY, JSON.stringify({ ts: Date.now(), manifest: data }));
+      } catch {
+        /* 存储不可用时忽略 */
+      }
+      return data;
+    } catch (err) {
+      lastError = err;
+    }
+  }
+  throw lastError instanceof Error ? lastError : new Error(String(lastError));
+}
 
+export async function checkUpdate(force = false): Promise<UpdateInfo> {
+  const current = APP_VERSION;
   const info: UpdateInfo = { current, latest: null, download_url: null, has_update: false };
   try {
-    const ctrl = new AbortController();
-    const timer = setTimeout(() => ctrl.abort(), 10_000);
-    const res = await fetch(RELEASES_API, { signal: ctrl.signal });
-    clearTimeout(timer);
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    const data = (await res.json()) as { tag_name: string; html_url: string };
-    info.latest = data.tag_name.replace(/^v/, "");
-    info.download_url = data.html_url;
+    const manifest = await fetchManifest(force);
+    info.latest = manifest.version.replace(/^v/, "");
+    info.download_url = manifest.download_url;
     info.has_update = compareVersions(info.latest, current) > 0;
   } catch (err) {
     info.error = err instanceof Error ? err.message : String(err);
-  }
-  try {
-    localStorage.setItem(CACHE_KEY, JSON.stringify({ ts: Date.now(), info }));
-  } catch {
-    /* 存储不可用时忽略 */
   }
   return info;
 }

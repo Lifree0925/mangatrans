@@ -43,7 +43,7 @@ export default function App() {
         </nav>
         <UpdateNotice />
         <div className="border-t border-(--color-border) px-4 py-3 font-mono text-xs text-(--color-muted)">
-          v{APP_VERSION} · 本地运行
+          v{APP_VERSION}
         </div>
       </aside>
       <main className="flex-1 overflow-hidden">

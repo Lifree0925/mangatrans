@@ -55,9 +55,22 @@ export default function ProjectsPage() {
       </div>
 
       <div className="flex-1 overflow-auto p-6">
-        {projects.isLoading && <p className="text-(--color-muted) text-sm">加载中…</p>}
+        {projects.isLoading && (
+          <p className="text-sm text-(--color-muted)">正在连接本地服务…（首次启动需等待后端初始化）</p>
+        )}
         {projects.error && (
-          <p className="text-sm text-red-400">后端连接失败：{String(projects.error)}</p>
+          <div className="rounded border border-(--color-border) bg-(--color-panel) p-4 text-sm">
+            <p className="text-red-400">本地服务尚未就绪：{String(projects.error)}</p>
+            <p className="mt-1 text-xs text-(--color-muted)">
+              若持续失败，请查看日志：%LOCALAPPDATA%\com.mangatrans.desktop\logs\sidecar.log
+            </p>
+            <button
+              onClick={() => projects.refetch()}
+              className="mt-2 rounded border border-(--color-border) px-3 py-1 text-xs hover:border-(--color-accent)"
+            >
+              重试连接
+            </button>
+          </div>
         )}
         <div className="grid grid-cols-2 gap-3">
           {projects.data?.map((p) => (
