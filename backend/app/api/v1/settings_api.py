@@ -35,11 +35,14 @@ def list_providers(db: Session = Depends(get_db)) -> list[dict]:
 
 @router.post("/settings/providers", status_code=201)
 def create_provider(payload: dict, db: Session = Depends(get_db)) -> dict:
+    """创建模型服务。API Key 只写入系统凭据库，不进入数据库。"""
+    import uuid
+
     cfg = ProviderConfig(
-        display_name=payload.get("display_name", ""),
+        display_name=payload.get("display_name") or payload["model_name"],
         base_url=payload["base_url"],
         model_name=payload["model_name"],
-        credential_ref=payload.get("credential_ref") or f"provider-{payload['model_name']}",
+        credential_ref=payload.get("credential_ref") or f"provider-{uuid.uuid4().hex[:12]}",
         api_mode=payload.get("api_mode", "openai-compatible"),
         timeout_seconds=payload.get("timeout_seconds", 120),
         max_retries=payload.get("max_retries", 2),
@@ -48,7 +51,10 @@ def create_provider(payload: dict, db: Session = Depends(get_db)) -> dict:
     db.add(cfg)
     db.commit()
     db.refresh(cfg)
-    return {"id": cfg.id, "config_version": cfg.config_version}
+    if payload.get("api_key"):
+        credentials.save_credential(cfg.credential_ref, payload["api_key"])
+        set_default_from_db(db)
+    return {"id": cfg.id, "config_version": cfg.config_version, "has_credential": bool(payload.get("api_key"))}
 
 
 @router.put("/settings/providers/{pid}/credential")
@@ -85,6 +91,9 @@ def patch_provider(pid: str, payload: dict, db: Session = Depends(get_db)) -> di
     for field in ("display_name", "base_url", "model_name", "timeout_seconds", "max_retries"):
         if field in payload:
             setattr(cfg, field, payload[field])
+    # API Key 永远不写数据库，只更新系统凭据库
+    if payload.get("api_key"):
+        credentials.save_credential(cfg.credential_ref, payload["api_key"])
     if "is_default" in payload and payload["is_default"]:
         for other in db.scalars(select(ProviderConfig).where(ProviderConfig.id != pid)):
             other.is_default = False
