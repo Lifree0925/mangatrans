@@ -54,13 +54,13 @@ async function fetchWithRetry(
 
 export async function api<T>(path: string, init?: RequestInit): Promise<T> {
   const { base, token } = await resolveConfig();
+  // FormData 必须由浏览器自动生成 multipart boundary，禁止强制 JSON content-type
+  const isFormData = typeof FormData !== "undefined" && init?.body instanceof FormData;
+  const headers: Record<string, string> = { "x-auth-token": token };
+  if (!isFormData) headers["content-type"] = "application/json";
   const res = await fetchWithRetry(`${base}/api/v1${path}`, {
     ...init,
-    headers: {
-      "content-type": "application/json",
-      "x-auth-token": token,
-      ...init?.headers,
-    },
+    headers: { ...headers, ...init?.headers },
   });
   if (!res.ok) {
     throw new ApiError(res.status, `${res.status}: ${await res.text()}`);

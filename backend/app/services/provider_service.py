@@ -12,7 +12,12 @@ from app.models.translation import ProviderConfig
 
 def build_provider(cfg: ProviderConfig) -> OpenAICompatProvider:
     key = credentials.get_credential(cfg.credential_ref) or ""
-    return OpenAICompatProvider(base_url=cfg.base_url, api_key=key, model=cfg.model_name)
+    return OpenAICompatProvider(
+        base_url=cfg.base_url,
+        api_key=key,
+        model=cfg.model_name,
+        max_retries=cfg.max_retries,
+    )
 
 
 def set_default_from_db(db: Session) -> LLMProvider:
@@ -28,6 +33,12 @@ def set_default_from_db(db: Session) -> LLMProvider:
         )
     if cfg is not None:
         set_provider(build_provider(cfg))
+    else:
+        # 无已验证模型：回落到开发用 FakeProvider（保证状态确定，
+        # 翻译任务仍会被 ensure_verified_provider 拦截）。
+        from app.llm.fake import FakeProvider
+
+        set_provider(FakeProvider())
     return get_provider()
 
 

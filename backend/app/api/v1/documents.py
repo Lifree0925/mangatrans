@@ -39,14 +39,18 @@ async def import_file(
     project = _get_project(db, project_id)
     if not file.filename:
         raise HTTPException(status_code=400, detail="缺少文件名")
+    # 文件名消毒：只取纯文件名，防路径穿越（../ 与盘符路径）
+    safe_name = file.filename.replace("\\", "/").split("/")[-1].strip()
+    if not safe_name or safe_name in (".", ".."):
+        raise HTTPException(status_code=400, detail="非法文件名")
     try:
         from app.core.config import settings
 
         tmp = settings.data_dir / "uploads"
         tmp.mkdir(parents=True, exist_ok=True)
-        raw = tmp / f"{file.filename}"
+        raw = tmp / safe_name
         raw.write_bytes(await file.read())
-        doc = importer.import_document(db, project, raw, file.filename)
+        doc = importer.import_document(db, project, raw, safe_name)
         return doc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

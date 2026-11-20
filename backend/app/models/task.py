@@ -28,6 +28,8 @@ class Task(Base):
     config_snapshot_json: Mapped[str] = mapped_column(Text, default="{}")
     last_checkpoint: Mapped[str | None] = mapped_column(String(32), nullable=True)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # 线程型任务的实际开始时间：用于僵尸检测与崩溃恢复（约束：started_at 超时回收）
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utcnow, onupdate=utcnow

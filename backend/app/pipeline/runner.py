@@ -40,11 +40,15 @@ def launch(task_id: str) -> None:
 
 
 async def _run(task_id: str) -> None:
+    from datetime import datetime, timezone
+
     with _sess_factory() as db:
         task = db.get(Task, task_id)
         if task is None:
             return
         task.status = "running"
+        task.started_at = datetime.now(timezone.utc)
+        task.error_message = None
         db.commit()
         payload = json.loads(task.config_snapshot_json or "{}")
 
@@ -89,11 +93,37 @@ async def _run(task_id: str) -> None:
             task = db.get(Task, task_id)
             task.status = "failed"
             task.error_message = f"{type(exc).__name__}: {exc}"[:2000]
+            task.started_at = None  # 无执行线程
             db.commit()
         return
 
     with _sess_factory() as db:
         task = db.get(Task, task_id)
         task.status = "completed"
+        task.started_at = None
         task.progress_json = json.dumps(result, ensure_ascii=False)
         db.commit()
+
+
+def recover_threaded_tasks(db) -> int:
+    """启动时回收：running 且无 task_items（线程型任务）→ failed，可手动重试。
+
+    task_items 型任务由常驻 Worker 继续执行，不受进程重启影响。
+    """
+    from sqlalchemy import select
+
+    from app.models.task import TaskItem
+
+    zombie_ids = db.scalars(
+        select(Task.id).where(
+            Task.status == "running",
+            ~Task.id.in_(select(TaskItem.task_id)),
+        )
+    ).all()
+    for tid in zombie_ids:
+        task = db.get(Task, tid)
+        task.status = "failed"
+        task.error_message = "应用中断：任务未完成，请点击重试。"
+        task.started_at = None
+    db.commit()
+    return len(zombie_ids)

@@ -1,5 +1,6 @@
-"""OpenAI 兼容 Provider：任意 Base URL + Key + Model。"""
+"""OpenAI 兼容 Provider：任意 Base URL + Key + Model + 自动重试。"""
 
+import asyncio
 import json
 import time
 import uuid
@@ -23,11 +24,13 @@ class OpenAICompatProvider:
         api_key: str,
         model: str,
         capabilities: ProviderCapabilities | None = None,
+        max_retries: int = 2,
     ):
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key
         self.model = model
         self.capabilities = capabilities or ProviderCapabilities()
+        self.max_retries = max(0, int(max_retries))
 
     async def chat(
         self,
@@ -64,34 +67,64 @@ class OpenAICompatProvider:
         # 本地模型（Ollama / vLLM 等）通常无需 API Key
         if self.api_key:
             headers["Authorization"] = f"Bearer {self.api_key}"
+
+        # 自动重试：网络抖动/超时/限流/5xx 按 max_retries 指数退避。
+        # 长剧本约 60 个窗口，任一窗口一次瞬时故障都不应中断整本翻译。
         t0 = time.perf_counter()
-        try:
-            async with httpx.AsyncClient(timeout=timeout) as client:
-                r = await client.post(
-                    f"{self.base_url}/chat/completions", json=body, headers=headers
-                )
-                # 本地模型可能不支持 response_format：降级为纯 Prompt 约束后重试一次
-                if r.status_code == 400 and "response_format" in body:
-                    body.pop("response_format", None)
+        last_err: LLMError | None = None
+        for attempt in range(self.max_retries + 1):
+            last_err = None
+            try:
+                async with httpx.AsyncClient(timeout=timeout) as client:
                     r = await client.post(
                         f"{self.base_url}/chat/completions", json=body, headers=headers
                     )
-        except httpx.TimeoutException as exc:
-            raise LLMError("请求超时", retryable=True, code="timeout") from exc
-        except httpx.HTTPError as exc:
-            raise LLMError(f"网络错误: {exc}", retryable=True, code="network") from exc
+            except httpx.TimeoutException as exc:
+                last_err = LLMError("请求超时", retryable=True, code="timeout")
+            except httpx.HTTPError as exc:
+                last_err = LLMError(f"网络错误: {exc}", retryable=True, code="network")
+
+            if last_err is not None:
+                if attempt >= self.max_retries:
+                    raise last_err
+                await asyncio.sleep(2 * (2**attempt))
+                continue
+
+            # 本地模型可能不支持 response_format：降级为纯 Prompt 约束后重试一次
+            if r.status_code == 400 and "response_format" in body:
+                body.pop("response_format", None)
+                r = await client.post(
+                    f"{self.base_url}/chat/completions", json=body, headers=headers
+                )
+
+            if r.status_code in (401, 403):
+                raise LLMError("认证失败", retryable=False, code="auth")
+            if r.status_code == 404:
+                raise LLMError("模型不存在", retryable=False, code="model_not_found")
+            if r.status_code == 400:
+                # 请求本身有误（含降级后仍被拒）：重试无意义
+                raise LLMError(f"请求被拒绝 {r.status_code}", retryable=False, code="bad_request")
+            if r.status_code == 429:
+                last_err = LLMError("限流", retryable=True, code="rate_limit")
+            elif r.status_code >= 500:
+                last_err = LLMError(f"服务端错误 {r.status_code}", retryable=True, code="server")
+            else:
+                last_err = None
+
+            if last_err is None:
+                break
+            if attempt >= self.max_retries:
+                raise last_err
+            await asyncio.sleep(2 * (2**attempt))
 
         latency = (time.perf_counter() - t0) * 1000
-        if r.status_code in (401, 403):
-            raise LLMError("认证失败", retryable=False, code="auth")
-        if r.status_code == 404:
-            raise LLMError("模型不存在", retryable=False, code="model_not_found")
-        if r.status_code == 429:
-            raise LLMError("限流", retryable=True, code="rate_limit")
-        if r.status_code >= 400:
-            raise LLMError(f"服务端错误 {r.status_code}", retryable=True, code="server")
-
-        data = r.json()
+        try:
+            data = r.json()
+        except ValueError as exc:
+            # 网关/代理可能返回非 JSON 错误页：按瞬时故障重试语义抛出
+            raise LLMError(
+                f"响应不是有效 JSON: {exc}", retryable=True, code="bad_json"
+            ) from exc
         choice = data.get("choices", [{}])[0]
         message = choice.get("message", {})
         return LLMResponse(

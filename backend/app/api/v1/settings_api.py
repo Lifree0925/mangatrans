@@ -8,8 +8,9 @@ from sqlalchemy.orm import Session
 
 from app.core import credentials
 from app.core.database import get_db
-from app.models.task import Task
+from app.models.task import Task, TaskItem
 from app.models.translation import ProviderConfig
+from app.pipeline.runner import launch as launch_task
 from app.services.provider_service import set_default_from_db, test_provider
 
 router = APIRouter(tags=["settings"])
@@ -158,9 +159,27 @@ def resume_task(task_id: str, db: Session = Depends(get_db)) -> dict:
     task = db.get(Task, task_id)
     if task is None:
         raise HTTPException(status_code=404, detail="task not found")
-    if task.status in ("paused", "failed"):
-        task.status = "running"
-        db.commit()
+    has_items = db.scalar(
+        select(TaskItem.id).where(TaskItem.task_id == task_id).limit(1)
+    )
+    if has_items is None:
+        # 线程型任务（Express/试译/知识/场景卡）：必须真正重新调度执行
+        from datetime import datetime, timedelta, timezone
+
+        if task.status == "running" and task.started_at is not None:
+            # 仍在执行（30 分钟内）：无需重复调度
+            if datetime.now(timezone.utc) - task.started_at < timedelta(minutes=30):
+                return {"id": task.id, "status": task.status}
+        if task.status == "completed":
+            return {"id": task.id, "status": task.status}
+    else:
+        if task.status not in ("paused", "failed"):
+            return {"id": task.id, "status": task.status}
+    task.status = "running"
+    db.commit()
+    if has_items is None:
+        # 仅改状态不会重新执行，必须重新调度
+        launch_task(task_id)
     return {"id": task.id, "status": task.status}
 
 
@@ -169,15 +188,26 @@ def retry_task(task_id: str, db: Session = Depends(get_db)) -> dict:
     task = db.get(Task, task_id)
     if task is None:
         raise HTTPException(status_code=404, detail="task not found")
+    if task.status == "completed":
+        return {"id": task.id, "status": task.status}
     from sqlalchemy import update
 
-    db.execute(
-        update(TaskItem)
+    failed_items = db.scalar(
+        select(TaskItem.id)
         .where(TaskItem.task_id == task_id, TaskItem.status == "failed")
-        .values(status="pending")
+        .limit(1)
     )
+    if failed_items is not None:
+        db.execute(
+            update(TaskItem)
+            .where(TaskItem.task_id == task_id, TaskItem.status == "failed")
+            .values(status="pending")
+        )
     task.status = "running"
     db.commit()
+    if failed_items is None:
+        # 线程型任务：重新调度执行
+        launch_task(task_id)
     return {"id": task.id, "status": task.status}
 
 

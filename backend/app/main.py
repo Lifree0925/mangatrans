@@ -54,10 +54,23 @@ def run_migrations_if_needed() -> None:
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
-    """启动迁移与持久 Worker；退出时取消 Worker。"""
+    """启动迁移、恢复已验证模型到 registry、启动持久 Worker；退出时取消 Worker。"""
     from app.pipeline.worker import worker_loop
 
     run_migrations_if_needed()
+
+    # 重启后必须从数据库恢复已验证模型到内存 registry，
+    # 否则翻译任务会落到开发用 FakeProvider（返回空对象导致失败）。
+    import app.core.database as dbmod
+
+    from app.pipeline.runner import recover_threaded_tasks
+    from app.services.provider_service import set_default_from_db
+
+    with dbmod.SessionLocal() as db:
+        set_default_from_db(db)
+        # 崩溃恢复：把无执行线程的 running 线程型任务标记失败（可手动重试）
+        recover_threaded_tasks(db)
+
     worker_task = asyncio.create_task(worker_loop())
     try:
         yield

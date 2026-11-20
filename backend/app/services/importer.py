@@ -50,7 +50,8 @@ def import_document(
         or 0
     ) + 1
 
-    saved_raw = doc_dir / f"v{next_version}_{filename}"
+    safe_filename = filename.replace("\\", "/").split("/")[-1] or f"doc_{next_version}"
+    saved_raw = doc_dir / f"v{next_version}_{safe_filename}"
     saved_raw.write_bytes(raw_path.read_bytes())
 
     text = _extract_text(saved_raw, fmt)
