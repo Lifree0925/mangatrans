@@ -23,14 +23,15 @@ services:
     image: node:22-slim
     working_dir: /app
     environment:
-      VITE_API_BASE: http://127.0.0.1:8765
+      VITE_API_BASE: ""
       VITE_AUTH_TOKEN: dev-token-local
+      VITE_PROXY_TARGET: http://backend:8765
       npm_config_registry: https://registry.npmmirror.com
     volumes:
       - ./frontend:/app
       - mt_frontend_modules:/app/node_modules
     ports:
-      - "127.0.0.1:5173:5173"
+      - "0.0.0.0:5173:5173"
     command: sh -c "corepack enable && pnpm install --prefer-offline && pnpm dev --host 0.0.0.0"
 
 volumes:

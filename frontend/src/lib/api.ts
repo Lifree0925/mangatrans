@@ -17,9 +17,9 @@ async function resolveConfig(): Promise<BackendConfig> {
     _config = { base: `http://127.0.0.1:${port}`, token };
     return _config;
   }
-  // 浏览器开发环境
+  // 浏览器环境：默认同源相对路径（经 Vite 代理），可选 VITE_API_BASE 覆盖
   _config = {
-    base: import.meta.env.VITE_API_BASE ?? "http://127.0.0.1:8765",
+    base: import.meta.env.VITE_API_BASE ?? "",
     token: import.meta.env.VITE_AUTH_TOKEN ?? "dev-token-local",
   };
   return _config;
