@@ -95,11 +95,17 @@ class ParseResult:
     report: ParseReport
 
 
+_PUNCT_ONLY_RE = re.compile(r"^[。．.！!？?…]{1,4}$")
+
+
 def _classify_line(line: str) -> tuple[str, str, str | None]:
     """返回 (类型, 规则ID, speaker)。"""
     stripped = line.strip()
     if not stripped:
         return "blank", "", None
+    if _PUNCT_ONLY_RE.match(stripped):
+        # 孤立标点行（常见于标题/段落排版）：并入上一片段，不独立成段
+        return "punct_only", "punct_only", None
     if _CHAPTER_RE.match(stripped):
         return "heading", RULE_CHAPTER, None
     if _SCENE_BRACKET_RE.match(stripped):
@@ -182,6 +188,17 @@ def parse_script(text: str) -> ParseResult:
 
         if ltype == "blank":
             append_blank(pos, pos + len(raw_line))
+            pos += len(raw_line)
+            continue
+
+        if ltype == "punct_only":
+            # 并入上一片段（保持偏移与原文还原）
+            if segments:
+                last = segments[-1]
+                last.end = pos + len(raw_line)
+                last.text += raw_line
+            else:
+                buf += raw_line
             pos += len(raw_line)
             continue
 

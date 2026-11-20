@@ -76,3 +76,16 @@ def test_chapter_title_with_md_prefix() -> None:
     r = parse_script("# 第1回 宴桃园豪杰三结义　斩黄巾英雄首立功\n话说天下大势。\n# 第2章 重逢\n林晓：你好。")
     assert r.report.chapter_count == 2
     assert sum(1 for s in r.segments if s.type == "heading") >= 2
+
+
+def test_stray_punctuation_merged_into_previous_segment() -> None:
+    """标题后的孤立句号行并入标题，不产生独立片段。"""
+    r = parse_script("# 第1回 桃园结义\n。\n话说天下大势。")
+    types = [s.type for s in r.segments]
+    assert "punct_only" not in types
+    first = r.segments[0]
+    assert first.type == "heading"
+    assert first.text == "# 第1回 桃园结义\n。\n"
+    # 覆盖校验：拼接可还原原文
+    restored = "".join(s.text for s in r.segments)
+    assert restored == "# 第1回 桃园结义\n。\n话说天下大势。"
