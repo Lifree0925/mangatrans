@@ -6,10 +6,10 @@ import type { Project, TaskInfo } from "../lib/types";
 
 const statusColor: Record<string, string> = {
   queued: "text-(--color-muted)",
-  running: "text-(--color-accent)",
-  completed: "text-emerald-400",
-  failed: "text-red-400",
-  paused: "text-yellow-400",
+  running: "text-(--color-text)",
+  completed: "text-emerald-600",
+  failed: "text-red-600",
+  paused: "text-amber-600",
 };
 
 export default function TasksPage() {
@@ -37,7 +37,7 @@ export default function TasksPage() {
         )}
         <div className="space-y-2">
           {tasks.data?.map((t) => (
-            <div key={t.id} className="rounded border border-(--color-border) bg-(--color-panel) px-4 py-3">
+            <div key={t.id} className="rounded-xl border border-(--color-border) bg-(--color-panel) px-4 py-3">
               <div className="flex items-center gap-3">
                 <span className={`text-sm font-medium ${statusColor[t.status] ?? ""}`}>
                   {t.task_type} · {t.status}
@@ -49,7 +49,7 @@ export default function TasksPage() {
                 )}
               </div>
               {t.error_message && (
-                <p className="mt-1 break-all text-xs text-red-400">{t.error_message}</p>
+                <p className="mt-1 break-all text-xs text-red-600">{t.error_message}</p>
               )}
             </div>
           ))}

@@ -8,10 +8,10 @@ import { api } from "../lib/api";
 import type { Chapter, ExportResult, ParseReport, Project, ProviderInfo, QAIssueInfo, Scene, Segment, TaskInfo } from "../lib/types";
 
 const typeColor: Record<string, string> = {
-  heading: "text-(--color-accent)",
-  dialogue: "text-emerald-400",
+  heading: "text-(--color-text)",
+  dialogue: "text-emerald-600",
   narrative: "text-(--color-text)",
-  other: "text-yellow-400",
+  other: "text-amber-600",
 };
 
 export default function ProjectPage() {
@@ -128,7 +128,7 @@ export default function ProjectPage() {
             <select
               value={defaultProvider?.id ?? ""}
               onChange={(e) => setDefaultProvider.mutate(e.target.value)}
-              className="rounded border border-(--color-border) bg-(--color-panel) px-2 py-1 font-mono text-xs outline-none focus:border-(--color-accent)"
+              className="rounded-xl border border-(--color-border) bg-(--color-panel) px-2 py-1 font-mono text-xs outline-none focus:border-(--color-accent)"
             >
               {providers.data.map((p) => (
                 <option key={p.id} value={p.id}>
@@ -138,14 +138,14 @@ export default function ProjectPage() {
             </select>
           </label>
         ) : (
-          <Link to="/settings" className="text-xs text-(--color-accent)">
+          <Link to="/settings" className="text-xs text-(--color-text)">
             未配置模型 → 去设置
           </Link>
         )}
         <div className="ml-auto flex items-center gap-2">
           <button
             onClick={() => fileRef.current?.click()}
-            className="flex items-center gap-1.5 rounded border border-(--color-border) px-3 py-1.5 text-sm hover:border-(--color-accent)"
+            className="flex items-center gap-1.5 rounded-lg border border-(--color-border) px-3 py-1.5 text-sm hover:border-(--color-accent)"
           >
             <FileUp size={15} /> 导入
           </button>
@@ -159,14 +159,14 @@ export default function ProjectPage() {
           <button
             onClick={() => parse.mutate()}
             disabled={parse.isPending}
-            className="flex items-center gap-1.5 rounded border border-(--color-border) px-3 py-1.5 text-sm hover:border-(--color-accent) disabled:opacity-50"
+            className="flex items-center gap-1.5 rounded-lg border border-(--color-border) px-3 py-1.5 text-sm hover:border-(--color-accent) disabled:opacity-50"
           >
             <ScanText size={15} /> {parse.isPending ? "解析中…" : "解析"}
           </button>
           <button
             onClick={() => express.mutate()}
             disabled={express.isPending}
-            className="flex items-center gap-1.5 rounded bg-(--color-accent) px-3 py-1.5 text-sm text-white hover:bg-(--color-accent-hover) disabled:opacity-50"
+            className="flex items-center gap-1.5 rounded-lg bg-(--color-accent) px-3 py-1.5 text-sm text-white hover:bg-(--color-accent-hover) disabled:opacity-50"
           >
             <Zap size={15} />
             {express.isPending
@@ -178,13 +178,13 @@ export default function ProjectPage() {
           <button
             onClick={() => downloadExport(true)}
             disabled={exporting}
-            className="flex items-center gap-1.5 rounded border border-(--color-border) px-3 py-1.5 text-sm hover:border-(--color-accent) disabled:opacity-50"
+            className="flex items-center gap-1.5 rounded-lg border border-(--color-border) px-3 py-1.5 text-sm hover:border-(--color-accent) disabled:opacity-50"
           >
             <Download size={15} /> 导出
           </button>
           <button
             onClick={() => setShowQA((v) => !v)}
-            className="flex items-center gap-1.5 rounded border border-(--color-border) px-3 py-1.5 text-sm hover:border-(--color-accent)"
+            className="flex items-center gap-1.5 rounded-lg border border-(--color-border) px-3 py-1.5 text-sm hover:border-(--color-accent)"
           >
             <ShieldCheck size={15} /> QA
           </button>
@@ -197,7 +197,7 @@ export default function ProjectPage() {
           {(expressTask.data.progress as { done?: number; total?: number }).total != null &&
             `（${(expressTask.data.progress as { done?: number }).done ?? 0}/${(expressTask.data.progress as { total?: number }).total ?? 0}）`}
           {expressTask.data.error_message && (
-            <span className="text-red-400"> · {expressTask.data.error_message}</span>
+            <span className="text-red-600"> · {expressTask.data.error_message}</span>
           )}
         </div>
       )}
@@ -206,7 +206,7 @@ export default function ProjectPage() {
         <aside className="w-56 shrink-0 overflow-auto border-r border-(--color-border) p-3 text-sm">
           {chapters.data?.map((ch) => (
             <div key={ch.id} className="mb-2">
-              <p className="font-medium text-(--color-accent)">
+              <p className="font-medium text-(--color-text)">
                 {ch.title || `第 ${ch.chapter_no} 章`}
               </p>
               {scenes.data
@@ -247,7 +247,7 @@ export default function ProjectPage() {
             </div>
             {report.data ? (
               <>
-                <p className={report.data.coverage_ok ? "text-emerald-400" : "text-red-400"}>
+                <p className={report.data.coverage_ok ? "text-emerald-600" : "text-red-600"}>
                   覆盖：{report.data.covered_chars}/{report.data.total_chars}
                   {report.data.coverage_ok ? " ✓" : " ✗"}
                 </p>
@@ -258,7 +258,7 @@ export default function ProjectPage() {
                 </p>
                 {report.data.anomalies.length > 0 && (
                   <div className="mt-2">
-                    <p className="text-yellow-400">异常 {report.data.anomalies.length} 项</p>
+                    <p className="text-amber-600">异常 {report.data.anomalies.length} 项</p>
                     {report.data.anomalies.slice(0, 20).map((a, i) => (
                       <p key={i} className="mt-1 break-all text-(--color-muted)">{a}</p>
                     ))}
@@ -279,9 +279,9 @@ export default function ProjectPage() {
             </div>
             {qaIssues.data?.length === 0 && <p className="text-(--color-muted)">无问题记录</p>}
             {qaIssues.data?.map((i) => (
-              <div key={i.id} className="mb-2 rounded border border-(--color-border) bg-(--color-panel) p-2">
+              <div key={i.id} className="mb-2 rounded-xl border border-(--color-border) bg-(--color-panel) p-2">
                 <p className="font-medium">
-                  <span className={i.severity === "high" || i.severity === "critical" ? "text-red-400" : "text-yellow-400"}>
+                  <span className={i.severity === "high" || i.severity === "critical" ? "text-red-600" : "text-amber-600"}>
                     [{i.severity}]
                   </span>{" "}
                   {i.issue_type}

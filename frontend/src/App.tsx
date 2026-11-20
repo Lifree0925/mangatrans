@@ -1,7 +1,15 @@
-/** 应用外壳：侧边栏布局（Claude Code 风格暗色）。 */
+/** 应用外壳：可收起的侧边栏（ChatGPT 风格浅色）。 */
 
+import { useEffect, useState } from "react";
 import { NavLink, Route, Routes } from "react-router-dom";
-import { Clapperboard, FolderOpen, ListChecks, Settings } from "lucide-react";
+import {
+  Clapperboard,
+  FolderOpen,
+  ListChecks,
+  PanelLeftClose,
+  PanelLeftOpen,
+  Settings,
+} from "lucide-react";
 import UpdateNotice from "./components/UpdateNotice";
 import { APP_VERSION } from "./lib/version";
 import ProjectsPage from "./pages/ProjectsPage";
@@ -15,13 +23,42 @@ const nav = [
   { to: "/settings", label: "设置", icon: Settings },
 ];
 
+const COLLAPSE_KEY = "mt-sidebar-collapsed";
+
 export default function App() {
+  const [collapsed, setCollapsed] = useState(
+    () => localStorage.getItem(COLLAPSE_KEY) === "1"
+  );
+
+  useEffect(() => {
+    localStorage.setItem(COLLAPSE_KEY, collapsed ? "1" : "0");
+  }, [collapsed]);
+
   return (
     <div className="flex h-full">
-      <aside className="flex w-52 shrink-0 flex-col border-r border-(--color-border) bg-(--color-panel)">
-        <div className="flex items-center gap-2 border-b border-(--color-border) px-4 py-4">
-          <Clapperboard size={18} className="text-(--color-accent)" />
-          <span className="font-semibold">MangaTrans</span>
+      <aside
+        className={`flex ${collapsed ? "w-14" : "w-60"} shrink-0 flex-col border-r border-(--color-border) bg-(--color-panel) transition-[width] duration-200`}
+      >
+        <div
+          className={
+            collapsed
+              ? "flex flex-col items-center gap-2 py-4"
+              : "flex items-center justify-between px-5 py-4"
+          }
+        >
+          {!collapsed && (
+            <div className="flex items-center gap-2">
+              <Clapperboard size={20} className="text-(--color-text)" />
+              <span className="text-[15px] font-semibold tracking-tight">MangaTrans</span>
+            </div>
+          )}
+          <button
+            onClick={() => setCollapsed((v) => !v)}
+            title={collapsed ? "展开侧边栏" : "收起侧边栏"}
+            className="rounded-lg p-1.5 text-(--color-muted) hover:bg-(--color-panel2) hover:text-(--color-text)"
+          >
+            {collapsed ? <PanelLeftOpen size={18} /> : <PanelLeftClose size={18} />}
+          </button>
         </div>
         <nav className="flex-1 p-2">
           {nav.map(({ to, label, icon: Icon, end }) => (
@@ -29,22 +66,23 @@ export default function App() {
               key={to}
               to={to}
               end={end}
+              title={collapsed ? label : undefined}
               className={({ isActive }) =>
-                `flex items-center gap-2 rounded px-3 py-2 text-sm ${
+                `mb-1 flex items-center ${collapsed ? "justify-center" : "gap-2"} rounded-lg px-3 py-2 text-sm ${
                   isActive
-                    ? "bg-(--color-panel2) text-(--color-accent)"
+                    ? "bg-(--color-panel2) font-medium text-(--color-text)"
                     : "text-(--color-muted) hover:bg-(--color-panel2) hover:text-(--color-text)"
                 }`
               }
             >
-              <Icon size={16} /> {label}
+              <Icon size={18} /> {!collapsed && label}
             </NavLink>
           ))}
         </nav>
-        <UpdateNotice />
-        <div className="border-t border-(--color-border) px-4 py-3 font-mono text-xs text-(--color-muted)">
-          v{APP_VERSION}
-        </div>
+        {!collapsed && <UpdateNotice />}
+        {!collapsed && (
+          <div className="px-5 py-4 text-xs text-(--color-muted)">v{APP_VERSION}</div>
+        )}
       </aside>
       <main className="flex-1 overflow-hidden">
         <Routes>
