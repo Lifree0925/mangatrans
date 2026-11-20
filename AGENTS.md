@@ -66,7 +66,8 @@ AI 漫剧剧本翻译系统（Windows 桌面版）：本地优先工作台，将
 
 ## 当前进度
 
-- Sprint 1 ✅：桌面骨架、项目 CRUD、导入解析后端骨架、前端项目列表。
-- Sprint 1 ✅ / Sprint 2 ✅（解析器+导入 API+前端工作台）/ Sprint 3 ✅（知识提取、场景卡、任务骨架，FakeProvider 测试）。
-- 进行中：Sprint 4 模型配置/风格基线/两段式试译 → Sprint 5 翻译任务与恢复 → Sprint 6 QA/一键直出/导出/发布。
-- Git：按用户要求，全部 Sprint 完成后统一提交，中途不提交。
+- Sprint 1–6 ✅ 完成；后端 24 个测试全过（FakeProvider 全链路），前端 tsc 通过。
+- 已发布 v0.1.1：签名版 NSIS 安装包（自签名证书，Secrets：`WINDOWS_SIGN_PFX_BASE64` / `WINDOWS_SIGN_PASSWORD`）。
+- 软件更新：启动检查 GitHub Releases + 侧栏提示 + 设置页手动检查（缓存 24h）。
+- 开发文档仅存本地 `docs/`（.gitignore 排除，不入仓库）。
+- 签名注意：自签名证书不校验公共信任链，只校验 Authenticode 签名者；换正式证书只需替换 Secrets。
