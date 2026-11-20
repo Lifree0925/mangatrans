@@ -71,6 +71,9 @@ export interface ProviderInfo {
   has_credential: boolean;
   masked_key: string | null;
   is_default: boolean;
+  is_verified: boolean;
+  last_tested_at: string | null;
+  last_test_error: string | null;
   config_version: number;
 }
 

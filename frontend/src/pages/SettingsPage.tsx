@@ -195,7 +195,7 @@ export default function SettingsPage() {
 
   const create = useMutation({
     mutationFn: () =>
-      api("/settings/providers", {
+      api<{ id: string }>("/settings/providers", {
         method: "POST",
         body: JSON.stringify({
           model_name: model.trim(),
@@ -204,12 +204,39 @@ export default function SettingsPage() {
           is_default: (providers.data?.length ?? 0) === 0,
         }),
       }),
-    onSuccess: () => {
+    onSuccess: async (data) => {
       setModel("");
       setBaseUrl("");
       setApiKey("");
       qc.invalidateQueries({ queryKey: ["providers"] });
+      // 保存后立即做连通性测试：通过才可用于翻译
+      try {
+        const r = await api<{ ok: boolean; detail?: string }>(
+          `/settings/providers/${data.id}/test`,
+          { method: "POST" }
+        );
+        alert(
+          r.ok
+            ? "模型连接成功，已启用"
+            : `模型不可用：${r.detail || "请检查模型名、Base URL 与 API Key"}`
+        );
+      } catch (err) {
+        alert(`模型测试失败：${String(err)}`);
+      }
+      qc.invalidateQueries({ queryKey: ["providers"] });
     },
+  });
+
+  const testOne = useMutation({
+    mutationFn: (pid: string) =>
+      api<{ ok: boolean; detail?: string }>(`/settings/providers/${pid}/test`, {
+        method: "POST",
+      }),
+    onSuccess: (r) => {
+      alert(r.ok ? "连接成功，模型已启用" : `模型不可用：${r.detail || "未知错误"}`);
+      qc.invalidateQueries({ queryKey: ["providers"] });
+    },
+    onError: (err) => alert(`测试失败：${String(err)}`),
   });
 
   const saveKey = useMutation({
@@ -337,14 +364,34 @@ export default function SettingsPage() {
                         已配置 Key
                       </span>
                     )}
+                    <span
+                      className={`rounded-md px-1.5 py-0.5 text-xs ${
+                        p.is_verified ? "bg-(--color-panel2) text-emerald-600" : "text-amber-600"
+                      }`}
+                    >
+                      {p.is_verified ? "已验证可用" : "未验证"}
+                    </span>
                     <button
-                      onClick={() => remove.mutate(p.id)}
-                      className="ml-auto rounded-lg p-1 text-(--color-muted) hover:bg-(--color-panel2) hover:text-red-600"
+                      onClick={() => testOne.mutate(p.id)}
+                      disabled={testOne.isPending}
+                      className="ml-auto rounded-lg border border-(--color-border) bg-(--color-bg) px-2 py-1 text-xs hover:bg-(--color-panel2) disabled:opacity-40"
+                    >
+                      {testOne.isPending ? "测试中…" : "测试连接"}
+                    </button>
+                    <button
+                      onClick={() => {
+                        if (!confirm(`删除模型服务「${p.model_name}」？`)) return;
+                        remove.mutate(p.id);
+                      }}
+                      className="rounded-lg p-1 text-(--color-muted) hover:bg-(--color-panel2) hover:text-red-600"
                     >
                       <Trash2 size={14} />
                     </button>
                   </div>
                   <p className="mt-0.5 font-mono text-xs text-(--color-muted)">{p.base_url}</p>
+                  {!p.is_verified && p.last_test_error && (
+                    <p className="mt-1 break-all text-xs text-amber-600">{p.last_test_error}</p>
+                  )}
                   <div className="mt-2 flex items-center gap-2">
                     {editingKeyFor === p.id ? (
                       <>

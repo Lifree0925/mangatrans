@@ -10,6 +10,24 @@ from app.llm.registry import set_provider
 from app.models.task import Task
 
 
+def _add_verified_provider() -> None:
+    """测试用：登记一个已验证的模型（翻译任务前置检查需要）。"""
+    import app.core.database as dbmod
+    from app.models.translation import ProviderConfig
+
+    with dbmod.SessionLocal() as db:
+        db.add(
+            ProviderConfig(
+                model_name="fake-model",
+                base_url="http://fake",
+                credential_ref="test-ref",
+                is_verified=True,
+                is_default=True,
+            )
+        )
+        db.commit()
+
+
 def _setup(client: TestClient) -> str:
     pid = client.post("/api/v1/projects", json={"name": "试译测试"}).json()["id"]
     script = """第一集 初遇
@@ -28,6 +46,7 @@ def _setup(client: TestClient) -> str:
     )
     assert r.status_code == 201
     assert client.post(f"/api/v1/projects/{pid}/parse").status_code == 200
+    _add_verified_provider()
     return pid
 
 

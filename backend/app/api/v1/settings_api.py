@@ -39,6 +39,9 @@ def list_providers(db: Session = Depends(get_db)) -> list[dict]:
                 "has_credential": bool(secret),
                 "masked_key": _mask(secret),
                 "is_default": r.is_default,
+                "is_verified": r.is_verified,
+                "last_tested_at": r.last_tested_at.isoformat() if r.last_tested_at else None,
+                "last_test_error": r.last_test_error,
                 "config_version": r.config_version,
             }
         )
@@ -89,10 +92,19 @@ def del_credential(pid: str, db: Session = Depends(get_db)) -> dict:
 
 @router.post("/settings/providers/{pid}/test")
 async def test_provider_conn(pid: str, db: Session = Depends(get_db)) -> dict:
+    """连通性测试并持久化结果：只有通过测试的模型可用于翻译。"""
+    from datetime import datetime, timezone
+
     cfg = db.get(ProviderConfig, pid)
     if cfg is None:
         raise HTTPException(status_code=404, detail="provider not found")
-    return await test_provider(cfg)
+    result = await test_provider(cfg)
+    cfg.is_verified = bool(result.get("ok"))
+    cfg.last_tested_at = datetime.now(timezone.utc)
+    cfg.last_test_error = None if result.get("ok") else str(result.get("detail", ""))[:500]
+    db.commit()
+    set_default_from_db(db)
+    return result
 
 
 @router.patch("/settings/providers/{pid}")

@@ -20,6 +20,24 @@ from app.pipeline.worker import recover_stale_items, run_once
 from app.services.window_planner import build_windows
 
 
+def _add_verified_provider() -> None:
+    """测试用：登记一个已验证的模型（翻译任务前置检查需要）。"""
+    import app.core.database as dbmod
+    from app.models.translation import ProviderConfig
+
+    with dbmod.SessionLocal() as db:
+        db.add(
+            ProviderConfig(
+                model_name="fake-model",
+                base_url="http://fake",
+                credential_ref="test-ref",
+                is_verified=True,
+                is_default=True,
+            )
+        )
+        db.commit()
+
+
 def _mk_seg(n, chapter_id="c1", text="你好。\n"):
     return SourceSegment(
         id=f"SEG{n:04d}", project_id="p1", source_document_id="d1",
@@ -90,6 +108,7 @@ def _setup_script(client: TestClient) -> str:
     )
     assert r.status_code == 201
     assert client.post(f"/api/v1/projects/{pid}/parse").status_code == 200
+    _add_verified_provider()
     return pid
 
 

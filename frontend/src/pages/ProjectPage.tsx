@@ -31,7 +31,8 @@ export default function ProjectPage() {
     queryKey: ["providers"],
     queryFn: () => api<ProviderInfo[]>("/settings/providers"),
   });
-  const defaultProvider = providers.data?.find((p) => p.is_default) ?? providers.data?.[0];
+  const availableProviders = providers.data?.filter((p) => p.is_verified) ?? [];
+  const defaultProvider = availableProviders.find((p) => p.is_default) ?? availableProviders[0];
   const setDefaultProvider = useMutation({
     mutationFn: (pid: string) =>
       api(`/settings/providers/${pid}`, {

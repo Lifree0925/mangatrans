@@ -50,6 +50,10 @@ class ProviderConfig(Base):
     timeout_seconds: Mapped[int] = mapped_column(Integer, default=120)
     max_retries: Mapped[int] = mapped_column(Integer, default=2)
     is_default: Mapped[bool] = mapped_column(Boolean, default=False)
+    # 连通性测试结果：只有验证通过的模型才能用于翻译
+    is_verified: Mapped[bool] = mapped_column(Boolean, default=False)
+    last_tested_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_test_error: Mapped[str | None] = mapped_column(Text, nullable=True)
     config_version: Mapped[int] = mapped_column(Integer, default=1)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(

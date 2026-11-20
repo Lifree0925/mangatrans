@@ -36,6 +36,9 @@ def start_express(project_id: str, payload: dict, db: Session = Depends(get_db))
     """一键直出：导入后串联全部环节，全程无人工干预。"""
     project = _project(db, project_id)
     doc = _active_doc(db, project)
+    from app.services.provider_service import ensure_verified_provider
+
+    ensure_verified_provider(db)
     task = create_task(
         db,
         project_id,
