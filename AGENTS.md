@@ -58,7 +58,8 @@ AI 漫剧剧本翻译系统（Windows 桌面版）：本地优先工作台，将
 7. **FastAPI 中间件顺序**：后注册的先执行；`auth_guard` 必须放行 `OPTIONS` 预检（预检不带自定义头）。
 8. **解析器约定**：`source_text` 保留原始行（含换行），偏移为 Unicode 码点；片段拼接必须能完整还原原文。
 9. **网络**：直连 GitHub/rustup 会超时，走本机 Clash 代理 `http://127.0.0.1:7890`（curl/cargo 用 `https_proxy`）。
-10. **Windows CI 构建**：`tauri.conf.json` 不得配置 `beforeBuildCommand`（tauri CLI 在仓库根执行它，仓库根无 package.json 会失败）；前端由 workflow 显式构建。CLI 用前端 `@tauri-apps/cli`（`../frontend/node_modules/.bin/tauri build`），不要 `cargo install tauri-cli`。bundle.targets 只打 `["nsis"]`。identifier 避免 `.app` 结尾。
+10. **PyInstaller sidecar**：必须用 **one-file**（one-folder 的 `_internal` 目录无法随 Tauri `externalBin` 分发，安装后报 "Failed to load Python DLL"）；`app/main.py` 必须保留 `if __name__ == "__main__": uvicorn.run(...)` 入口，否则打包后立即静默退出。
+11. **Windows CI 构建**：`tauri.conf.json` 不得配置 `beforeBuildCommand`（tauri CLI 在仓库根执行它，仓库根无 package.json 会失败）；前端由 workflow 显式构建。CLI 用前端 `@tauri-apps/cli`（`../frontend/node_modules/.bin/tauri build`），不要 `cargo install tauri-cli`。bundle.targets 只打 `["nsis"]`。identifier 避免 `.app` 结尾。
 
 ## 数据模型速查
 
@@ -67,7 +68,7 @@ AI 漫剧剧本翻译系统（Windows 桌面版）：本地优先工作台，将
 ## 当前进度
 
 - Sprint 1–6 ✅ 完成；后端 24 个测试全过（FakeProvider 全链路），前端 tsc 通过。
-- 已发布 v0.1.1：签名版 NSIS 安装包（自签名证书，Secrets：`WINDOWS_SIGN_PFX_BASE64` / `WINDOWS_SIGN_PASSWORD`）。
+- 已发布 v0.1.2：签名版 NSIS 安装包（自签名证书，Secrets：`WINDOWS_SIGN_PFX_BASE64` / `WINDOWS_SIGN_PASSWORD`）；sidecar 为 one-file，安装后可直接启动。
 - 软件更新：启动检查 GitHub Releases + 侧栏提示 + 设置页手动检查（缓存 24h）。
 - 开发文档仅存本地 `docs/`（.gitignore 排除，不入仓库）。
 - 签名注意：自签名证书不校验公共信任链，只校验 Authenticode 签名者；换正式证书只需替换 Secrets。
