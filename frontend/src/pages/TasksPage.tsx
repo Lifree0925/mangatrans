@@ -1,7 +1,7 @@
 /** 任务中心：任务步骤明细、进度与错误（中文）。 */
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { CheckCircle2, Circle, Loader2, RotateCcw, XCircle } from "lucide-react";
+import { CheckCircle2, Circle, Loader2, RotateCcw, Trash2, XCircle } from "lucide-react";
 import { api } from "../lib/api";
 import { toast } from "../lib/feedback";
 import type { TaskInfo } from "../lib/types";
@@ -138,6 +138,15 @@ export default function TasksPage() {
     refetchInterval: 2000,
   });
 
+  const removeTask = useMutation({
+    mutationFn: (taskId: string) => api(`/tasks/${taskId}`, { method: "DELETE" }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["tasks"] });
+      toast.success("任务记录已删除");
+    },
+    onError: (err) => toast.error(`删除失败：${String(err)}`),
+  });
+
   const retry = useMutation({
     mutationFn: (taskId: string) => api(`/tasks/${taskId}/retry`, { method: "POST" }),
     onSuccess: () => {
@@ -188,6 +197,15 @@ export default function TasksPage() {
                         title="重新执行（已完成的步骤会保留）"
                       >
                         <RotateCcw size={12} /> 重试
+                      </button>
+                    )}
+                    {["failed", "cancelled", "completed"].includes(t.status) && (
+                      <button
+                        onClick={() => removeTask.mutate(t.id)}
+                        className="flex items-center gap-1 rounded-lg border border-(--color-border) px-2 py-1 text-xs text-(--color-muted) hover:bg-red-50 hover:text-red-600"
+                        title="删除这条任务记录（不影响译文）"
+                      >
+                        <Trash2 size={12} /> 删除
                       </button>
                     )}
                   </div>

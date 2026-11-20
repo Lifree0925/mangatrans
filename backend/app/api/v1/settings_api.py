@@ -213,6 +213,21 @@ def retry_task(task_id: str, db: Session = Depends(get_db)) -> dict:
     return {"id": task.id, "status": task.status}
 
 
+@router.delete("/tasks/{task_id}", status_code=204)
+def delete_task(task_id: str, db: Session = Depends(get_db)) -> None:
+    """硬删除任务记录（仅限失败/取消/已完成；运行中拒绝）。"""
+    from sqlalchemy import delete as sa_delete
+
+    task = db.get(Task, task_id)
+    if task is None:
+        raise HTTPException(status_code=404, detail="任务不存在")
+    if task.status in ("running", "queued"):
+        raise HTTPException(status_code=409, detail="任务正在执行，无法删除")
+    db.execute(sa_delete(TaskItem).where(TaskItem.task_id == task_id))
+    db.delete(task)
+    db.commit()
+
+
 @router.get("/tasks")
 def list_all_tasks(db: Session = Depends(get_db)) -> list[dict]:
     """任务中心：全部项目最近任务（含项目名）。"""
@@ -243,6 +258,8 @@ def list_all_tasks(db: Session = Depends(get_db)) -> list[dict]:
 
 @router.get("/projects/{project_id}/tasks")
 def list_project_tasks(project_id: str, db: Session = Depends(get_db)) -> list[dict]:
+    from app.models.project import Project
+
     tasks = db.scalars(
         select(Task).where(Task.project_id == project_id).order_by(Task.created_at.desc()).limit(50)
     )

@@ -100,6 +100,12 @@ export default function ProjectPage() {
     queryFn: () => api<QAIssueInfo[]>(`/projects/${id}/qa-issues`),
     enabled: showQA,
   });
+  const projectTasks = useQuery({
+    queryKey: ["project-tasks", id],
+    queryFn: () => api<TaskInfo[]>(`/projects/${id}/tasks`),
+    refetchInterval: 2000,
+  });
+
   const expressTask = useQuery({
     queryKey: ["task", expressTaskId],
     queryFn: () => api<TaskInfo>(`/tasks/${expressTaskId!}`),
@@ -245,7 +251,10 @@ export default function ProjectPage() {
           <span className="mx-1 h-5 w-px bg-(--color-border)" />
           <button
             onClick={() => express.mutate()}
-            disabled={express.isPending}
+            disabled={
+              express.isPending ||
+              (projectTasks.data ?? []).some((t) => t.status === "running" || t.status === "queued")
+            }
             className="flex items-center gap-1.5 rounded-lg bg-(--color-accent) px-3 py-1.5 text-sm text-white hover:bg-(--color-accent-hover) disabled:opacity-50"
             title="自动完成整理、翻译与检查，生成完整英文剧本"
           >
@@ -398,8 +407,17 @@ export default function ProjectPage() {
                               setEditMenuPos(null);
                             } else {
                               const rect = (e.currentTarget as HTMLButtonElement).getBoundingClientRect();
+                              const menuW = 50;
+                              const menuH = 76;
+                              // 右侧放不下时翻转到按钮左侧；下方放不下时上移
+                              const x = rect.right + 6 + menuW > window.innerWidth
+                                ? rect.left - menuW - 6
+                                : rect.right + 6;
+                              const y = rect.top + menuH > window.innerHeight
+                                ? Math.max(8, rect.bottom - menuH)
+                                : rect.top;
                               setEditMenuFor(s.id);
-                              setEditMenuPos({ x: rect.right + 6, y: rect.top });
+                              setEditMenuPos({ x: Math.max(8, x), y });
                             }
                           }}
                           title="编辑本段"
