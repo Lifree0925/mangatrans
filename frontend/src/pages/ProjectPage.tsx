@@ -21,6 +21,28 @@ export default function ProjectPage() {
   const [editDraft, setEditDraft] = useState("");
   const [editMenuFor, setEditMenuFor] = useState<string | null>(null);
   const [editMenuPos, setEditMenuPos] = useState<{ x: number; y: number } | null>(null);
+  const [activeChapterId, setActiveChapterId] = useState<string | null>(null);
+  const bodyRef = useRef<HTMLDivElement | null>(null);
+  const scrollRaf = useRef<number | null>(null);
+
+  const onBodyScroll = () => {
+    if (scrollRaf.current != null) return;
+    scrollRaf.current = requestAnimationFrame(() => {
+      scrollRaf.current = null;
+      const container = bodyRef.current;
+      if (!container) return;
+      const top = container.getBoundingClientRect().top;
+      let current: string | null = null;
+      for (const el of container.querySelectorAll<HTMLElement>("[data-seg-no]")) {
+        const r = el.getBoundingClientRect();
+        if (r.top >= top - 4) {
+          current = el.dataset.chapterId ?? null;
+          break;
+        }
+      }
+      setActiveChapterId(current);
+    });
+  };
   const [expressTaskId, setExpressTaskId] = useState<string | null>(null);
   const [exporting, setExporting] = useState(false);
   const [exportOpen, setExportOpen] = useState(false);
@@ -310,7 +332,9 @@ export default function ProjectPage() {
                   const el = document.querySelector(`[data-seg-no="${firstSegNo}"]`);
                   el?.scrollIntoView({ behavior: "smooth", block: "start" });
                 }}
-                className="text-left font-medium text-(--color-text) hover:text-(--color-accent)"
+                className={`rounded-md px-1.5 py-0.5 text-left font-medium text-(--color-text) transition-colors hover:text-(--color-accent) ${
+                  activeChapterId === ch.id ? "bg-(--color-panel2)" : ""
+                }`}
                 title={firstSegNo ? "点击跳转到正文" : undefined}
               >
                 {ch.title || `第 ${ch.chapter_no} 章`}
@@ -332,10 +356,9 @@ export default function ProjectPage() {
         )}
         <div
           className={`relative w-4 shrink-0 cursor-pointer ${
-            chaptersCollapsed ? "" : "border-r border-(--color-border) hover:border-r-(--color-accent)"
+            chaptersCollapsed ? "" : "border-r border-(--color-border)"
           }`}
           onClick={() => setChaptersCollapsed((v) => !v)}
-          title={chaptersCollapsed ? "展开章节栏" : "收起章节栏"}
         >
           <span
             className={`absolute top-1/2 -translate-y-1/2 text-(--color-muted) hover:text-(--color-accent) ${
@@ -346,7 +369,11 @@ export default function ProjectPage() {
           </span>
         </div>
 
-        <div className="flex-1 overflow-auto p-4 font-mono text-[13px] leading-6">
+        <div
+          ref={bodyRef}
+          onScroll={onBodyScroll}
+          className="flex-1 overflow-auto p-4 font-mono text-[13px] leading-6"
+        >
           <div className="mx-auto max-w-4xl">
             {segs.map((s) => {
               const tr = latestTranslations.data?.items.find((i) => i.segment_id === s.id);
@@ -389,6 +416,7 @@ export default function ProjectPage() {
                 <div
                   key={s.id}
                   data-seg-no={s.segment_no}
+                  data-chapter-id={s.chapter_id ?? ""}
                   className="group border-b border-(--color-border) py-2"
                   onMouseLeave={() => {
                     if (editMenuFor === s.id) {
