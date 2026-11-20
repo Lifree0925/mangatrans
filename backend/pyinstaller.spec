@@ -23,22 +23,16 @@ a = Analysis(
 )
 pyz = PYZ(a.pure)
 
+# one-file：单文件自包含，直接作为 Tauri externalBin 分发（one-folder 的 _internal 无法随 externalBin 打包）
 exe = EXE(
     pyz,
     a.scripts,
+    a.binaries,
+    a.datas,
     [],
-    exclude_binaries=True,
     name="mangatrans-backend",
     debug=False,
     strip=False,
     upx=False,
     console=False,
-)
-coll = COLLECT(
-    exe,
-    a.binaries,
-    a.datas,
-    strip=False,
-    upx=False,
-    name="mangatrans-backend",
 )

@@ -39,10 +39,10 @@ fn generate_token() -> String {
         .collect()
 }
 
-/// 等待后端健康检查就绪（最多 15 秒）。
+/// 等待后端健康检查就绪（最多 30 秒，one-file sidecar 首次启动需解压）。
 fn wait_until_healthy(port: u16) -> bool {
     let url = format!("http://127.0.0.1:{port}/health");
-    for _ in 0..150 {
+    for _ in 0..300 {
         if reqwest::blocking::get(&url)
             .map(|r| r.status().is_success())
             .unwrap_or(false)
