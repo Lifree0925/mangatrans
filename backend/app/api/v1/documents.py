@@ -70,8 +70,22 @@ def list_documents(project_id: str, db: Session = Depends(get_db)) -> list[Sourc
 
 @router.post("/parse")
 def parse_document(project_id: str, db: Session = Depends(get_db)) -> dict:
-    """同步解析当前项目最新文档版本。"""
+    """同步解析当前项目最新文档版本。翻译进行中禁止重解析（会破坏译文）。"""
+    from sqlalchemy import select as sa_select
+
+    from app.models.task import Task
+
     project = _get_project(db, project_id)
+    running = db.scalar(
+        sa_select(Task.id).where(
+            Task.project_id == project_id, Task.status.in_(["running", "queued"])
+        ).limit(1)
+    )
+    if running:
+        raise HTTPException(
+            status_code=409,
+            detail="项目翻译正在进行中，无法重新解析。请等待任务完成或先重试/暂停任务。",
+        )
     doc = db.scalar(
         select(SourceDocument)
         .where(SourceDocument.project_id == project_id)

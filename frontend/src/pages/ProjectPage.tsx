@@ -2,18 +2,12 @@
 
 import { useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { ArrowLeft, Check, Download, FileUp, Pencil, ScanText, ShieldCheck, X, Zap } from "lucide-react";
+import { ArrowLeft, Check, ChevronLeft, ChevronRight, Download, FileUp, Pencil, ScanText, ShieldCheck, X, Zap } from "lucide-react";
 import { Link, useParams } from "react-router-dom";
 import { api } from "../lib/api";
 import { toast } from "../lib/feedback";
 import type { Chapter, ExportResult, LatestTranslation, ParseReport, Project, ProviderInfo, QAIssueInfo, Scene, Segment, TaskInfo } from "../lib/types";
 
-const typeColor: Record<string, string> = {
-  heading: "text-(--color-text)",
-  dialogue: "text-emerald-600",
-  narrative: "text-(--color-text)",
-  other: "text-amber-600",
-};
 
 export default function ProjectPage() {
   const { id = "" } = useParams();
@@ -21,9 +15,12 @@ export default function ProjectPage() {
   const fileRef = useRef<HTMLInputElement>(null);
   const [showReport, setShowReport] = useState(false);
   const [showQA, setShowQA] = useState(false);
+  const [chaptersCollapsed, setChaptersCollapsed] = useState(false);
   // 片段编辑状态：editing = {segmentId, side: 'source'|'target'} | null
   const [editing, setEditing] = useState<{ segmentId: string; side: "source" | "target" } | null>(null);
   const [editDraft, setEditDraft] = useState("");
+  const [editMenuFor, setEditMenuFor] = useState<string | null>(null);
+  const [editMenuPos, setEditMenuPos] = useState<{ x: number; y: number } | null>(null);
   const [expressTaskId, setExpressTaskId] = useState<string | null>(null);
   const [exporting, setExporting] = useState(false);
   const [exportOpen, setExportOpen] = useState(false);
@@ -202,7 +199,6 @@ export default function ProjectPage() {
         <h1 className="font-semibold">{project.data?.name ?? "…"}</h1>
         {providers.data && providers.data.length > 0 ? (
           <label className="flex items-center gap-1.5 text-xs text-(--color-muted)">
-            模型
             <select
               value={defaultProvider?.id ?? ""}
               onChange={(e) => setDefaultProvider.mutate(e.target.value)}
@@ -292,12 +288,24 @@ export default function ProjectPage() {
       )}
 
       <div className="flex flex-1 overflow-hidden">
-        <aside className="w-56 shrink-0 overflow-auto border-r border-(--color-border) p-3 text-sm">
-          {chapters.data?.map((ch) => (
+        {!chaptersCollapsed && (
+        <aside className="w-56 shrink-0 overflow-auto p-3 text-sm">
+          {chapters.data?.map((ch) => {
+            const firstSegNo = segs.find((seg) => seg.chapter_id === ch.id)?.segment_no;
+            return (
             <div key={ch.id} className="mb-2">
-              <p className="font-medium text-(--color-text)">
+              <button
+                type="button"
+                onClick={() => {
+                  if (!firstSegNo) return;
+                  const el = document.querySelector(`[data-seg-no="${firstSegNo}"]`);
+                  el?.scrollIntoView({ behavior: "smooth", block: "start" });
+                }}
+                className="text-left font-medium text-(--color-text) hover:text-(--color-accent)"
+                title={firstSegNo ? "点击跳转到正文" : undefined}
+              >
                 {ch.title || `第 ${ch.chapter_no} 章`}
-              </p>
+              </button>
               {scenes.data
                 ?.filter((sc) => sc.chapter_id === ch.id)
                 .map((sc) => (
@@ -306,16 +314,31 @@ export default function ProjectPage() {
                   </p>
                 ))}
             </div>
-          ))}
+            );
+          })}
           {!chapters.data?.length && (
             <p className="text-xs text-(--color-muted)">导入并解析后显示章节结构</p>
           )}
         </aside>
+        )}
+        <div
+          className={`relative w-4 shrink-0 cursor-pointer ${
+            chaptersCollapsed ? "" : "border-r border-(--color-border) hover:border-r-(--color-accent)"
+          }`}
+          onClick={() => setChaptersCollapsed((v) => !v)}
+          title={chaptersCollapsed ? "展开章节栏" : "收起章节栏"}
+        >
+          <span
+            className={`absolute top-1/2 -translate-y-1/2 text-(--color-muted) hover:text-(--color-accent) ${
+              chaptersCollapsed ? "left-0.5" : "right-0"
+            }`}
+          >
+            {chaptersCollapsed ? <ChevronRight size={15} /> : <ChevronLeft size={15} />}
+          </span>
+        </div>
 
         <div className="flex-1 overflow-auto p-4 font-mono text-[13px] leading-6">
-          <div className="grid grid-cols-2 gap-x-4">
-            <div className="text-right text-xs text-(--color-muted)">原文（可编辑）</div>
-            <div className="text-right text-xs text-(--color-muted)">英文译文（可校对）</div>
+          <div className="mx-auto max-w-4xl">
             {segs.map((s) => {
               const tr = latestTranslations.data?.items.find((i) => i.segment_id === s.id);
               const isEditingSource = editing?.segmentId === s.id && editing.side === "source";
@@ -354,35 +377,66 @@ export default function ProjectPage() {
                 </div>
               );
               return (
-                <div key={s.id} className="group col-span-2 grid grid-cols-2 gap-x-4 rounded px-2 hover:bg-(--color-panel)">
-                  <div className="relative min-w-0">
+                <div
+                  key={s.id}
+                  data-seg-no={s.segment_no}
+                  className="group border-b border-(--color-border) py-2"
+                  onMouseLeave={() => {
+                    if (editMenuFor === s.id) {
+                      setEditMenuFor(null);
+                      setEditMenuPos(null);
+                    }
+                  }}
+                >
+                  <div className="relative min-w-0 pr-8">
                     {isEditingSource ? editor : (
                       <>
                         <button
-                          onClick={() => startEdit("source")}
-                          title="编辑原文"
-                          className="absolute -left-6 top-1 hidden rounded p-0.5 text-(--color-muted) hover:bg-(--color-panel2) group-hover:block"
+                          onClick={(e) => {
+                            if (editMenuFor === s.id) {
+                              setEditMenuFor(null);
+                              setEditMenuPos(null);
+                            } else {
+                              const rect = (e.currentTarget as HTMLButtonElement).getBoundingClientRect();
+                              setEditMenuFor(s.id);
+                              setEditMenuPos({ x: rect.right + 6, y: rect.top });
+                            }
+                          }}
+                          title="编辑本段"
+                          className="absolute right-1 top-0.5 hidden p-0.5 text-(--color-muted) hover:text-(--color-accent) group-hover:block"
                         >
-                          <Pencil size={12} />
+                          <Pencil size={14} />
                         </button>
-                        <p className={`whitespace-pre-wrap ${typeColor[s.segment_type] ?? ""}`}>
+                        {editMenuFor === s.id && editMenuPos && (
+                          <div
+                            className="fixed z-[80] flex flex-col overflow-hidden rounded-lg border border-(--color-border) bg-(--color-bg) py-1 shadow-xl"
+                            style={{ left: editMenuPos.x, top: editMenuPos.y }}
+                          >
+                            <button
+                              onClick={() => { setEditMenuFor(null); startEdit("source"); }}
+                              className="whitespace-nowrap px-3 py-1.5 text-left text-xs hover:bg-(--color-panel)"
+                            >
+                              原文
+                            </button>
+                            <button
+                              onClick={() => { setEditMenuFor(null); startEdit("target"); }}
+                              className="whitespace-nowrap px-3 py-1.5 text-left text-xs hover:bg-(--color-panel)"
+                            >
+                              译文
+                            </button>
+                          </div>
+                        )}
+                        <p className="whitespace-pre-wrap transition-colors group-hover:text-(--color-accent)">
                           {s.source_text.replace(/\n$/, "")}
                         </p>
                       </>
                     )}
                   </div>
-                  <div className="relative min-w-0">
+                  <div className="relative mt-0.5 min-w-0 pl-4">
                     {isEditingTarget ? editor : (
                       <>
-                        <button
-                          onClick={() => startEdit("target")}
-                          title="校对译文"
-                          className="absolute -left-6 top-1 hidden rounded p-0.5 text-(--color-muted) hover:bg-(--color-panel2) group-hover:block"
-                        >
-                          <Pencil size={12} />
-                        </button>
                         {tr ? (
-                          <p className={`whitespace-pre-wrap ${tr.freshness_status === "stale" ? "text-(--color-muted)" : ""}`}>
+                          <p className={`whitespace-pre-wrap text-(--color-muted) transition-colors group-hover:text-(--color-accent) ${tr.freshness_status === "stale" ? "italic" : ""}`}>
                             {tr.target_text}
                             {tr.freshness_status === "stale" && (
                               <span
@@ -394,7 +448,7 @@ export default function ProjectPage() {
                             )}
                           </p>
                         ) : (
-                          <p className="text-(--color-muted)">—</p>
+                          <p className="text-(--color-muted) transition-colors group-hover:text-(--color-accent)">—</p>
                         )}
                       </>
                     )}
@@ -406,7 +460,7 @@ export default function ProjectPage() {
         </div>
 
         {showReport && (
-          <aside className="w-72 shrink-0 overflow-auto border-l border-(--color-border) p-3 text-xs">
+          <div className="fixed right-6 top-20 z-[60] max-h-[70vh] w-80 overflow-auto rounded-2xl border border-(--color-border) bg-(--color-bg) p-4 text-xs shadow-2xl">
             <div className="mb-2 flex items-center justify-between">
               <p className="font-semibold">解析报告</p>
               <button
@@ -440,11 +494,11 @@ export default function ProjectPage() {
             ) : (
               <p className="text-(--color-muted)">加载中…</p>
             )}
-          </aside>
+          </div>
         )}
 
         {showQA && (
-          <aside className="w-80 shrink-0 overflow-auto border-l border-(--color-border) p-3 text-xs">
+          <div className="fixed right-6 top-20 z-[60] max-h-[70vh] w-96 overflow-auto rounded-2xl border border-(--color-border) bg-(--color-bg) p-4 text-xs shadow-2xl">
             <div className="mb-2 flex items-center justify-between">
               <p className="font-semibold">QA 问题</p>
               <button
@@ -467,7 +521,7 @@ export default function ProjectPage() {
                 <p className="mt-1 break-all text-(--color-muted)">{i.explanation}</p>
               </div>
             ))}
-          </aside>
+          </div>
         )}
       </div>
 

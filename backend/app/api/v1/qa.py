@@ -35,6 +35,9 @@ def _active_doc(db: Session, project: Project) -> SourceDocument:
 def start_express(project_id: str, payload: dict, db: Session = Depends(get_db)) -> dict:
     """一键直出：导入后串联全部环节，全程无人工干预。"""
     project = _project(db, project_id)
+    from app.api.v1.translation import _ensure_no_running_task
+
+    _ensure_no_running_task(db, project_id)
     doc = _active_doc(db, project)
     from app.services.provider_service import ensure_verified_provider
 

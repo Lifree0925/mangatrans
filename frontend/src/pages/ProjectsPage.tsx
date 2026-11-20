@@ -75,7 +75,7 @@ export default function ProjectsPage() {
     <div className="flex h-full flex-col">
       <div className="flex items-center gap-3 border-b border-(--color-border) px-6 py-4">
         <h1 className="text-lg font-semibold">项目</h1>
-        <div className="relative mx-auto w-full max-w-md">
+        <div className="relative mx-auto w-full max-w-xs">
           <Search size={15} className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-(--color-muted)" />
           <input
             value={search}

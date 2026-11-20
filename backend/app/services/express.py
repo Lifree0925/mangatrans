@@ -17,22 +17,56 @@ from app.services.translation_batch import _persist_window_translations, transla
 from app.services.window_planner import build_windows
 
 
+def _sync_progress(db_factory, task_id: str, steps: dict, current_step: str) -> None:
+    """实时写任务进度（前端任务中心 2 秒轮询展示）。"""
+    from app.models.task import Task
+
+    with db_factory() as db:
+        task = db.get(Task, task_id)
+        if task is None:
+            return
+        task.progress_json = json.dumps(
+            {"steps": steps, "current_step": current_step}, ensure_ascii=False
+        )
+        db.commit()
+
+
 async def run_express(db_factory, project_id: str, source_document_id: str, model: str, task_id: str = "express") -> dict:
     provider = get_provider()
+
+    # 断点续跑：读取上次进度，跳过已完成步骤（任务失败后重试不从头再来）
+    from app.models.task import Task
+
     report: dict = {"steps": {}}
+    with db_factory() as db:
+        task = db.get(Task, task_id)
+        prev_raw = task.progress_json if task else "{}"
+    try:
+        prev = json.loads(prev_raw or "{}")
+    except json.JSONDecodeError:
+        prev = {}
+    if isinstance(prev, dict) and isinstance(prev.get("steps"), dict):
+        report["steps"] = dict(prev["steps"])
 
     # 1. 知识提取（Express：explicit 的 character/term 自动批准）
-    report["steps"]["knowledge"] = await knowledge_service.extract_knowledge_for_document(
-        db_factory, project_id, source_document_id, provider, model, mode="express"
-    )
+    if "knowledge" not in report["steps"]:
+        _sync_progress(db_factory, task_id, report["steps"], "knowledge")
+        report["steps"]["knowledge"] = await knowledge_service.extract_knowledge_for_document(
+            db_factory, project_id, source_document_id, provider, model, mode="express"
+        )
+    _sync_progress(db_factory, task_id, report["steps"], "scene_cards")
     # 2. 场景卡
-    report["steps"]["scene_cards"] = await scene_card_service.generate_cards_for_document(
-        db_factory, project_id, source_document_id, provider, model
-    )
+    if "scene_cards" not in report["steps"]:
+        report["steps"]["scene_cards"] = await scene_card_service.generate_cards_for_document(
+            db_factory, project_id, source_document_id, provider, model
+        )
+    _sync_progress(db_factory, task_id, report["steps"], "trial")
     # 3. 试译与风格基线
-    report["steps"]["trial"] = await style_guide_service.run_trial(
-        db_factory, project_id, source_document_id, provider, model
-    )
+    if "trial" not in report["steps"]:
+        report["steps"]["trial"] = await style_guide_service.run_trial(
+            db_factory, project_id, source_document_id, provider, model
+        )
+    _sync_progress(db_factory, task_id, report["steps"], "translation")
     # 4. 全本窗口翻译（carry-over 串行）
     with db_factory() as db:
         segs = list(
@@ -43,9 +77,15 @@ async def run_express(db_factory, project_id: str, source_document_id: str, mode
             )
         )
     windows = build_windows(segs)
+    total = len(windows)
+    # 续跑：已完成窗口跳过；回退一窗重跑以重建 carry-over（仅多花一次调用）
+    prev_done = int((report["steps"].get("translation") or {}).get("done", 0))
+    start_win = max(0, min(prev_done - 1, total)) if prev_done > 0 else 0
     carry: dict | None = None
-    done = 0
-    for wi, window in enumerate(windows):
+    done = start_win
+    report["steps"]["translation"] = {"done": done, "total": total}
+    _sync_progress(db_factory, task_id, report["steps"], "translation")
+    for wi, window in enumerate(windows[start_win:], start=start_win):
         carry, draft, polished, context = await translate_window_direct(
             db_factory, project_id, window, carry, model
         )
@@ -53,24 +93,33 @@ async def run_express(db_factory, project_id: str, source_document_id: str, mode
             _persist_window_translations(db, window, draft, polished, context, model)
             db.commit()
         done += 1
-    report["steps"]["translation"] = {"windows": done}
+        report["steps"]["translation"] = {"done": done, "total": total}
+        _sync_progress(db_factory, task_id, report["steps"], "translation")
 
     # 5. QA：确定性全量 + 风险窗口语义 QA
     with db_factory() as db:
-        forced = {
-            k.canonical_key: json.loads(k.data_json or "{}").get("translation", k.canonical_key)
-            for k in db.scalars(
-                select(KnowledgeItem).where(
-                    KnowledgeItem.project_id == project_id,
-                    KnowledgeItem.status.in_(["approved", "auto_approved"]),
-                    KnowledgeItem.item_type == "term",
-                )
+        forced = {}
+        for k in db.scalars(
+            select(KnowledgeItem).where(
+                KnowledgeItem.project_id == project_id,
+                KnowledgeItem.status.in_(["approved", "auto_approved"]),
+                KnowledgeItem.item_type == "term",
             )
-        }
-    issues_total = 0
-    needs_review = 0
-    blocked = 0
-    for window in windows:
+        ):
+            translation = json.loads(k.data_json or "{}").get("translation")
+            # 只有明确给出译名的术语才强制；无译名的只作参考（否则整本被误报）
+            if translation and translation != k.canonical_key:
+                forced[k.canonical_key] = translation
+    prev_qa = report["steps"].get("qa") or {}
+    qa_done = int(prev_qa.get("done", 0))
+    issues_total = int(prev_qa.get("issues", 0))
+    needs_review = int(prev_qa.get("needs_review", 0))
+    blocked = int(prev_qa.get("blocked", 0))
+    report["steps"]["qa"] = {"done": qa_done, "total": len(windows), "issues": issues_total}
+    _sync_progress(db_factory, task_id, report["steps"], "qa")
+    for wi, window in enumerate(windows):
+        if wi < qa_done:
+            continue  # 已检查过的窗口跳过
         gate = "passed"
         with db_factory() as db:
             polished_rows = list(
@@ -102,6 +151,15 @@ async def run_express(db_factory, project_id: str, source_document_id: str, mode
                 if win_issues:
                     qa_service.persist_issues(db, project_id, tr.id, win_issues)
         issues_total += len(win_issues)
+        severity_counts: dict[str, int] = dict(prev_qa.get("severity_counts") or {})
+        for issue in win_issues:
+            sev = issue.get("severity", "low")
+            severity_counts[sev] = severity_counts.get(sev, 0) + 1
+        report["steps"]["qa"] = {
+            "done": wi + 1, "total": len(windows), "issues": issues_total,
+            "severity_counts": severity_counts,
+        }
+        _sync_progress(db_factory, task_id, report["steps"], "qa")
         gate = qa_service.evaluate_gate(win_issues)
         if gate == "needs_review":
             needs_review += 1
@@ -118,6 +176,12 @@ async def run_express(db_factory, project_id: str, source_document_id: str, mode
             )
             db.commit()
     report["qa"] = {"issues_total": issues_total, "needs_review": needs_review, "blocked": blocked}
+    report["steps"]["qa"] = {
+        "done": len(windows), "total": len(windows),
+        "issues": issues_total, "needs_review": needs_review, "blocked": blocked,
+        "severity_counts": report["steps"]["qa"].get("severity_counts") or {},
+    }
+    _sync_progress(db_factory, task_id, report["steps"], "approve")
 
     # 6. 批量接受：gate=passed 的 polished → approved
     with db_factory() as db:
@@ -138,4 +202,6 @@ async def run_express(db_factory, project_id: str, source_document_id: str, mode
                 approved += 1
         db.commit()
     report["approve"] = {"approved": approved}
+    report["steps"]["approve"] = {"approved": approved}
+    _sync_progress(db_factory, task_id, report["steps"], "done")
     return report

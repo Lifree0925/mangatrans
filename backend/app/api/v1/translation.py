@@ -16,6 +16,20 @@ from app.pipeline.runner import create_task, launch
 router = APIRouter(prefix="/projects/{project_id}", tags=["translation"])
 
 
+def _ensure_no_running_task(db: Session, project_id: str) -> None:
+    """同一项目不允许并发任务：已有运行中任务时拒绝创建新任务。"""
+    running = db.scalar(
+        select(Task.id).where(
+            Task.project_id == project_id, Task.status.in_(["running", "queued"])
+        ).limit(1)
+    )
+    if running:
+        raise HTTPException(
+            status_code=409,
+            detail="该项目已有任务正在执行，请等待完成后再启动新任务",
+        )
+
+
 def _project(db: Session, project_id: str) -> Project:
     p = db.get(Project, project_id)
     if p is None:
@@ -31,6 +45,7 @@ def _active_doc(db: Session, project: Project) -> SourceDocument:
 
 @router.post("/translation/trial")
 def start_trial(project_id: str, payload: dict, db: Session = Depends(get_db)) -> dict:
+    _ensure_no_running_task(db, project_id)
     """试译与风格基线任务（自动建立，无需人工确认）。"""
     project = _project(db, project_id)
     doc = _active_doc(db, project)
@@ -173,6 +188,7 @@ def get_translations(segment_id: str, db: Session = Depends(get_db)) -> dict:
 
 @router.post("/translation/start")
 def start_batch_translation(project_id: str, payload: dict, db: Session = Depends(get_db)) -> dict:
+    _ensure_no_running_task(db, project_id)
     """创建批量翻译任务并展开窗口。payload: {mode?, model?}"""
     project = _project(db, project_id)
     doc = _active_doc(db, project)

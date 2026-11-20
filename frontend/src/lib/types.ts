@@ -70,6 +70,10 @@ export interface TaskInfo {
   status: string;
   progress: Record<string, unknown>;
   error_message: string | null;
+  created_at: string | null;
+  project_id?: string;
+  project_name?: string;
+  model?: string;
 }
 
 export interface ProviderInfo {

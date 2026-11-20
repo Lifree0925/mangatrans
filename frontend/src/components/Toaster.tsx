@@ -22,7 +22,7 @@ export default function Toaster() {
 
   return (
     <>
-      <div className="pointer-events-none fixed bottom-5 right-5 z-[60] flex w-80 flex-col gap-2">
+      <div className="pointer-events-none fixed left-1/2 top-5 z-[60] flex w-96 max-w-[90vw] -translate-x-1/2 flex-col items-center gap-2">
         {toasts.map((t) => {
           const Icon = icons[t.type];
           return (

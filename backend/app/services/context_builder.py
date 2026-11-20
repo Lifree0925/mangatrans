@@ -79,12 +79,17 @@ def build_context(
         report["matched_characters"] = [c["canonical_key"] for c in chars]
         snapshot["knowledge_ids"] += [c["id"] for c in chars]
     if terms:
-        blocks.append(
-            _json_block(
-                "FORCED TERMS",
-                [{"term": t["canonical_key"], "translation": t.get("data", {})} for t in terms],
-            )
-        )
+        forced_terms = [
+            {"term": t["canonical_key"], "translation": t.get("data", {}).get("translation")}
+            for t in terms
+            if t.get("data", {}).get("translation")
+        ]
+        ref_terms = [t["canonical_key"] for t in terms if not t.get("data", {}).get("translation")]
+        if forced_terms:
+            blocks.append(_json_block("FORCED TERMS", forced_terms))
+        if ref_terms:
+            # 无译名的术语仅作背景参考，不强制
+            blocks.append(_json_block("REFERENCE TERMS (background, not mandatory)", ref_terms))
         report["matched_terms"] = [t["canonical_key"] for t in terms]
         snapshot["knowledge_ids"] += [t["id"] for t in terms]
     if rules:

@@ -10,6 +10,7 @@ import {
   PanelLeftOpen,
   Settings,
 } from "lucide-react";
+import TaskNotifier from "./components/TaskNotifier";
 import Toaster from "./components/Toaster";
 import UpdateNotice from "./components/UpdateNotice";
 import { APP_VERSION } from "./lib/version";
@@ -93,6 +94,7 @@ export default function App() {
           <Route path="/settings" element={<SettingsPage />} />
         </Routes>
       </main>
+      <TaskNotifier />
       <Toaster />
     </div>
   );

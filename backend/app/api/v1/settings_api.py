@@ -140,6 +140,8 @@ def get_task(task_id: str, db: Session = Depends(get_db)) -> dict:
         "status": task.status,
         "progress": json.loads(task.progress_json or "{}"),
         "error_message": task.error_message,
+        "created_at": task.created_at.isoformat() if task.created_at else None,
+        "model": json.loads(task.config_snapshot_json or "{}").get("model", ""),
     }
 
 
@@ -211,6 +213,34 @@ def retry_task(task_id: str, db: Session = Depends(get_db)) -> dict:
     return {"id": task.id, "status": task.status}
 
 
+@router.get("/tasks")
+def list_all_tasks(db: Session = Depends(get_db)) -> list[dict]:
+    """任务中心：全部项目最近任务（含项目名）。"""
+    from app.models.project import Project
+
+    tasks = db.scalars(
+        select(Task).order_by(Task.created_at.desc()).limit(100)
+    ).all()
+    names = {
+        p.id: p.name
+        for p in db.scalars(select(Project).where(Project.id.in_({t.project_id for t in tasks})))
+    }
+    return [
+        {
+            "id": t.id,
+            "task_type": t.task_type,
+            "status": t.status,
+            "progress": json.loads(t.progress_json or "{}"),
+            "error_message": t.error_message,
+            "created_at": t.created_at.isoformat() if t.created_at else None,
+            "project_id": t.project_id,
+            "project_name": names.get(t.project_id, "已删除项目"),
+            "model": json.loads(t.config_snapshot_json or "{}").get("model", ""),
+        }
+        for t in tasks
+    ]
+
+
 @router.get("/projects/{project_id}/tasks")
 def list_project_tasks(project_id: str, db: Session = Depends(get_db)) -> list[dict]:
     tasks = db.scalars(
@@ -223,6 +253,9 @@ def list_project_tasks(project_id: str, db: Session = Depends(get_db)) -> list[d
             "status": t.status,
             "progress": json.loads(t.progress_json or "{}"),
             "error_message": t.error_message,
+            "created_at": t.created_at.isoformat() if t.created_at else None,
+            "project_name": db.get(Project, t.project_id).name if db.get(Project, t.project_id) else "已删除项目",
+            "model": json.loads(t.config_snapshot_json or "{}").get("model", ""),
         }
         for t in tasks
     ]

@@ -27,7 +27,6 @@ logs/
 backend/dist/
 backend/.venv-build/
 frontend/.vite/
-docs/开发文档_AI漫剧剧本翻译系统.md
 
 # PyInstaller 构建产物
 backend/build/
