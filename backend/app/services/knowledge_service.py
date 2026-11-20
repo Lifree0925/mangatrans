@@ -1,6 +1,8 @@
 """知识提取：分批调用模型、Schema 校验、确定性归并、auto_approved 规则。"""
 
 import json
+
+from app.llm.json_utils import parse_llm_json
 import re
 import unicodedata
 
@@ -40,7 +42,7 @@ async def extract_batch(provider: LLMProvider, text: str, model: str) -> Extract
         response_schema=ExtractionOutput.model_json_schema(),
         temperature=0.2,
     )
-    data = json.loads(resp.content)
+    data = parse_llm_json(resp.content)
     try:
         return ExtractionOutput.model_validate(data)
     except (ValidationError, json.JSONDecodeError, AttributeError):
@@ -139,13 +141,19 @@ async def extract_knowledge_for_document(
         batches.append(buf)
 
     total_added = 0
+    failed_batches = 0
     for i, batch in enumerate(batches):
-        out = await extract_batch(provider, batch, model)
+        try:
+            out = await extract_batch(provider, batch, model)
+        except Exception:  # noqa: BLE001 单批失败不阻塞整本翻译
+            failed_batches += 1
+            continue
         with db_factory() as db:
             added = merge_candidates(db, project_id, out, mode)
         total_added += len(added)
     return {
         "batches": len(batches),
         "added": total_added,
+        "failed_batches": failed_batches,
         "elapsed_s": round(time.perf_counter() - t0, 2),
     }

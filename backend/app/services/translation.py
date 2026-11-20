@@ -2,6 +2,8 @@
 
 import hashlib
 import json
+
+from app.llm.json_utils import parse_llm_json
 from typing import Literal
 
 from pydantic import BaseModel, Field, ValidationError
@@ -58,13 +60,30 @@ class PolishOutput(BaseModel):
 
 
 async def _chat_json(provider: LLMProvider, model: str, system: str, user: str, schema: dict):
+    """调用并解析 JSON；输出格式瑕疵时重试一次（带修复提示）。"""
+    messages = [{"role": "system", "content": system}, {"role": "user", "content": user}]
     resp = await provider.chat(
         model=model,
-        messages=[{"role": "system", "content": system}, {"role": "user", "content": user}],
+        messages=messages,
         response_schema=schema,
         temperature=0.3,
     )
-    return json.loads(resp.content)
+    try:
+        return parse_llm_json(resp.content)
+    except ValueError:
+        messages.append(
+            {
+                "role": "user",
+                "content": "Your previous reply was not valid JSON. Reply again with ONLY the required JSON, no extra text.",
+            }
+        )
+        resp = await provider.chat(
+            model=model,
+            messages=messages,
+            response_schema=schema,
+            temperature=0.2,
+        )
+        return parse_llm_json(resp.content)
 
 
 async def translate_window(

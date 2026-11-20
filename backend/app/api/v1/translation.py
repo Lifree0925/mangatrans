@@ -19,7 +19,7 @@ router = APIRouter(prefix="/projects/{project_id}", tags=["translation"])
 def _project(db: Session, project_id: str) -> Project:
     p = db.get(Project, project_id)
     if p is None:
-        raise HTTPException(status_code=404, detail="project not found")
+        raise HTTPException(status_code=404, detail="项目不存在")
     return p
 
 
@@ -73,11 +73,76 @@ def patch_style_guide(project_id: str, payload: dict, db: Session = Depends(get_
         .order_by(StyleGuide.version.desc())
     )
     if sg is None:
-        raise HTTPException(status_code=404, detail="style guide not found")
+        raise HTTPException(status_code=404, detail="风格基线不存在")
     if "guide" in payload:
         sg.guide_json = json.dumps(payload["guide"], ensure_ascii=False)
     db.commit()
     return {"id": sg.id, "version": sg.version, "status": sg.status}
+
+
+@router.post("/segments/{segment_id}/translations", status_code=201)
+def add_manual_translation(project_id: str, segment_id: str, payload: dict, db: Session = Depends(get_db)) -> dict:
+    """人工校对译文：新增版本（不覆盖旧译文），直接标记 approved 且与当前原文对齐。"""
+    from app.models.audit import AuditLog
+
+    project = _project(db, project_id)
+    seg = db.get(SourceSegment, segment_id)
+    if seg is None or seg.project_id != project_id:
+        raise HTTPException(status_code=404, detail="片段不存在")
+    text = str(payload.get("target_text", "")).strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="译文不能为空")
+    base = db.scalar(
+        select(func.max(Translation.version)).where(Translation.segment_id == segment_id)
+    ) or 0
+    t = Translation(
+        segment_id=segment_id,
+        version=base + 1,
+        stage="polished",
+        target_text=text,
+        review_status="approved",
+        freshness_status="current",
+        model_name="manual",
+        provider_id="manual",
+        prompt_version="manual",
+        source_hash=seg.source_hash,
+    )
+    db.add(t)
+    db.add(AuditLog(
+        project_id=project_id, entity_type="translation", entity_id=segment_id,
+        action="add_translation", before_text=None, after_text=text))
+    db.commit()
+    db.refresh(t)
+    return {"id": t.id, "version": t.version, "target_text": t.target_text,
+            "review_status": t.review_status, "freshness_status": t.freshness_status}
+
+
+@router.get("/translations/latest")
+def list_latest_translations(project_id: str, db: Session = Depends(get_db)) -> dict:
+    """批量返回每片段最新 polished 译文（含待重译标记），供对照视图使用。"""
+    from app.models.document import SourceSegment
+
+    _project(db, project_id)
+    segs = db.scalars(
+        select(SourceSegment).where(SourceSegment.project_id == project_id)
+    ).all()
+    rows = db.scalars(
+        select(Translation)
+        .where(Translation.segment_id.in_([s.id for s in segs]), Translation.stage == "polished")
+        .order_by(Translation.version.desc())
+    ).all()
+    latest: dict[str, dict] = {}
+    for t in rows:
+        if t.segment_id not in latest:
+            latest[t.segment_id] = {
+                "segment_id": t.segment_id,
+                "target_text": t.target_text,
+                "review_status": t.review_status,
+                "freshness_status": t.freshness_status,
+                "version": t.version,
+                "model_name": t.model_name,
+            }
+    return {"items": list(latest.values())}
 
 
 @router.get("/segments/{segment_id}/translations")

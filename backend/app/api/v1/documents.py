@@ -26,7 +26,7 @@ router = APIRouter(prefix="/projects/{project_id}", tags=["documents"])
 def _get_project(db: Session, project_id: str) -> Project:
     project = db.get(Project, project_id)
     if project is None:
-        raise HTTPException(status_code=404, detail="project not found")
+        raise HTTPException(status_code=404, detail="项目不存在")
     return project
 
 
@@ -155,6 +155,38 @@ def list_scenes(project_id: str, db: Session = Depends(get_db)) -> list[Scene]:
             .order_by(Scene.chapter_id, Scene.scene_no)
         )
     )
+
+
+@router.patch("/segments/{segment_id}")
+def edit_segment(project_id: str, segment_id: str, payload: dict, db: Session = Depends(get_db)) -> dict:
+    """人工编辑原文片段：留痕 + 旧译文标记待重译。"""
+    from sqlalchemy import update
+
+    from app.models.audit import AuditLog
+    from app.models.translation import Translation
+    from app.services.importer import sha256
+
+    _get_project(db, project_id)
+    seg = db.get(SourceSegment, segment_id)
+    if seg is None or seg.project_id != project_id:
+        raise HTTPException(status_code=404, detail="片段不存在")
+    new_text = str(payload.get("source_text", ""))
+    if not new_text.strip():
+        raise HTTPException(status_code=400, detail="原文不能为空")
+    old_text = seg.source_text
+    db.add(AuditLog(
+        project_id=project_id, entity_type="segment", entity_id=segment_id,
+        action="edit_source", before_text=old_text, after_text=new_text))
+    seg.source_text = new_text
+    seg.source_hash = sha256(new_text)
+    # 旧译文与修改后的原文不再对应：标记待重译
+    stale = db.execute(
+        update(Translation)
+        .where(Translation.segment_id == segment_id, Translation.freshness_status == "current")
+        .values(freshness_status="stale")
+    ).rowcount
+    db.commit()
+    return {"id": seg.id, "source_text": seg.source_text, "stale_translations": stale}
 
 
 @router.get("/segments", response_model=list[SegmentOut])

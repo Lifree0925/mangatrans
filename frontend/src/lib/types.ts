@@ -40,6 +40,15 @@ export interface Segment {
   source_end: number;
 }
 
+export interface LatestTranslation {
+  segment_id: string;
+  target_text: string;
+  review_status: string;
+  freshness_status: string;
+  version: number;
+  model_name: string;
+}
+
 export interface ParseReport {
   total_chars: number;
   covered_chars: number;

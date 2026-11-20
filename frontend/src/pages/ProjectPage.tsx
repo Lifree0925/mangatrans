@@ -2,11 +2,11 @@
 
 import { useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { ArrowLeft, Download, FileUp, ScanText, ShieldCheck, X, Zap } from "lucide-react";
+import { ArrowLeft, Check, Download, FileUp, Pencil, ScanText, ShieldCheck, X, Zap } from "lucide-react";
 import { Link, useParams } from "react-router-dom";
 import { api } from "../lib/api";
 import { toast } from "../lib/feedback";
-import type { Chapter, ExportResult, ParseReport, Project, ProviderInfo, QAIssueInfo, Scene, Segment, TaskInfo } from "../lib/types";
+import type { Chapter, ExportResult, LatestTranslation, ParseReport, Project, ProviderInfo, QAIssueInfo, Scene, Segment, TaskInfo } from "../lib/types";
 
 const typeColor: Record<string, string> = {
   heading: "text-(--color-text)",
@@ -21,6 +21,9 @@ export default function ProjectPage() {
   const fileRef = useRef<HTMLInputElement>(null);
   const [showReport, setShowReport] = useState(false);
   const [showQA, setShowQA] = useState(false);
+  // 片段编辑状态：editing = {segmentId, side: 'source'|'target'} | null
+  const [editing, setEditing] = useState<{ segmentId: string; side: "source" | "target" } | null>(null);
+  const [editDraft, setEditDraft] = useState("");
   const [expressTaskId, setExpressTaskId] = useState<string | null>(null);
   const [exporting, setExporting] = useState(false);
   const [exportOpen, setExportOpen] = useState(false);
@@ -60,6 +63,36 @@ export default function ProjectPage() {
     queryKey: ["segments", id],
     queryFn: () => api<Segment[]>(`/projects/${id}/segments`),
   });
+
+  const latestTranslations = useQuery({
+    queryKey: ["latest-translations", id],
+    queryFn: () => api<{ items: LatestTranslation[] }>(`/projects/${id}/translations/latest`),
+  });
+
+  const saveEdit = async () => {
+    if (!editing) return;
+    try {
+      if (editing.side === "source") {
+        await api(`/projects/${id}/segments/${editing.segmentId}`, {
+          method: "PATCH",
+          body: JSON.stringify({ source_text: editDraft }),
+        });
+        toast.success("原文已保存，对应译文已标记「待重译」");
+      } else {
+        await api(`/projects/${id}/segments/${editing.segmentId}/translations`, {
+          method: "POST",
+          body: JSON.stringify({ target_text: editDraft }),
+        });
+        toast.success("译文已保存（新增校对版本）");
+      }
+      qc.invalidateQueries({ queryKey: ["segments", id] });
+      qc.invalidateQueries({ queryKey: ["latest-translations", id] });
+      setEditing(null);
+    } catch (err) {
+      toast.error(`保存失败：${String(err)}`);
+    }
+  };
+
   const report = useQuery({
     queryKey: ["parse-report", id],
     queryFn: () => api<ParseReport>(`/projects/${id}/parse-report`),
@@ -280,16 +313,96 @@ export default function ProjectPage() {
         </aside>
 
         <div className="flex-1 overflow-auto p-4 font-mono text-[13px] leading-6">
-          {segs.map((s) => (
-            <div key={s.id} className="group flex gap-2 rounded px-2 hover:bg-(--color-panel)">
-              <span className="w-10 shrink-0 select-none text-right text-xs leading-6 text-(--color-muted)">
-                {s.segment_no}
-              </span>
-              <p className={`whitespace-pre-wrap ${typeColor[s.segment_type] ?? ""}`}>
-                {s.source_text.replace(/\n$/, "")}
-              </p>
-            </div>
-          ))}
+          <div className="grid grid-cols-2 gap-x-4">
+            <div className="text-right text-xs text-(--color-muted)">原文（可编辑）</div>
+            <div className="text-right text-xs text-(--color-muted)">英文译文（可校对）</div>
+            {segs.map((s) => {
+              const tr = latestTranslations.data?.items.find((i) => i.segment_id === s.id);
+              const isEditingSource = editing?.segmentId === s.id && editing.side === "source";
+              const isEditingTarget = editing?.segmentId === s.id && editing.side === "target";
+              const startEdit = (side: "source" | "target") => {
+                setEditing({ segmentId: s.id, side });
+                setEditDraft(
+                  side === "source"
+                    ? s.source_text.replace(/\n$/, "")
+                    : (tr?.target_text ?? "")
+                );
+              };
+              const editor = (
+                <div className="flex flex-col gap-1">
+                  <textarea
+                    value={editDraft}
+                    onChange={(e) => setEditDraft(e.target.value)}
+                    rows={Math.min(6, Math.max(2, editDraft.split("\n").length + 1))}
+                    autoFocus
+                    className="w-full resize-y rounded-lg border border-(--color-text) bg-(--color-bg) px-2 py-1 font-mono text-[13px] leading-6 outline-none"
+                  />
+                  <div className="flex gap-1.5">
+                    <button
+                      onClick={saveEdit}
+                      className="flex items-center gap-1 rounded-lg bg-(--color-accent) px-2 py-0.5 text-xs text-white hover:bg-(--color-accent-hover)"
+                    >
+                      <Check size={12} /> 保存
+                    </button>
+                    <button
+                      onClick={() => setEditing(null)}
+                      className="rounded-lg border border-(--color-border) px-2 py-0.5 text-xs hover:bg-(--color-panel2)"
+                    >
+                      取消
+                    </button>
+                  </div>
+                </div>
+              );
+              return (
+                <div key={s.id} className="group col-span-2 grid grid-cols-2 gap-x-4 rounded px-2 hover:bg-(--color-panel)">
+                  <div className="relative min-w-0">
+                    {isEditingSource ? editor : (
+                      <>
+                        <button
+                          onClick={() => startEdit("source")}
+                          title="编辑原文"
+                          className="absolute -left-6 top-1 hidden rounded p-0.5 text-(--color-muted) hover:bg-(--color-panel2) group-hover:block"
+                        >
+                          <Pencil size={12} />
+                        </button>
+                        <p className={`whitespace-pre-wrap ${typeColor[s.segment_type] ?? ""}`}>
+                          {s.source_text.replace(/\n$/, "")}
+                        </p>
+                      </>
+                    )}
+                  </div>
+                  <div className="relative min-w-0">
+                    {isEditingTarget ? editor : (
+                      <>
+                        <button
+                          onClick={() => startEdit("target")}
+                          title="校对译文"
+                          className="absolute -left-6 top-1 hidden rounded p-0.5 text-(--color-muted) hover:bg-(--color-panel2) group-hover:block"
+                        >
+                          <Pencil size={12} />
+                        </button>
+                        {tr ? (
+                          <p className={`whitespace-pre-wrap ${tr.freshness_status === "stale" ? "text-(--color-muted)" : ""}`}>
+                            {tr.target_text}
+                            {tr.freshness_status === "stale" && (
+                              <span
+                                title="原文已修改，译文需重新翻译"
+                                className="ml-2 rounded-md bg-amber-100 px-1.5 py-0.5 font-sans text-[11px] font-medium text-amber-700"
+                              >
+                                待重译
+                              </span>
+                            )}
+                          </p>
+                        ) : (
+                          <p className="text-(--color-muted)">—</p>
+                        )}
+                      </>
+                    )}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
         </div>
 
         {showReport && (

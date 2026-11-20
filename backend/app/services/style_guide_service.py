@@ -2,6 +2,8 @@
 
 import json
 
+from app.llm.json_utils import parse_llm_json
+
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
@@ -199,7 +201,7 @@ async def run_trial(
         response_schema=StyleGuideModel.model_json_schema(),
         temperature=0.3,
     )
-    guide = StyleGuideModel.model_validate(json.loads(resp.content))
+    guide = StyleGuideModel.model_validate(parse_llm_json(resp.content))
     with db_factory() as db:
         prev = db.scalar(
             select(func.max(StyleGuide.version)).where(StyleGuide.project_id == project_id)

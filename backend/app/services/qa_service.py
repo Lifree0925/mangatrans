@@ -1,9 +1,11 @@
 """确定性 QA 与语义 QA。"""
 
 import json
+
+from app.llm.json_utils import parse_llm_json
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -104,7 +106,11 @@ async def semantic_qa(
         response_schema=SemanticOutput.model_json_schema(),
         temperature=0.2,
     )
-    out = SemanticOutput.model_validate(json.loads(resp.content))
+    try:
+        out = SemanticOutput.model_validate(parse_llm_json(resp.content))
+    except (ValueError, ValidationError):
+        # 语义 QA 是质量增强：模型输出瑕疵时降级为无发现，不阻塞整本
+        return []
     return [i.model_dump() for i in out.issues]
 
 

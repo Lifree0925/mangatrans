@@ -9,7 +9,28 @@ from app.services.importer import sha256
 
 
 def parse_and_persist(db: Session, doc: SourceDocument, text: str) -> ParseResult:
-    """解析并写入章节/场景/片段；同文档版本重新解析时先清空旧结构。"""
+    """解析并写入章节/场景/片段；同文档版本重新解析时先清空旧结构与派生数据。
+
+    依赖链清理顺序（外键约束）：
+    QA 问题 → 译文 → 片段；场景卡 → 场景 → 章节。
+    """
+    from app.models.knowledge import SceneContextCard
+    from app.models.qa import QAIssue
+    from app.models.translation import Translation
+
+    seg_ids = db.scalars(
+        select(SourceSegment.id).where(SourceSegment.source_document_id == doc.id)
+    ).all()
+    if seg_ids:
+        db.execute(delete(QAIssue).where(QAIssue.translation_id.in_(
+            select(Translation.id).where(Translation.segment_id.in_(seg_ids))
+        )))
+        db.execute(delete(Translation).where(Translation.segment_id.in_(seg_ids)))
+    scene_ids = db.scalars(
+        select(Scene.id).where(Scene.source_document_id == doc.id)
+    ).all()
+    if scene_ids:
+        db.execute(delete(SceneContextCard).where(SceneContextCard.scene_id.in_(scene_ids)))
     db.execute(delete(SourceSegment).where(SourceSegment.source_document_id == doc.id))
     db.execute(delete(Scene).where(Scene.source_document_id == doc.id))
     db.execute(delete(Chapter).where(Chapter.source_document_id == doc.id))

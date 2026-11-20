@@ -69,3 +69,10 @@ def test_performance_80k_chars_under_2s() -> None:
     elapsed = time.perf_counter() - t0
     assert r.report.coverage_ok
     assert elapsed < 2.0, f"解析耗时 {elapsed:.2f}s 超过 2 秒限制"
+
+
+def test_chapter_title_with_md_prefix() -> None:
+    """# 第N回 / # 第N章 等 Markdown 风格章节标题应识别为 heading。"""
+    r = parse_script("# 第1回 宴桃园豪杰三结义　斩黄巾英雄首立功\n话说天下大势。\n# 第2章 重逢\n林晓：你好。")
+    assert r.report.chapter_count == 2
+    assert sum(1 for s in r.segments if s.type == "heading") >= 2

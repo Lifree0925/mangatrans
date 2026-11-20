@@ -24,7 +24,7 @@ RULE_NARRATIVE = "narrative"
 RULE_OTHER = "other"
 
 _CHAPTER_RE = re.compile(
-    rf"^第\s*[\d{_CN_NUM}]+\s*[集章回幕](?:[：:\s].*)?$|^Chapter\s+\d+.*$", re.IGNORECASE
+    rf"^#{{0,6}}\s*第\s*[\d{_CN_NUM}]+\s*[集章回幕].*$|^Chapter\s+\d+.*$", re.IGNORECASE
 )
 _SCENE_BRACKET_RE = re.compile(r"^[【〔\[](.{1,80})[】〕\]]$")
 _SCENE_LOC_RE = re.compile(

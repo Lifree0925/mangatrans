@@ -2,6 +2,8 @@
 
 import json
 
+from app.llm.json_utils import parse_llm_json
+
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -29,7 +31,7 @@ async def generate_card(provider: LLMProvider, text: str, model: str) -> SceneCa
         response_schema=SceneCardModel.model_json_schema(),
         temperature=0.2,
     )
-    data = json.loads(resp.content)
+    data = parse_llm_json(resp.content)
     return SceneCardModel.model_validate(data)
 
 
@@ -64,6 +66,7 @@ async def generate_cards_for_document(
         return {"generated": 0, "note": "剧本未识别出场景，跳过场景卡"}
 
     generated = 0
+    failed = 0
     for scene in scenes:
         parts = segs.get(scene.id, [])
         if not parts:
@@ -71,7 +74,11 @@ async def generate_cards_for_document(
         text = "".join(p.source_text for p in parts)
         if len(text.strip()) < 10:
             continue
-        card = await generate_card(provider, text, model)
+        try:
+            card = await generate_card(provider, text, model)
+        except Exception:  # noqa: BLE001 单场失败不阻塞整本翻译
+            failed += 1
+            continue
         with db_factory() as db:
             db.add(
                 SceneContextCard(
@@ -85,4 +92,4 @@ async def generate_cards_for_document(
             )
             db.commit()
         generated += 1
-    return {"generated": generated}
+    return {"generated": generated, "failed": failed}

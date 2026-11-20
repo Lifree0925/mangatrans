@@ -17,7 +17,7 @@ router = APIRouter(prefix="/projects/{project_id}", tags=["knowledge"])
 def _project(db: Session, project_id: str) -> Project:
     p = db.get(Project, project_id)
     if p is None:
-        raise HTTPException(status_code=404, detail="project not found")
+        raise HTTPException(status_code=404, detail="项目不存在")
     return p
 
 
@@ -84,7 +84,7 @@ def patch_knowledge(
 ) -> dict:
     item = db.get(KnowledgeItem, item_id)
     if item is None or item.project_id != project_id:
-        raise HTTPException(status_code=404, detail="knowledge not found")
+        raise HTTPException(status_code=404, detail="知识条目不存在")
     if "status" in payload and payload["status"] in {
         "candidate",
         "approved",

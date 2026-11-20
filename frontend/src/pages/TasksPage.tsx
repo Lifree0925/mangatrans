@@ -12,6 +12,25 @@ const statusColor: Record<string, string> = {
   paused: "text-amber-600",
 };
 
+/** 任务类型与状态的中文显示名（面向非技术用户）。 */
+const taskTypeLabel: Record<string, string> = {
+  express: "一键直出",
+  translate: "翻译",
+  trial: "试译",
+  knowledge: "知识提取",
+  scene_cards: "场景卡",
+  qa: "质量检查",
+  analyze: "分析",
+};
+const statusLabel: Record<string, string> = {
+  queued: "排队中",
+  running: "执行中",
+  completed: "已完成",
+  failed: "失败",
+  paused: "已暂停",
+  cancelled: "已取消",
+};
+
 export default function TasksPage() {
   const projects = useQuery({
     queryKey: ["projects"],
@@ -37,7 +56,7 @@ export default function TasksPage() {
             <div key={t.id} className="rounded-xl border border-(--color-border) bg-(--color-panel) px-4 py-3">
               <div className="flex items-center gap-3">
                 <span className={`text-sm font-medium ${statusColor[t.status] ?? ""}`}>
-                  {t.task_type} · {t.status}
+                  {taskTypeLabel[t.task_type] ?? t.task_type} · {statusLabel[t.status] ?? t.status}
                 </span>
                 {(t.progress as { done?: number; total?: number }).total != null && (
                   <span className="font-mono text-xs text-(--color-muted)">

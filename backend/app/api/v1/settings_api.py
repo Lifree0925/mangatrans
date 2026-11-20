@@ -77,7 +77,7 @@ def create_provider(payload: dict, db: Session = Depends(get_db)) -> dict:
 def put_credential(pid: str, payload: dict, db: Session = Depends(get_db)) -> dict:
     cfg = db.get(ProviderConfig, pid)
     if cfg is None:
-        raise HTTPException(status_code=404, detail="provider not found")
+        raise HTTPException(status_code=404, detail="模型服务不存在")
     credentials.save_credential(cfg.credential_ref, payload["api_key"])
     return {"ok": True}
 
@@ -86,7 +86,7 @@ def put_credential(pid: str, payload: dict, db: Session = Depends(get_db)) -> di
 def del_credential(pid: str, db: Session = Depends(get_db)) -> dict:
     cfg = db.get(ProviderConfig, pid)
     if cfg is None:
-        raise HTTPException(status_code=404, detail="provider not found")
+        raise HTTPException(status_code=404, detail="模型服务不存在")
     credentials.delete_credential(cfg.credential_ref)
     return {"ok": True}
 
@@ -98,7 +98,7 @@ async def test_provider_conn(pid: str, db: Session = Depends(get_db)) -> dict:
 
     cfg = db.get(ProviderConfig, pid)
     if cfg is None:
-        raise HTTPException(status_code=404, detail="provider not found")
+        raise HTTPException(status_code=404, detail="模型服务不存在")
     result = await test_provider(cfg)
     cfg.is_verified = bool(result.get("ok"))
     cfg.last_tested_at = datetime.now(timezone.utc)
@@ -112,7 +112,7 @@ async def test_provider_conn(pid: str, db: Session = Depends(get_db)) -> dict:
 def patch_provider(pid: str, payload: dict, db: Session = Depends(get_db)) -> dict:
     cfg = db.get(ProviderConfig, pid)
     if cfg is None:
-        raise HTTPException(status_code=404, detail="provider not found")
+        raise HTTPException(status_code=404, detail="模型服务不存在")
     for field in ("display_name", "base_url", "model_name", "timeout_seconds", "max_retries"):
         if field in payload:
             setattr(cfg, field, payload[field])
@@ -133,7 +133,7 @@ def patch_provider(pid: str, payload: dict, db: Session = Depends(get_db)) -> di
 def get_task(task_id: str, db: Session = Depends(get_db)) -> dict:
     task = db.get(Task, task_id)
     if task is None:
-        raise HTTPException(status_code=404, detail="task not found")
+        raise HTTPException(status_code=404, detail="任务不存在")
     return {
         "id": task.id,
         "task_type": task.task_type,
@@ -147,7 +147,7 @@ def get_task(task_id: str, db: Session = Depends(get_db)) -> dict:
 def pause_task(task_id: str, db: Session = Depends(get_db)) -> dict:
     task = db.get(Task, task_id)
     if task is None:
-        raise HTTPException(status_code=404, detail="task not found")
+        raise HTTPException(status_code=404, detail="任务不存在")
     if task.status == "running":
         task.status = "paused"
         db.commit()
@@ -158,7 +158,7 @@ def pause_task(task_id: str, db: Session = Depends(get_db)) -> dict:
 def resume_task(task_id: str, db: Session = Depends(get_db)) -> dict:
     task = db.get(Task, task_id)
     if task is None:
-        raise HTTPException(status_code=404, detail="task not found")
+        raise HTTPException(status_code=404, detail="任务不存在")
     has_items = db.scalar(
         select(TaskItem.id).where(TaskItem.task_id == task_id).limit(1)
     )
@@ -187,7 +187,7 @@ def resume_task(task_id: str, db: Session = Depends(get_db)) -> dict:
 def retry_task(task_id: str, db: Session = Depends(get_db)) -> dict:
     task = db.get(Task, task_id)
     if task is None:
-        raise HTTPException(status_code=404, detail="task not found")
+        raise HTTPException(status_code=404, detail="任务不存在")
     if task.status == "completed":
         return {"id": task.id, "status": task.status}
     from sqlalchemy import update
@@ -233,7 +233,7 @@ def delete_provider(pid: str, db: Session = Depends(get_db)) -> None:
     """删除模型服务配置及对应系统凭据。"""
     cfg = db.get(ProviderConfig, pid)
     if cfg is None:
-        raise HTTPException(status_code=404, detail="provider not found")
+        raise HTTPException(status_code=404, detail="模型服务不存在")
     credentials.delete_credential(cfg.credential_ref)
     was_default = cfg.is_default
     db.delete(cfg)

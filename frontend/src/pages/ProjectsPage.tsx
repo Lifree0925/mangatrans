@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Folder, FolderOpen, Plus, Trash2, X } from "lucide-react";
+import { Folder, FolderOpen, Plus, Search, Trash2, X } from "lucide-react";
 import { Link } from "react-router-dom";
 import { api } from "../lib/api";
 import { confirmAction, toast } from "../lib/feedback";
@@ -13,6 +13,7 @@ export default function ProjectsPage() {
   const [name, setName] = useState("");
   const [createOpen, setCreateOpen] = useState(false);
   const [storagePath, setStoragePath] = useState("");
+  const [search, setSearch] = useState("");
   const isTauri = !!(
     window as unknown as { __TAURI_INTERNALS__?: unknown }
   ).__TAURI_INTERNALS__;
@@ -74,6 +75,24 @@ export default function ProjectsPage() {
     <div className="flex h-full flex-col">
       <div className="flex items-center gap-3 border-b border-(--color-border) px-6 py-4">
         <h1 className="text-lg font-semibold">项目</h1>
+        <div className="relative mx-auto w-full max-w-md">
+          <Search size={15} className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-(--color-muted)" />
+          <input
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            placeholder="搜索项目名称…"
+            className="w-full rounded-lg border border-(--color-border) bg-(--color-bg) py-1.5 pl-9 pr-8 text-sm outline-none focus:border-(--color-text)"
+          />
+          {search && (
+            <button
+              onClick={() => setSearch("")}
+              title="清空搜索"
+              className="absolute right-2 top-1/2 -translate-y-1/2 rounded p-0.5 text-(--color-muted) hover:bg-(--color-panel2)"
+            >
+              <X size={14} />
+            </button>
+          )}
+        </div>
         <div className="ml-auto flex gap-2">
           <button
             onClick={() => setCreateOpen(true)}
@@ -95,7 +114,15 @@ export default function ProjectsPage() {
           )}
 
           <div className="space-y-2">
-            {projects.data?.map((p) => (
+            {(() => {
+              const q = search.trim().toLowerCase();
+              const filtered = q
+                ? (projects.data ?? []).filter((p) => p.name.toLowerCase().includes(q))
+                : projects.data;
+              if (filtered && filtered.length === 0) {
+                return <p className="py-8 text-center text-sm text-(--color-muted)">未找到匹配的项目</p>;
+              }
+              return filtered?.map((p) => (
               <div
                 key={p.id}
                 className="group flex items-center gap-3 rounded-xl px-4 py-3 hover:bg-(--color-panel)"
@@ -125,7 +152,8 @@ export default function ProjectsPage() {
                   <Trash2 size={15} />
                 </button>
               </div>
-            ))}
+              ));
+            })()}
           </div>
 
           {connecting && (

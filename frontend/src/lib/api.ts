@@ -33,6 +33,21 @@ export class ApiError extends Error {
   }
 }
 
+/** 把底层网络错误翻译成用户可理解的中文提示。 */
+function friendlyNetworkError(err: unknown): string {
+  const raw = err instanceof Error ? err.message : String(err);
+  if (raw.includes("Failed to fetch")) {
+    return "无法连接本地服务：请稍候重试（服务启动中）";
+  }
+  if (raw.includes("NetworkError")) {
+    return "网络错误：请检查网络连接后重试";
+  }
+  if (raw.includes("timed out") || raw.includes("abort")) {
+    return "请求超时：本地服务未响应";
+  }
+  return raw;
+}
+
 /** 本地回环连接失败说明后端尚未就绪（sidecar 启动/解压中），自动重试。 */
 async function fetchWithRetry(
   url: string,
@@ -46,7 +61,9 @@ async function fetchWithRetry(
       return await fetch(url, init);
     } catch (err) {
       lastError = err;
-      if (Date.now() - start >= timeoutMs) throw lastError;
+      if (Date.now() - start >= timeoutMs) {
+        throw new ApiError(0, friendlyNetworkError(lastError));
+      }
       await new Promise((resolve) => setTimeout(resolve, 1200));
     }
   }
@@ -63,7 +80,15 @@ export async function api<T>(path: string, init?: RequestInit): Promise<T> {
     headers: { ...headers, ...init?.headers },
   });
   if (!res.ok) {
-    throw new ApiError(res.status, `${res.status}: ${await res.text()}`);
+    const body = await res.text();
+    let detail = body;
+    try {
+      const parsed = JSON.parse(body);
+      if (typeof parsed.detail === "string") detail = parsed.detail;
+    } catch {
+      /* 非 JSON 错误体，保留原文 */
+    }
+    throw new ApiError(res.status, detail);
   }
   if (res.status === 204) return undefined as T;
   return (await res.json()) as T;

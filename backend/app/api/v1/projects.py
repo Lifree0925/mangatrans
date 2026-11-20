@@ -51,7 +51,7 @@ def create_project(payload: ProjectCreate, db: Session = Depends(get_db)) -> Pro
 def get_project(project_id: str, db: Session = Depends(get_db)) -> Project:
     project = db.get(Project, project_id)
     if project is None:
-        raise HTTPException(status_code=404, detail="project not found")
+        raise HTTPException(status_code=404, detail="项目不存在")
     return project
 
 
@@ -61,7 +61,7 @@ def patch_project(
 ) -> Project:
     project = db.get(Project, project_id)
     if project is None:
-        raise HTTPException(status_code=404, detail="project not found")
+        raise HTTPException(status_code=404, detail="项目不存在")
     for field, value in payload.model_dump(exclude_unset=True).items():
         setattr(project, field, value)
     db.commit()
@@ -75,4 +75,4 @@ def delete_project(project_id: str, db: Session = Depends(get_db)) -> None:
     from app.services.project_service import delete_project_cascade
 
     if not delete_project_cascade(db, project_id):
-        raise HTTPException(status_code=404, detail="project not found")
+        raise HTTPException(status_code=404, detail="项目不存在")

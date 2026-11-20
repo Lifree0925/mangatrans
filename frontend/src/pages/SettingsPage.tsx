@@ -324,19 +324,23 @@ export default function SettingsPage() {
                     type="text"
                     value={showKey ? apiKey : maskKey(apiKey)}
                     readOnly={!showKey}
-                    onClick={() => setShowKey(true)}
+                    onClick={() => setShowKey((v) => !v)}
                     onChange={(e) => setApiKey(e.target.value)}
                     placeholder="sk-..."
                     autoComplete="off"
-                    className="block w-full rounded-lg border border-(--color-border) bg-(--color-bg) px-3 py-2 font-mono text-sm outline-none focus:border-(--color-text)"
+                    title={showKey ? "点击隐藏 Key" : "点击显示 Key"}
+                    className="block w-full cursor-pointer rounded-lg border border-(--color-border) bg-(--color-bg) px-3 py-2 font-mono text-sm outline-none focus:border-(--color-text)"
                   />
                   <button
                     type="button"
-                    onClick={() => setShowKey((v) => !v)}
+                    onClick={(e) => { e.preventDefault(); e.stopPropagation(); setShowKey((v) => !v); }}
                     title={showKey ? "隐藏 Key" : "显示 Key"}
-                    className="rounded-lg border border-(--color-border) bg-(--color-bg) px-2.5 text-(--color-muted) hover:bg-(--color-panel2)"
+                    aria-label={showKey ? "隐藏 Key" : "显示 Key"}
+                    className="rounded-lg border border-(--color-border) bg-(--color-bg) px-2.5 py-2 text-(--color-muted) hover:bg-(--color-panel2)"
                   >
-                    {showKey ? <EyeOff size={16} /> : <Eye size={16} />}
+                    <span className="pointer-events-none select-none block">
+                      {showKey ? <EyeOff size={16} /> : <Eye size={16} />}
+                    </span>
                   </button>
                 </div>
               </label>
@@ -394,19 +398,23 @@ export default function SettingsPage() {
                           type="text"
                           value={showEditKey ? keyDraft : maskKey(keyDraft)}
                           readOnly={!showEditKey}
-                          onClick={() => setShowEditKey(true)}
+                          onClick={() => setShowEditKey((v) => !v)}
                           onChange={(e) => setKeyDraft(e.target.value)}
                           placeholder="输入新 Key"
                           autoComplete="off"
-                          className="w-64 rounded-lg border border-(--color-border) bg-(--color-bg) px-2 py-1 font-mono text-xs outline-none focus:border-(--color-text)"
+                          title={showEditKey ? "点击隐藏 Key" : "点击显示 Key"}
+                          className="w-64 cursor-pointer rounded-lg border border-(--color-border) bg-(--color-bg) px-2 py-1 font-mono text-xs outline-none focus:border-(--color-text)"
                         />
                         <button
                           type="button"
-                          onClick={() => setShowEditKey((v) => !v)}
+                          onClick={(e) => { e.preventDefault(); e.stopPropagation(); setShowEditKey((v) => !v); }}
                           title={showEditKey ? "隐藏 Key（* 掩码）" : "显示 Key"}
+                          aria-label={showEditKey ? "隐藏 Key（* 掩码）" : "显示 Key"}
                           className="rounded-lg border border-(--color-border) bg-(--color-bg) px-2 py-1 text-(--color-muted) hover:bg-(--color-panel2)"
                         >
-                          {showEditKey ? <EyeOff size={14} /> : <Eye size={14} />}
+                          <span className="pointer-events-none select-none block">
+                            {showEditKey ? <EyeOff size={14} /> : <Eye size={14} />}
+                          </span>
                         </button>
                         <button
                           onClick={() => saveKey.mutate(p.id)}

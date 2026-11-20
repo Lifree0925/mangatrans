@@ -21,7 +21,7 @@ router = APIRouter(prefix="/projects/{project_id}", tags=["qa"])
 def _project(db: Session, project_id: str) -> Project:
     p = db.get(Project, project_id)
     if p is None:
-        raise HTTPException(status_code=404, detail="project not found")
+        raise HTTPException(status_code=404, detail="项目不存在")
     return p
 
 
