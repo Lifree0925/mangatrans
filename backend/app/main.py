@@ -102,3 +102,15 @@ def create_app() -> FastAPI:
 security.set_token(settings.auth_token or security.generate_token())
 
 app = create_app()
+
+
+if __name__ == "__main__":
+    # PyInstaller sidecar 入口：Tauri 通过 MT_PORT / MT_AUTH_TOKEN / MT_DATA_DIR 注入配置
+    import uvicorn
+
+    uvicorn.run(
+        app,
+        host=settings.host,
+        port=settings.port,
+        log_level="info",
+    )
