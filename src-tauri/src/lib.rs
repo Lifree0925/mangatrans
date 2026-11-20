@@ -38,6 +38,30 @@ fn get_storage_info(app: AppHandle, state: State<'_, BackendState>) -> serde_jso
     })
 }
 
+/// 导出保存：弹出系统“另存为”对话框，写入文本文件，返回保存路径。
+#[tauri::command]
+async fn save_text_file(
+    app: AppHandle,
+    default_name: String,
+    content: String,
+    default_dir: Option<String>,
+) -> Result<Option<String>, String> {
+    use tauri_plugin_dialog::DialogExt;
+
+    let mut builder = app.dialog().file().set_file_name(&default_name);
+    if let Some(dir) = default_dir {
+        if !dir.is_empty() {
+            builder = builder.set_directory(&dir);
+        }
+    }
+    let Some(path) = builder.blocking_save_file() else {
+        return Ok(None);
+    };
+    let path_buf = path.into_path().map_err(|e| e.to_string())?;
+    std::fs::write(&path_buf, content).map_err(|e| e.to_string())?;
+    Ok(Some(path_buf.to_string_lossy().to_string()))
+}
+
 /// 通用目录选择器（仅返回路径，不持久化）：用于新建项目时选择项目文件夹。
 #[tauri::command]
 async fn pick_directory(app: AppHandle) -> Result<Option<String>, String> {
@@ -229,7 +253,8 @@ pub fn run() {
             get_backend_config,
             get_storage_info,
             choose_data_dir,
-            pick_directory
+            pick_directory,
+            save_text_file
         ])
         .build(tauri::generate_context!())
         .expect("Tauri 构建失败")

@@ -2,7 +2,7 @@
 
 import { useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { ArrowLeft, Download, FileUp, ScanText, ShieldCheck, Zap } from "lucide-react";
+import { ArrowLeft, Download, FileUp, ScanText, ShieldCheck, X, Zap } from "lucide-react";
 import { Link, useParams } from "react-router-dom";
 import { api } from "../lib/api";
 import { toast } from "../lib/feedback";
@@ -23,6 +23,11 @@ export default function ProjectPage() {
   const [showQA, setShowQA] = useState(false);
   const [expressTaskId, setExpressTaskId] = useState<string | null>(null);
   const [exporting, setExporting] = useState(false);
+  const [exportOpen, setExportOpen] = useState(false);
+  const [exportBilingual, setExportBilingual] = useState(true);
+  const isTauri = !!(
+    window as unknown as { __TAURI_INTERNALS__?: unknown }
+  ).__TAURI_INTERNALS__;
 
   const project = useQuery({
     queryKey: ["project", id],
@@ -90,19 +95,33 @@ export default function ProjectPage() {
     onError: (err) => toast.error(`启动一键直出失败：${String(err)}`),
   });
 
-  const downloadExport = async (bilingual: boolean) => {
+  const runExport = async () => {
     setExporting(true);
     try {
       const r = await api<ExportResult>(`/projects/${id}/export`, {
         method: "POST",
-        body: JSON.stringify({ bilingual }),
+        body: JSON.stringify({ bilingual: exportBilingual }),
       });
-      const blob = new Blob([r.content], { type: "text/markdown" });
-      const a = document.createElement("a");
-      a.href = URL.createObjectURL(blob);
-      a.download = r.filename;
-      a.click();
-      URL.revokeObjectURL(a.href);
+      if (isTauri) {
+        const { invoke } = await import("@tauri-apps/api/core");
+        const saved = await invoke<string | null>("save_text_file", {
+          defaultName: r.filename,
+          content: r.content,
+          defaultDir: project.data?.storage_path ?? null,
+        });
+        if (saved) toast.success(`已保存：${saved}`);
+      } else {
+        const blob = new Blob([r.content], { type: "text/markdown" });
+        const a = document.createElement("a");
+        a.href = URL.createObjectURL(blob);
+        a.download = r.filename;
+        a.click();
+        URL.revokeObjectURL(a.href);
+        toast.success("已开始下载");
+      }
+      setExportOpen(false);
+    } catch (err) {
+      toast.error(`导出失败：${String(err)}`);
     } finally {
       setExporting(false);
     }
@@ -198,10 +217,9 @@ export default function ProjectPage() {
             <ShieldCheck size={15} /> QA
           </button>
           <button
-            onClick={() => downloadExport(true)}
-            disabled={exporting}
-            className="flex items-center gap-1.5 rounded-lg border border-(--color-border) bg-(--color-bg) px-3 py-1.5 text-sm hover:bg-(--color-panel2) disabled:opacity-50"
-            title="导出中英对照 Markdown"
+            onClick={() => setExportOpen(true)}
+            className="flex items-center gap-1.5 rounded-lg border border-(--color-border) bg-(--color-bg) px-3 py-1.5 text-sm hover:bg-(--color-panel2)"
+            title="导出英文剧本或中英对照"
           >
             <Download size={15} /> 导出
           </button>
@@ -251,16 +269,19 @@ export default function ProjectPage() {
               </p>
             </div>
           ))}
-          {!segs.length && (
-            <p className="text-(--color-muted)">导入 TXT / MD / DOCX 剧本，然后点击解析</p>
-          )}
         </div>
 
         {showReport && (
           <aside className="w-72 shrink-0 overflow-auto border-l border-(--color-border) p-3 text-xs">
             <div className="mb-2 flex items-center justify-between">
               <p className="font-semibold">解析报告</p>
-              <button onClick={() => setShowReport(false)} className="text-(--color-muted)">×</button>
+              <button
+                onClick={() => setShowReport(false)}
+                className="rounded-lg p-1.5 text-(--color-muted) hover:bg-(--color-panel2)"
+                title="关闭"
+              >
+                <X size={18} />
+              </button>
             </div>
             {report.data ? (
               <>
@@ -292,7 +313,13 @@ export default function ProjectPage() {
           <aside className="w-80 shrink-0 overflow-auto border-l border-(--color-border) p-3 text-xs">
             <div className="mb-2 flex items-center justify-between">
               <p className="font-semibold">QA 问题</p>
-              <button onClick={() => setShowQA(false)} className="text-(--color-muted)">×</button>
+              <button
+                onClick={() => setShowQA(false)}
+                className="rounded-lg p-1.5 text-(--color-muted) hover:bg-(--color-panel2)"
+                title="关闭"
+              >
+                <X size={18} />
+              </button>
             </div>
             {qaIssues.data?.length === 0 && <p className="text-(--color-muted)">无问题记录</p>}
             {qaIssues.data?.map((i) => (
@@ -309,6 +336,78 @@ export default function ProjectPage() {
           </aside>
         )}
       </div>
+
+      {exportOpen && (
+        <div
+          className="fixed inset-0 z-[65] flex items-center justify-center bg-black/30 p-6"
+          onClick={() => setExportOpen(false)}
+        >
+          <div
+            className="w-full max-w-md rounded-2xl bg-(--color-bg) p-5 shadow-2xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between">
+              <h3 className="text-base font-semibold">导出剧本</h3>
+              <button
+                onClick={() => setExportOpen(false)}
+                className="rounded-lg p-1.5 text-(--color-muted) hover:bg-(--color-panel2)"
+              >
+                <X size={18} />
+              </button>
+            </div>
+
+            <p className="mt-4 text-xs text-(--color-muted)">导出类型</p>
+            <div className="mt-2 space-y-2">
+              <label className="flex cursor-pointer items-center gap-3 rounded-lg border border-(--color-border) px-3 py-2.5 text-sm hover:bg-(--color-panel)">
+                <input
+                  type="radio"
+                  checked={exportBilingual}
+                  onChange={() => setExportBilingual(true)}
+                />
+                <span>中英对照 Markdown</span>
+                <span className="ml-auto text-xs text-(--color-muted)">便于人工校对</span>
+              </label>
+              <label className="flex cursor-pointer items-center gap-3 rounded-lg border border-(--color-border) px-3 py-2.5 text-sm hover:bg-(--color-panel)">
+                <input
+                  type="radio"
+                  checked={!exportBilingual}
+                  onChange={() => setExportBilingual(false)}
+                />
+                <span>纯英文 Markdown</span>
+                <span className="ml-auto text-xs text-(--color-muted)">交付版本</span>
+              </label>
+            </div>
+
+            <div className="mt-4 rounded-lg bg-(--color-panel) px-3 py-2.5 text-xs leading-5 text-(--color-muted)">
+              <p>
+                保存位置：
+                {isTauri
+                  ? "确认后将弹出系统“另存为”对话框，可选择任意磁盘位置。"
+                  : "浏览器将下载到默认下载目录。"}
+              </p>
+              {project.data?.storage_path && (
+                <p className="mt-1 break-all font-mono">项目文件夹：{project.data.storage_path}</p>
+              )}
+            </div>
+
+            <div className="mt-5 flex justify-end gap-2">
+              <button
+                onClick={() => setExportOpen(false)}
+                className="rounded-lg border border-(--color-border) bg-(--color-bg) px-4 py-1.5 text-sm hover:bg-(--color-panel2)"
+              >
+                取消
+              </button>
+              <button
+                onClick={runExport}
+                disabled={exporting}
+                className="rounded-lg bg-(--color-accent) px-4 py-1.5 text-sm text-white hover:bg-(--color-accent-hover) disabled:opacity-50"
+              >
+                {exporting ? "导出中…" : "导出"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
