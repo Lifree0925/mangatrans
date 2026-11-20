@@ -18,19 +18,31 @@ router = APIRouter(tags=["settings"])
 @router.get("/settings/providers")
 def list_providers(db: Session = Depends(get_db)) -> list[dict]:
     rows = db.scalars(select(ProviderConfig).order_by(ProviderConfig.created_at))
-    return [
-        {
-            "id": r.id,
-            "display_name": r.display_name,
-            "base_url": r.base_url,
-            "model_name": r.model_name,
-            "credential_ref": r.credential_ref,
-            "has_credential": bool(credentials.get_credential(r.credential_ref)),
-            "is_default": r.is_default,
-            "config_version": r.config_version,
-        }
-        for r in rows
-    ]
+    def _mask(secret: str | None) -> str | None:
+        """Key 掩码：保留首尾 4 位，中间用 * 隐藏。"""
+        if not secret:
+            return None
+        if len(secret) <= 8:
+            return "*" * len(secret)
+        return secret[:4] + "*" * max(4, len(secret) - 8) + secret[-4:]
+
+    result = []
+    for r in rows:
+        secret = credentials.get_credential(r.credential_ref)
+        result.append(
+            {
+                "id": r.id,
+                "display_name": r.display_name,
+                "base_url": r.base_url,
+                "model_name": r.model_name,
+                "credential_ref": r.credential_ref,
+                "has_credential": bool(secret),
+                "masked_key": _mask(secret),
+                "is_default": r.is_default,
+                "config_version": r.config_version,
+            }
+        )
+    return result
 
 
 @router.post("/settings/providers", status_code=201)
@@ -172,3 +184,21 @@ def list_project_tasks(project_id: str, db: Session = Depends(get_db)) -> list[d
         }
         for t in tasks
     ]
+
+
+@router.delete("/settings/providers/{pid}", status_code=204)
+def delete_provider(pid: str, db: Session = Depends(get_db)) -> None:
+    """删除模型服务配置及对应系统凭据。"""
+    cfg = db.get(ProviderConfig, pid)
+    if cfg is None:
+        raise HTTPException(status_code=404, detail="provider not found")
+    credentials.delete_credential(cfg.credential_ref)
+    was_default = cfg.is_default
+    db.delete(cfg)
+    db.commit()
+    if was_default:
+        fallback = db.scalar(select(ProviderConfig).limit(1))
+        if fallback is not None:
+            fallback.is_default = True
+            db.commit()
+        set_default_from_db(db)

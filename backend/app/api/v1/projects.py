@@ -54,8 +54,8 @@ def patch_project(
 
 @router.delete("/{project_id}", status_code=status.HTTP_204_NO_CONTENT)
 def delete_project(project_id: str, db: Session = Depends(get_db)) -> None:
-    project = db.get(Project, project_id)
-    if project is None:
+    """级联删除项目及其全部关联数据（外键依赖顺序）。"""
+    from app.services.project_service import delete_project_cascade
+
+    if not delete_project_cascade(db, project_id):
         raise HTTPException(status_code=404, detail="project not found")
-    db.delete(project)
-    db.commit()

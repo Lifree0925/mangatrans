@@ -110,15 +110,21 @@ const HELP_SECTIONS: { title: string; items: string[] }[] = [
   },
 ];
 
+function maskKey(key: string): string {
+  if (!key) return "";
+  if (key.length <= 8) return "*".repeat(key.length);
+  return key.slice(0, 4) + "*".repeat(Math.max(4, key.length - 8)) + key.slice(-4);
+}
+
 export default function SettingsPage() {
   const qc = useQueryClient();
   const [model, setModel] = useState("");
   const [baseUrl, setBaseUrl] = useState("");
   const [apiKey, setApiKey] = useState("");
   const [showKey, setShowKey] = useState(false);
-  const [keyFor, setKeyFor] = useState<string | null>(null);
   const [keyDraft, setKeyDraft] = useState("");
-  const [showKeyFor, setShowKeyFor] = useState<string | null>(null);
+  const [editingKeyFor, setEditingKeyFor] = useState<string | null>(null);
+  const [showEditKey, setShowEditKey] = useState(false);
   const [updateInfo, setUpdateInfo] = useState<UpdateInfo | null>(null);
   const [showHelp, setShowHelp] = useState(false);
 
@@ -154,7 +160,7 @@ export default function SettingsPage() {
       }),
     onSuccess: () => {
       setKeyDraft("");
-      setKeyFor(null);
+      setEditingKeyFor(null);
       qc.invalidateQueries({ queryKey: ["providers"] });
     },
   });
@@ -203,8 +209,10 @@ export default function SettingsPage() {
                 API Key
                 <div className="mt-1 flex gap-2">
                   <input
-                    type={showKey ? "text" : "password"}
-                    value={apiKey}
+                    type="text"
+                    value={showKey ? apiKey : maskKey(apiKey)}
+                    readOnly={!showKey}
+                    onClick={() => setShowKey(true)}
                     onChange={(e) => setApiKey(e.target.value)}
                     placeholder="sk-..."
                     autoComplete="off"
@@ -251,31 +259,60 @@ export default function SettingsPage() {
                   </div>
                   <p className="mt-0.5 font-mono text-xs text-(--color-muted)">{p.base_url}</p>
                   <div className="mt-2 flex items-center gap-2">
-                    <input
-                      type={showKeyFor === p.id ? "text" : "password"}
-                      value={keyFor === p.id ? keyDraft : ""}
-                      onChange={(e) => {
-                        setKeyFor(p.id);
-                        setKeyDraft(e.target.value);
-                      }}
-                      placeholder={p.has_credential ? "输入新 Key 覆盖" : "输入 API Key"}
-                      autoComplete="off"
-                      className="w-64 rounded-lg border border-(--color-border) bg-(--color-bg) px-2 py-1 font-mono text-xs outline-none focus:border-(--color-text)"
-                    />
-                    <button
-                      type="button"
-                      onClick={() => setShowKeyFor((v) => (v === p.id ? null : p.id))}
-                      title={showKeyFor === p.id ? "隐藏 Key" : "显示 Key"}
-                      className="rounded-lg border border-(--color-border) bg-(--color-bg) px-2 py-1 text-(--color-muted) hover:bg-(--color-panel2)"
-                    >
-                      {showKeyFor === p.id ? <EyeOff size={14} /> : <Eye size={14} />}
-                    </button>
-                    <button
-                      onClick={() => saveKey.mutate(p.id)}
-                      className="rounded-lg border border-(--color-border) bg-(--color-bg) px-2 py-1 text-xs hover:bg-(--color-panel2)"
-                    >
-                      保存 Key
-                    </button>
+                    {editingKeyFor === p.id ? (
+                      <>
+                        <input
+                          type="text"
+                          value={showEditKey ? keyDraft : maskKey(keyDraft)}
+                          readOnly={!showEditKey}
+                          onClick={() => setShowEditKey(true)}
+                          onChange={(e) => setKeyDraft(e.target.value)}
+                          placeholder="输入新 Key"
+                          autoComplete="off"
+                          className="w-64 rounded-lg border border-(--color-border) bg-(--color-bg) px-2 py-1 font-mono text-xs outline-none focus:border-(--color-text)"
+                        />
+                        <button
+                          type="button"
+                          onClick={() => setShowEditKey((v) => !v)}
+                          title={showEditKey ? "隐藏 Key（* 掩码）" : "显示 Key"}
+                          className="rounded-lg border border-(--color-border) bg-(--color-bg) px-2 py-1 text-(--color-muted) hover:bg-(--color-panel2)"
+                        >
+                          {showEditKey ? <EyeOff size={14} /> : <Eye size={14} />}
+                        </button>
+                        <button
+                          onClick={() => saveKey.mutate(p.id)}
+                          disabled={!keyDraft.trim()}
+                          className="rounded-lg bg-(--color-accent) px-2 py-1 text-xs text-white hover:bg-(--color-accent-hover) disabled:opacity-40"
+                        >
+                          保存
+                        </button>
+                        <button
+                          onClick={() => {
+                            setEditingKeyFor(null);
+                            setKeyDraft("");
+                          }}
+                          className="rounded-lg border border-(--color-border) bg-(--color-bg) px-2 py-1 text-xs hover:bg-(--color-panel2)"
+                        >
+                          取消
+                        </button>
+                      </>
+                    ) : (
+                      <>
+                        <span className="font-mono text-xs text-(--color-muted)">
+                          {p.masked_key ?? "未配置 Key"}
+                        </span>
+                        <button
+                          onClick={() => {
+                            setEditingKeyFor(p.id);
+                            setKeyDraft("");
+                            setShowEditKey(true);
+                          }}
+                          className="rounded-lg border border-(--color-border) bg-(--color-bg) px-2 py-1 text-xs hover:bg-(--color-panel2)"
+                        >
+                          修改 Key
+                        </button>
+                      </>
+                    )}
                   </div>
                 </div>
               ))}
@@ -290,7 +327,7 @@ export default function SettingsPage() {
           <section>
             <h2 className="text-sm font-semibold">使用说明</h2>
             <div className="mt-3 flex items-center gap-3 rounded-xl bg-(--color-panel) px-4 py-3 text-sm">
-              <span className="text-(--color-muted)">第一次使用？查看完整的功能说明与操作步骤。</span>
+              <span className="text-(--color-muted)">查看完整的功能说明与操作步骤。</span>
               <button
                 onClick={() => setShowHelp(true)}
                 className="ml-auto rounded-lg border border-(--color-border) bg-(--color-bg) px-3 py-1 text-xs hover:bg-(--color-panel2)"
@@ -304,12 +341,6 @@ export default function SettingsPage() {
             <h2 className="text-sm font-semibold">软件更新</h2>
             <div className="mt-3 flex items-center gap-3 rounded-xl bg-(--color-panel) px-4 py-3 text-sm">
               <span className="text-(--color-muted)">当前版本 v{APP_VERSION}</span>
-              <button
-                onClick={async () => setUpdateInfo(await checkUpdate(true))}
-                className="rounded-lg border border-(--color-border) bg-(--color-bg) px-3 py-1 text-xs hover:bg-(--color-panel2)"
-              >
-                检查更新
-              </button>
               {updateInfo?.has_update && updateInfo.download_url && (
                 <a href={updateInfo.download_url} target="_blank" rel="noreferrer" className="text-xs underline">
                   发现新版本 v{updateInfo.latest}，去下载 →
@@ -320,6 +351,12 @@ export default function SettingsPage() {
                   {updateInfo.error ? "暂时无法检查更新（网络受限）" : "已是最新版本"}
                 </span>
               )}
+              <button
+                onClick={async () => setUpdateInfo(await checkUpdate(true))}
+                className="ml-auto rounded-lg border border-(--color-border) bg-(--color-bg) px-3 py-1 text-xs hover:bg-(--color-panel2)"
+              >
+                检查更新
+              </button>
             </div>
           </section>
         </div>

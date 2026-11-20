@@ -31,7 +31,13 @@ export default function ProjectsPage() {
   const remove = useMutation({
     mutationFn: (id: string) => api<void>(`/projects/${id}`, { method: "DELETE" }),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["projects"] }),
+    onError: (err) => alert(`删除失败：${String(err)}`),
   });
+
+  const confirmRemove = (p: Project) => {
+    if (!confirm(`删除项目「${p.name}」？该项目的原文、译文、知识与任务记录将一并删除。`)) return;
+    remove.mutate(p.id);
+  };
 
   // 首次请求仍在进行（未发生过失败）时显示骨架；连接被拒后立即回到正常空状态
   const showSkeleton = projects.isLoading && projects.failureCount === 0;
@@ -79,32 +85,30 @@ export default function ProjectsPage() {
 
           <div className="space-y-2">
             {projects.data?.map((p) => (
-              <Link
+              <div
                 key={p.id}
-                to={`/projects/${p.id}`}
                 className="group flex items-center gap-3 rounded-xl px-4 py-3 hover:bg-(--color-panel)"
               >
-                <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-(--color-panel2)">
-                  <Folder size={17} className="text-(--color-muted)" />
-                </div>
-                <div className="min-w-0">
-                  <p className="truncate text-sm font-medium">{p.name}</p>
-                  <p className="text-xs text-(--color-muted)">
-                    {p.source_language} → {p.target_language} ·{" "}
-                    {new Date(p.updated_at).toLocaleString()}
-                  </p>
-                </div>
+                <Link to={`/projects/${p.id}`} className="flex min-w-0 flex-1 items-center gap-3">
+                  <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-(--color-panel2)">
+                    <Folder size={17} className="text-(--color-muted)" />
+                  </div>
+                  <div className="min-w-0">
+                    <p className="truncate text-sm font-medium">{p.name}</p>
+                    <p className="text-xs text-(--color-muted)">
+                      {p.source_language} → {p.target_language} ·{" "}
+                      {new Date(p.updated_at).toLocaleString()}
+                    </p>
+                  </div>
+                </Link>
                 <button
-                  onClick={(e) => {
-                    e.preventDefault();
-                    remove.mutate(p.id);
-                  }}
-                  className="ml-auto rounded-lg p-1.5 text-(--color-muted) opacity-0 hover:bg-(--color-panel2) hover:text-red-600 group-hover:opacity-100"
+                  onClick={() => confirmRemove(p)}
+                  className="rounded-lg p-1.5 text-(--color-muted) opacity-0 hover:bg-(--color-panel2) hover:text-red-600 group-hover:opacity-100"
                   title="删除项目"
                 >
                   <Trash2 size={15} />
                 </button>
-              </Link>
+              </div>
             ))}
           </div>
 

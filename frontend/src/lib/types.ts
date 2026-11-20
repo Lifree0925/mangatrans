@@ -69,6 +69,7 @@ export interface ProviderInfo {
   model_name: string;
   credential_ref: string;
   has_credential: boolean;
+  masked_key: string | null;
   is_default: boolean;
   config_version: number;
 }
