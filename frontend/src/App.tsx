@@ -10,6 +10,7 @@ import {
   PanelLeftOpen,
   Settings,
 } from "lucide-react";
+import Toaster from "./components/Toaster";
 import UpdateNotice from "./components/UpdateNotice";
 import { APP_VERSION } from "./lib/version";
 import ProjectsPage from "./pages/ProjectsPage";
@@ -92,6 +93,7 @@ export default function App() {
           <Route path="/settings" element={<SettingsPage />} />
         </Routes>
       </main>
+      <Toaster />
     </div>
   );
 }

@@ -4,6 +4,7 @@ import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Eye, EyeOff, Plus, Trash2, X } from "lucide-react";
 import { api } from "../lib/api";
+import { confirmAction, toast } from "../lib/feedback";
 import { APP_VERSION, checkUpdate, type UpdateInfo } from "../lib/version";
 import type { ProviderInfo } from "../lib/types";
 
@@ -125,13 +126,6 @@ const PRESETS = [
     hint: "",
   },
   {
-    id: "deepseek",
-    label: "DeepSeek",
-    baseUrl: "https://api.deepseek.com/v1",
-    model: "deepseek-chat",
-    hint: "",
-  },
-  {
     id: "ollama",
     label: "Ollama（本地模型）",
     baseUrl: "http://127.0.0.1:11434/v1",
@@ -143,7 +137,7 @@ const PRESETS = [
     label: "自定义 / 其他兼容接口",
     baseUrl: "",
     model: "",
-    hint: "任何兼容 OpenAI Chat Completions 的接口（LM Studio、vLLM、Moonshot 等）。",
+    hint: "任何兼容 OpenAI Chat Completions 的接口（DeepSeek、Moonshot、LM Studio、vLLM 等）。",
   },
 ];
 
@@ -183,7 +177,7 @@ export default function SettingsPage() {
     const { invoke } = await import("@tauri-apps/api/core");
     const dir = await invoke<string | null>("choose_data_dir");
     if (dir) {
-      alert(`数据目录已设置为：\n${dir}\n\n重启应用后生效。`);
+      toast.success(`数据目录已设置为：${dir}（重启应用后生效）`);
       storage.refetch();
     }
   };
@@ -215,13 +209,10 @@ export default function SettingsPage() {
           `/settings/providers/${data.id}/test`,
           { method: "POST" }
         );
-        alert(
-          r.ok
-            ? "模型连接成功，已启用"
-            : `模型不可用：${r.detail || "请检查模型名、Base URL 与 API Key"}`
-        );
+        if (r.ok) toast.success("模型连接成功，已启用");
+        else toast.error(`模型不可用：${r.detail || "请检查模型名、Base URL 与 API Key"}`);
       } catch (err) {
-        alert(`模型测试失败：${String(err)}`);
+        toast.error(`模型测试失败：${String(err)}`);
       }
       qc.invalidateQueries({ queryKey: ["providers"] });
     },
@@ -233,10 +224,11 @@ export default function SettingsPage() {
         method: "POST",
       }),
     onSuccess: (r) => {
-      alert(r.ok ? "连接成功，模型已启用" : `模型不可用：${r.detail || "未知错误"}`);
+      if (r.ok) toast.success("连接成功，模型已启用");
+      else toast.error(`模型不可用：${r.detail || "未知错误"}`);
       qc.invalidateQueries({ queryKey: ["providers"] });
     },
-    onError: (err) => alert(`测试失败：${String(err)}`),
+    onError: (err) => toast.error(`测试失败：${String(err)}`),
   });
 
   const saveKey = useMutation({
@@ -255,7 +247,13 @@ export default function SettingsPage() {
   const remove = useMutation({
     mutationFn: (pid: string) => api<void>(`/settings/providers/${pid}`, { method: "DELETE" }),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["providers"] }),
+    onError: (err) => toast.error(`删除失败：${String(err)}`),
   });
+
+  const confirmRemoveProvider = async (pid: string, modelName: string) => {
+    const ok = await confirmAction("删除模型服务", `确定删除「${modelName}」及其 Key 配置？`, true);
+    if (ok) remove.mutate(pid);
+  };
 
   const canCreate = model.trim() && baseUrl.trim();
 
@@ -376,13 +374,10 @@ export default function SettingsPage() {
                       disabled={testOne.isPending}
                       className="ml-auto rounded-lg border border-(--color-border) bg-(--color-bg) px-2 py-1 text-xs hover:bg-(--color-panel2) disabled:opacity-40"
                     >
-                      {testOne.isPending ? "测试中…" : "测试连接"}
+                      {testOne.isPending && testOne.variables === p.id ? "测试中…" : "测试连接"}
                     </button>
                     <button
-                      onClick={() => {
-                        if (!confirm(`删除模型服务「${p.model_name}」？`)) return;
-                        remove.mutate(p.id);
-                      }}
+                      onClick={() => confirmRemoveProvider(p.id, p.model_name)}
                       className="rounded-lg p-1 text-(--color-muted) hover:bg-(--color-panel2) hover:text-red-600"
                     >
                       <Trash2 size={14} />

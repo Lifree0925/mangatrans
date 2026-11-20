@@ -5,6 +5,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Folder, Plus, Trash2 } from "lucide-react";
 import { Link } from "react-router-dom";
 import { api } from "../lib/api";
+import { confirmAction, toast } from "../lib/feedback";
 import type { Project } from "../lib/types";
 
 export default function ProjectsPage() {
@@ -31,12 +32,16 @@ export default function ProjectsPage() {
   const remove = useMutation({
     mutationFn: (id: string) => api<void>(`/projects/${id}`, { method: "DELETE" }),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["projects"] }),
-    onError: (err) => alert(`删除失败：${String(err)}`),
+    onError: (err) => toast.error(`删除失败：${String(err)}`),
   });
 
-  const confirmRemove = (p: Project) => {
-    if (!confirm(`删除项目「${p.name}」？该项目的原文、译文、知识与任务记录将一并删除。`)) return;
-    remove.mutate(p.id);
+  const confirmRemove = async (p: Project) => {
+    const ok = await confirmAction(
+      "删除项目",
+      `确定删除「${p.name}」？该项目的原文、译文、知识与任务记录将一并删除。`,
+      true
+    );
+    if (ok) remove.mutate(p.id);
   };
 
   // 首次请求仍在进行（未发生过失败）时显示骨架；连接被拒后立即回到正常空状态
@@ -72,14 +77,6 @@ export default function ProjectsPage() {
               {[0, 1, 2].map((i) => (
                 <div key={i} className="h-16 animate-pulse rounded-xl bg-(--color-panel)" />
               ))}
-            </div>
-          )}
-
-          {!showSkeleton && !projects.data?.length && (
-            <div className="rounded-xl border border-dashed border-(--color-border) px-6 py-16 text-center">
-              <p className="text-sm text-(--color-muted)">
-                还没有项目。在上方输入名称，创建第一个翻译项目。
-              </p>
             </div>
           )}
 

@@ -32,9 +32,6 @@ export default function TasksPage() {
         <h1 className="text-lg font-semibold">任务中心</h1>
       </div>
       <div className="flex-1 overflow-auto p-6">
-        {tasks.data?.length === 0 && (
-          <p className="text-sm text-(--color-muted)">暂无任务</p>
-        )}
         <div className="space-y-2">
           {tasks.data?.map((t) => (
             <div key={t.id} className="rounded-xl border border-(--color-border) bg-(--color-panel) px-4 py-3">
