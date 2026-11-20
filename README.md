@@ -58,6 +58,38 @@ cd backend && .venv/bin/pytest -q
 cd backend && .venv/bin/alembic revision --autogenerate -m '说明' && .venv/bin/alembic upgrade head
 ```
 
+### 本地测试（无需每次下载安装包）
+
+**方式 A · Docker Compose（推荐，浏览器模式，秒级热更新）**
+
+```bash
+docker compose up --build
+# 前端 http://localhost:5173 · 后端 http://127.0.0.1:8765
+```
+
+代码改动即时生效（后端 `--reload`、前端 Vite HMR），SQLite 数据保存在 Docker volume。适合日常验证解析、知识、翻译、QA、一键直出等全部业务链路。
+
+**方式 B · 本机脚本（需要 Node + Python）**
+
+```bash
+./scripts/dev_up.sh        # Linux / macOS
+./scripts/dev_up.ps1       # Windows
+```
+
+**方式 C · 桌面壳联调**
+
+```bash
+cd frontend && pnpm dev          # 终端 1
+cd backend && ./run_dev.sh       # 终端 2
+cd src-tauri && cargo tauri dev  # 终端 3（需 Rust 工具链）
+```
+
+**方式 D · 便携版（与安装包同一构建产物）**
+
+每个 Release 附带 `mangatrans_x.y.z_portable_x64.zip`：解压即运行，免安装。设置环境变量 `MT_DATA_DIR` 可隔离测试数据（例如 `D:\mt-test-data`）。
+
+> 边界：Docker/浏览器模式验证业务逻辑；sidecar 生命周期、安装包 DLL、图标、签名等只能在桌面壳或安装包环境验证。
+
 ### 发布
 
 推 `v*` tag 触发 GitHub Actions（Windows runner）：构建 Python sidecar → 前端 → Tauri NSIS 安装包 → SHA-256 → Release。签名证书配置于仓库 Secrets（见 workflow 注释）。

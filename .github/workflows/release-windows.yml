@@ -83,10 +83,27 @@ jobs:
             Write-Host "No signing secrets configured, skipped"
           }
 
+      - name: Package portable zip
+        shell: pwsh
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          New-Item -ItemType Directory -Force -Path portable | Out-Null
+          Copy-Item src-tauri/target/release/mangatrans.exe portable/
+          Copy-Item src-tauri/binaries/mangatrans-backend-x86_64-pc-windows-msvc.exe portable/
+          $readme = @(
+            "MangaTrans portable test build (v${env:TAG})",
+            "解压后直接运行 mangatrans.exe，无需安装。",
+            "默认数据目录：%LOCALAPPDATA%\com.mangatrans.desktop",
+            "隔离测试数据可设置环境变量 MT_DATA_DIR 指向任意目录。"
+          )
+          Set-Content -Encoding UTF8 -Path portable/README.txt -Value $readme
+          Compress-Archive -Path portable/* -DestinationPath "mangatrans_${env:TAG}_portable_x64.zip"
+
       - name: Generate SHA-256
         shell: pwsh
         run: |
-          Get-FileHash src-tauri/target/release/bundle/nsis/*.exe -Algorithm SHA256 `
+          Get-FileHash src-tauri/target/release/bundle/nsis/*.exe, mangatrans_*_portable_x64.zip -Algorithm SHA256 `
             | ForEach-Object { "$($_.Hash)  $($_.Path)" } > checksums.txt
 
       - name: Release
@@ -94,4 +111,5 @@ jobs:
         with:
           files: |
             src-tauri/target/release/bundle/nsis/*.exe
+            mangatrans_*_portable_x64.zip
             checksums.txt

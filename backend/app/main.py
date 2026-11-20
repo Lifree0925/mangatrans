@@ -41,7 +41,9 @@ def run_migrations_if_needed() -> None:
     if getattr(sys, "frozen", False):
         base = Path(sys._MEIPASS)  # noqa: SLF001 PyInstaller 资源目录
     else:
-        base = Path(__file__).resolve().parents[2]
+        # 开发/容器环境：优先工作目录（backend 或 /app），回退包所在 backend 根
+        candidates = [Path.cwd(), Path(__file__).resolve().parents[2]]
+        base = next((c for c in candidates if (c / "alembic.ini").exists()), candidates[0])
     ini = base / "alembic.ini"
     script_dir = base / "migrations"
     cfg = Config(str(ini))

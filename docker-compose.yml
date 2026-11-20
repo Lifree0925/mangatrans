@@ -1,0 +1,38 @@
+# 本地开发/测试环境（浏览器模式，秒级热更新）
+# 用法：docker compose up --build
+# 前端 http://localhost:5173 · 后端 http://127.0.0.1:8765
+# 注：仅用于开发测试；正式发布走安装包（Tauri + one-file sidecar）
+services:
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.dev
+    environment:
+      MT_DATA_DIR: /data
+      MT_AUTH_TOKEN: dev-token-local
+      MT_PORT: "8765"
+      MT_MIGRATE_ON_START: "1"
+    volumes:
+      - ./backend:/app
+      - mt_backend_data:/data
+    ports:
+      - "127.0.0.1:8765:8765"
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8765 --reload
+
+  frontend:
+    image: node:22-slim
+    working_dir: /app
+    environment:
+      VITE_API_BASE: http://127.0.0.1:8765
+      VITE_AUTH_TOKEN: dev-token-local
+      npm_config_registry: https://registry.npmmirror.com
+    volumes:
+      - ./frontend:/app
+      - mt_frontend_modules:/app/node_modules
+    ports:
+      - "127.0.0.1:5173:5173"
+    command: sh -c "corepack enable && pnpm install --prefer-offline && pnpm dev --host 0.0.0.0"
+
+volumes:
+  mt_backend_data:
+  mt_frontend_modules:

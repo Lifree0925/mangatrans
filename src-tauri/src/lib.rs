@@ -60,10 +60,10 @@ pub fn run() {
         .setup(|app| {
             let port = find_free_port().expect("无法分配本地端口");
             let token = generate_token();
-            let data_dir = app
-                .path()
-                .app_data_dir()
-                .expect("无法获取应用数据目录");
+            // MT_DATA_DIR 可覆盖数据目录（便携测试隔离用），否则用系统应用数据目录
+            let data_dir = std::env::var("MT_DATA_DIR")
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|_| app.path().app_data_dir().expect("无法获取应用数据目录"));
 
             let sidecar = app
                 .shell()

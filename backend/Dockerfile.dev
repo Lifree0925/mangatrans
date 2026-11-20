@@ -1,0 +1,14 @@
+FROM python:3.12-slim
+
+WORKDIR /app
+
+# 依赖层：pyproject 变化才重建
+COPY pyproject.toml ./
+COPY app ./app
+RUN pip install --no-cache-dir .
+
+# 运行时源码由 compose 挂载覆盖，支持 --reload 热更新
+COPY . .
+
+EXPOSE 8765
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8765", "--reload"]
