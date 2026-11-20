@@ -1994,6 +1994,7 @@ checksum = "5d15f86d12da44cd8d4ec3c73984537eb7f4cadcb9776a575a0a8a05ca11005c"
 name = "mangatrans"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "log",
  "rand",
  "reqwest 0.12.28",

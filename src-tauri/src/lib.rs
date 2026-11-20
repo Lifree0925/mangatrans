@@ -38,6 +38,34 @@ fn get_storage_info(app: AppHandle, state: State<'_, BackendState>) -> serde_jso
     })
 }
 
+/// 导出保存（二进制，如 DOCX）：base64 解码后写入文件，返回保存路径。
+#[tauri::command]
+async fn save_file_base64(
+    app: AppHandle,
+    default_name: String,
+    content_base64: String,
+    default_dir: Option<String>,
+) -> Result<Option<String>, String> {
+    use base64::{engine::general_purpose::STANDARD, Engine as _};
+    use tauri_plugin_dialog::DialogExt;
+
+    let mut builder = app.dialog().file().set_file_name(&default_name);
+    if let Some(dir) = default_dir {
+        if !dir.is_empty() {
+            builder = builder.set_directory(&dir);
+        }
+    }
+    let Some(path) = builder.blocking_save_file() else {
+        return Ok(None);
+    };
+    let path_buf = path.into_path().map_err(|e| e.to_string())?;
+    let bytes = STANDARD
+        .decode(content_base64)
+        .map_err(|e| format!("解码失败: {e}"))?;
+    std::fs::write(&path_buf, bytes).map_err(|e| e.to_string())?;
+    Ok(Some(path_buf.to_string_lossy().to_string()))
+}
+
 /// 导出保存：弹出系统“另存为”对话框，写入文本文件，返回保存路径。
 #[tauri::command]
 async fn save_text_file(
@@ -254,7 +282,8 @@ pub fn run() {
             get_storage_info,
             choose_data_dir,
             pick_directory,
-            save_text_file
+            save_text_file,
+            save_file_base64
         ])
         .build(tauri::generate_context!())
         .expect("Tauri 构建失败")

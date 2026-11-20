@@ -90,6 +90,8 @@ export interface QAIssueInfo {
 
 export interface ExportResult {
   filename: string;
-  content: string;
+  format: "md" | "txt" | "docx";
+  content: string | null;
+  content_base64: string | null;
   report: { segments: number; untranslated: number; issues_total: number; high_critical_issues: number };
 }

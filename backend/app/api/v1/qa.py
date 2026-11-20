@@ -13,7 +13,7 @@ from app.models.project import Project
 from app.models.qa import QAIssue
 from app.models.translation import Translation
 from app.pipeline.runner import create_task, launch
-from app.services.exporter import export_markdown
+from app.services.exporter import export_project
 
 router = APIRouter(prefix="/projects/{project_id}", tags=["qa"])
 
@@ -110,17 +110,11 @@ def list_issues(project_id: str, db: Session = Depends(get_db)) -> list[dict]:
 
 
 @router.post("/export")
-def export_project(
+def export_project_route(
     project_id: str, payload: dict, db: Session = Depends(get_db)
 ) -> JSONResponse:
-    """同步导出：bilingual=true 中英对照，否则纯英文 Markdown。"""
+    """导出：format = md / txt / docx；bilingual 控制中英对照或纯英文。"""
     project = _project(db, project_id)
     bilingual = bool(payload.get("bilingual", True))
-    body, report = export_markdown(db, project, bilingual)
-    return JSONResponse(
-        {
-            "filename": f"{project.name}-{'bilingual' if bilingual else 'english'}.md",
-            "content": body,
-            "report": report,
-        }
-    )
+    fmt = str(payload.get("format", "md")).lower()
+    return JSONResponse(export_project(db, project, bilingual, fmt))

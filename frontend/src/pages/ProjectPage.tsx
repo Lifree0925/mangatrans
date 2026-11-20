@@ -25,6 +25,7 @@ export default function ProjectPage() {
   const [exporting, setExporting] = useState(false);
   const [exportOpen, setExportOpen] = useState(false);
   const [exportBilingual, setExportBilingual] = useState(true);
+  const [exportFormat, setExportFormat] = useState<"md" | "txt" | "docx">("md");
   const isTauri = !!(
     window as unknown as { __TAURI_INTERNALS__?: unknown }
   ).__TAURI_INTERNALS__;
@@ -100,18 +101,38 @@ export default function ProjectPage() {
     try {
       const r = await api<ExportResult>(`/projects/${id}/export`, {
         method: "POST",
-        body: JSON.stringify({ bilingual: exportBilingual }),
+        body: JSON.stringify({ bilingual: exportBilingual, format: exportFormat }),
       });
       if (isTauri) {
         const { invoke } = await import("@tauri-apps/api/core");
-        const saved = await invoke<string | null>("save_text_file", {
-          defaultName: r.filename,
-          content: r.content,
-          defaultDir: project.data?.storage_path ?? null,
-        });
+        const saved = r.content_base64
+          ? await invoke<string | null>("save_file_base64", {
+              defaultName: r.filename,
+              contentBase64: r.content_base64,
+              defaultDir: project.data?.storage_path ?? null,
+            })
+          : await invoke<string | null>("save_text_file", {
+              defaultName: r.filename,
+              content: r.content ?? "",
+              defaultDir: project.data?.storage_path ?? null,
+            });
         if (saved) toast.success(`已保存：${saved}`);
       } else {
-        const blob = new Blob([r.content], { type: "text/markdown" });
+        const mime =
+          r.format === "docx"
+            ? "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+            : r.format === "txt"
+              ? "text/plain"
+              : "text/markdown";
+        let blob: Blob;
+        if (r.content_base64) {
+          const bin = atob(r.content_base64);
+          const bytes = new Uint8Array(bin.length);
+          for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+          blob = new Blob([bytes], { type: mime });
+        } else {
+          blob = new Blob([r.content ?? ""], { type: mime });
+        }
         const a = document.createElement("a");
         a.href = URL.createObjectURL(blob);
         a.download = r.filename;
@@ -356,26 +377,58 @@ export default function ProjectPage() {
               </button>
             </div>
 
-            <p className="mt-4 text-xs text-(--color-muted)">导出类型</p>
-            <div className="mt-2 space-y-2">
-              <label className="flex cursor-pointer items-center gap-3 rounded-lg border border-(--color-border) px-3 py-2.5 text-sm hover:bg-(--color-panel)">
-                <input
-                  type="radio"
-                  checked={exportBilingual}
-                  onChange={() => setExportBilingual(true)}
-                />
-                <span>中英对照 Markdown</span>
-                <span className="ml-auto text-xs text-(--color-muted)">便于人工校对</span>
-              </label>
-              <label className="flex cursor-pointer items-center gap-3 rounded-lg border border-(--color-border) px-3 py-2.5 text-sm hover:bg-(--color-panel)">
-                <input
-                  type="radio"
-                  checked={!exportBilingual}
-                  onChange={() => setExportBilingual(false)}
-                />
-                <span>纯英文 Markdown</span>
-                <span className="ml-auto text-xs text-(--color-muted)">交付版本</span>
-              </label>
+            <p className="mt-4 text-xs text-(--color-muted)">文件类型</p>
+            <div className="mt-2 grid grid-cols-3 gap-2">
+              {[
+                { value: "md" as const, label: "Markdown", hint: ".md" },
+                { value: "txt" as const, label: "纯文本", hint: ".txt" },
+                { value: "docx" as const, label: "Word 文档", hint: ".docx" },
+              ].map((f) => (
+                <button
+                  key={f.value}
+                  onClick={() => setExportFormat(f.value)}
+                  className={`rounded-lg border px-2 py-2.5 text-sm ${
+                    exportFormat === f.value
+                      ? "border-(--color-text) bg-(--color-panel) font-medium"
+                      : "border-(--color-border) hover:bg-(--color-panel)"
+                  }`}
+                >
+                  {f.label}
+                  <span className="mt-0.5 block text-[11px] font-normal text-(--color-muted)">
+                    {f.hint}
+                  </span>
+                </button>
+              ))}
+            </div>
+
+            <p className="mt-4 text-xs text-(--color-muted)">内容形式</p>
+            <div className="mt-2 grid grid-cols-2 gap-2">
+              <button
+                onClick={() => setExportBilingual(true)}
+                className={`rounded-lg border px-3 py-2.5 text-sm ${
+                  exportBilingual
+                    ? "border-(--color-text) bg-(--color-panel) font-medium"
+                    : "border-(--color-border) hover:bg-(--color-panel)"
+                }`}
+              >
+                中英对照
+                <span className="mt-0.5 block text-[11px] font-normal text-(--color-muted)">
+                  便于人工校对
+                </span>
+              </button>
+              <button
+                onClick={() => setExportBilingual(false)}
+                className={`rounded-lg border px-3 py-2.5 text-sm ${
+                  !exportBilingual
+                    ? "border-(--color-text) bg-(--color-panel) font-medium"
+                    : "border-(--color-border) hover:bg-(--color-panel)"
+                }`}
+              >
+                纯英文
+                <span className="mt-0.5 block text-[11px] font-normal text-(--color-muted)">
+                  交付版本
+                </span>
+              </button>
             </div>
 
             <div className="mt-4 rounded-lg bg-(--color-panel) px-3 py-2.5 text-xs leading-5 text-(--color-muted)">
