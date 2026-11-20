@@ -5,6 +5,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ArrowLeft, Download, FileUp, ScanText, ShieldCheck, Zap } from "lucide-react";
 import { Link, useParams } from "react-router-dom";
 import { api } from "../lib/api";
+import { toast } from "../lib/feedback";
 import type { Chapter, ExportResult, ParseReport, Project, ProviderInfo, QAIssueInfo, Scene, Segment, TaskInfo } from "../lib/types";
 
 const typeColor: Record<string, string> = {
@@ -80,11 +81,13 @@ export default function ProjectPage() {
       await api(`/projects/${id}/documents/import`, { method: "POST", body: form });
     },
     onSuccess: () => invalidate(),
+    onError: (err) => toast.error(`导入失败：${String(err)}`),
   });
 
   const express = useMutation({
     mutationFn: () => api<{ task_id: string }>(`/projects/${id}/translation/express`, { method: "POST", body: "{}" }),
     onSuccess: (d) => setExpressTaskId(d.task_id),
+    onError: (err) => toast.error(`启动一键直出失败：${String(err)}`),
   });
 
   const downloadExport = async (bilingual: boolean) => {
@@ -112,6 +115,7 @@ export default function ProjectPage() {
       report.refetch();
       setShowReport(true);
     },
+    onError: (err) => toast.error(`解析失败：${String(err)}`),
   });
 
   const segs = segments.data ?? [];
@@ -144,9 +148,11 @@ export default function ProjectPage() {
           </Link>
         )}
         <div className="ml-auto flex items-center gap-2">
+          {/* 1. 数据准备 */}
           <button
             onClick={() => fileRef.current?.click()}
-            className="flex items-center gap-1.5 rounded-lg border border-(--color-border) px-3 py-1.5 text-sm hover:border-(--color-accent)"
+            className="flex items-center gap-1.5 rounded-lg border border-(--color-border) bg-(--color-bg) px-3 py-1.5 text-sm hover:bg-(--color-panel2)"
+            title="导入 TXT / Markdown / DOCX 剧本"
           >
             <FileUp size={15} /> 导入
           </button>
@@ -160,14 +166,19 @@ export default function ProjectPage() {
           <button
             onClick={() => parse.mutate()}
             disabled={parse.isPending}
-            className="flex items-center gap-1.5 rounded-lg border border-(--color-border) px-3 py-1.5 text-sm hover:border-(--color-accent) disabled:opacity-50"
+            className="flex items-center gap-1.5 rounded-lg border border-(--color-border) bg-(--color-bg) px-3 py-1.5 text-sm hover:bg-(--color-panel2) disabled:opacity-50"
+            title="切分章节/场景/对白并校验原文覆盖"
           >
             <ScanText size={15} /> {parse.isPending ? "解析中…" : "解析"}
           </button>
+
+          {/* 2. 主操作：翻译 */}
+          <span className="mx-1 h-5 w-px bg-(--color-border)" />
           <button
             onClick={() => express.mutate()}
             disabled={express.isPending}
             className="flex items-center gap-1.5 rounded-lg bg-(--color-accent) px-3 py-1.5 text-sm text-white hover:bg-(--color-accent-hover) disabled:opacity-50"
+            title="自动完成整理、翻译与检查，生成完整英文剧本"
           >
             <Zap size={15} />
             {express.isPending
@@ -176,18 +187,23 @@ export default function ProjectPage() {
                 ? "直出中…"
                 : "一键直出"}
           </button>
+
+          {/* 3. 检查与交付 */}
+          <span className="mx-1 h-5 w-px bg-(--color-border)" />
+          <button
+            onClick={() => setShowQA((v) => !v)}
+            className="flex items-center gap-1.5 rounded-lg border border-(--color-border) bg-(--color-bg) px-3 py-1.5 text-sm hover:bg-(--color-panel2)"
+            title="查看译文质量问题"
+          >
+            <ShieldCheck size={15} /> QA
+          </button>
           <button
             onClick={() => downloadExport(true)}
             disabled={exporting}
-            className="flex items-center gap-1.5 rounded-lg border border-(--color-border) px-3 py-1.5 text-sm hover:border-(--color-accent) disabled:opacity-50"
+            className="flex items-center gap-1.5 rounded-lg border border-(--color-border) bg-(--color-bg) px-3 py-1.5 text-sm hover:bg-(--color-panel2) disabled:opacity-50"
+            title="导出中英对照 Markdown"
           >
             <Download size={15} /> 导出
-          </button>
-          <button
-            onClick={() => setShowQA((v) => !v)}
-            className="flex items-center gap-1.5 rounded-lg border border-(--color-border) px-3 py-1.5 text-sm hover:border-(--color-accent)"
-          >
-            <ShieldCheck size={15} /> QA
           </button>
         </div>
       </div>
