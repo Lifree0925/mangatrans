@@ -6,6 +6,7 @@ export interface Project {
   source_language: string;
   target_language: string;
   active_source_document_id: string | null;
+  storage_path: string | null;
   created_at: string;
   updated_at: string;
 }

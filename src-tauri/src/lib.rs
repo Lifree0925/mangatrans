@@ -38,6 +38,18 @@ fn get_storage_info(app: AppHandle, state: State<'_, BackendState>) -> serde_jso
     })
 }
 
+/// 通用目录选择器（仅返回路径，不持久化）：用于新建项目时选择项目文件夹。
+#[tauri::command]
+async fn pick_directory(app: AppHandle) -> Result<Option<String>, String> {
+    use tauri_plugin_dialog::DialogExt;
+
+    Ok(app
+        .dialog()
+        .file()
+        .blocking_pick_folder()
+        .map(|path| path.to_string()))
+}
+
 /// 打开系统目录选择器，保存自定义数据目录（重启应用后生效）。
 #[tauri::command]
 async fn choose_data_dir(app: AppHandle) -> Result<Option<String>, String> {
@@ -216,7 +228,8 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             get_backend_config,
             get_storage_info,
-            choose_data_dir
+            choose_data_dir,
+            pick_directory
         ])
         .build(tauri::generate_context!())
         .expect("Tauri 构建失败")

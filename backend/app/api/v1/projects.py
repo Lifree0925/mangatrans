@@ -19,10 +19,27 @@ def list_projects(db: Session = Depends(get_db)) -> list[Project]:
 
 @router.post("", response_model=ProjectOut, status_code=status.HTTP_201_CREATED)
 def create_project(payload: ProjectCreate, db: Session = Depends(get_db)) -> Project:
+    from pathlib import Path
+
+    custom = (payload.storage_path or "").strip()
+    root: Path | None = None
+    if custom:
+        root = Path(custom).expanduser()
+        if not root.is_absolute():
+            raise HTTPException(status_code=400, detail="项目文件夹必须是绝对路径")
+        occupied = db.scalar(select(Project).where(Project.storage_path == str(root)))
+        if occupied is not None:
+            raise HTTPException(status_code=400, detail="该文件夹已被其他项目使用")
+        try:
+            (root / "sources").mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            raise HTTPException(status_code=400, detail=f"无法创建项目文件夹：{exc}") from exc
+
     project = Project(
         name=payload.name,
         source_language=payload.source_language,
         target_language=payload.target_language,
+        storage_path=str(root) if root else None,
     )
     db.add(project)
     db.commit()

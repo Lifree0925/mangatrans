@@ -26,6 +26,8 @@ class Project(Base):
     target_language: Mapped[str] = mapped_column(String(16), default="en")
     active_source_document_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
     style_config_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # 项目文件夹所在磁盘位置（为空则使用软件数据目录）
+    storage_path: Mapped[str | None] = mapped_column(String(1000), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utcnow, onupdate=utcnow

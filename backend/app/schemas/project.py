@@ -9,6 +9,8 @@ class ProjectCreate(BaseModel):
     name: str = Field(min_length=1, max_length=200)
     source_language: str = "zh-CN"
     target_language: str = "en"
+    # 项目文件夹绝对路径；为空则使用默认数据目录
+    storage_path: str | None = None
 
 
 class ProjectPatch(BaseModel):
@@ -26,5 +28,6 @@ class ProjectOut(BaseModel):
     source_language: str
     target_language: str
     active_source_document_id: str | None
+    storage_path: str | None
     created_at: datetime
     updated_at: datetime

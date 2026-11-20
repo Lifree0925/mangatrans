@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 from app.core.config import settings
 from app.models.document import SourceDocument
 from app.models.project import Project
+from app.services.project_paths import ensure_project_root
 
 SUPPORTED_FORMATS = {"txt", "md", "docx"}
 
@@ -39,8 +40,7 @@ def import_document(
     if fmt not in SUPPORTED_FORMATS:
         raise ValueError(f"不支持的格式：{fmt}，仅支持 TXT/MD/DOCX")
 
-    doc_dir = settings.data_dir / "projects" / project.id / "sources"
-    doc_dir.mkdir(parents=True, exist_ok=True)
+    doc_dir = ensure_project_root(project) / "sources"
     next_version = (
         db.scalar(
             select(func.max(SourceDocument.version)).where(
