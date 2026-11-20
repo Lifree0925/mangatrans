@@ -110,6 +110,43 @@ const HELP_SECTIONS: { title: string; items: string[] }[] = [
   },
 ];
 
+interface StorageInfo {
+  data_dir: string;
+  config_path: string;
+  uses_custom_dir: boolean;
+}
+
+const PRESETS = [
+  {
+    id: "openai",
+    label: "OpenAI",
+    baseUrl: "https://api.openai.com/v1",
+    model: "gpt-4o-mini",
+    hint: "",
+  },
+  {
+    id: "deepseek",
+    label: "DeepSeek",
+    baseUrl: "https://api.deepseek.com/v1",
+    model: "deepseek-chat",
+    hint: "",
+  },
+  {
+    id: "ollama",
+    label: "Ollama（本地模型）",
+    baseUrl: "http://127.0.0.1:11434/v1",
+    model: "qwen2.5:7b",
+    hint: "本地模型无需 API Key：先运行 ollama serve，并 ollama pull <模型名>。模型名需与 ollama list 中的一致。",
+  },
+  {
+    id: "custom",
+    label: "自定义 / 其他兼容接口",
+    baseUrl: "",
+    model: "",
+    hint: "任何兼容 OpenAI Chat Completions 的接口（LM Studio、vLLM、Moonshot 等）。",
+  },
+];
+
 function maskKey(key: string): string {
   if (!key) return "";
   if (key.length <= 8) return "*".repeat(key.length);
@@ -127,6 +164,29 @@ export default function SettingsPage() {
   const [showEditKey, setShowEditKey] = useState(false);
   const [updateInfo, setUpdateInfo] = useState<UpdateInfo | null>(null);
   const [showHelp, setShowHelp] = useState(false);
+  const [preset, setPreset] = useState("openai");
+  const isTauri = !!(
+    window as unknown as { __TAURI_INTERNALS__?: unknown }
+  ).__TAURI_INTERNALS__;
+
+  const storage = useQuery({
+    queryKey: ["storage"],
+    queryFn: async (): Promise<StorageInfo | null> => {
+      if (!isTauri) return null;
+      const { invoke } = await import("@tauri-apps/api/core");
+      return await invoke<StorageInfo>("get_storage_info");
+    },
+    enabled: isTauri,
+  });
+
+  const changeDataDir = async () => {
+    const { invoke } = await import("@tauri-apps/api/core");
+    const dir = await invoke<string | null>("choose_data_dir");
+    if (dir) {
+      alert(`数据目录已设置为：\n${dir}\n\n重启应用后生效。`);
+      storage.refetch();
+    }
+  };
 
   const providers = useQuery({
     queryKey: ["providers"],
@@ -187,6 +247,33 @@ export default function SettingsPage() {
             </p>
 
             <div className="mt-4 space-y-3 rounded-xl bg-(--color-panel) p-4">
+              <label className="block text-xs text-(--color-muted)">
+                服务类型
+                <select
+                  value={preset}
+                  onChange={(e) => {
+                    const id = e.target.value;
+                    setPreset(id);
+                    const found = PRESETS.find((p) => p.id === id);
+                    if (found) {
+                      setModel(found.model);
+                      setBaseUrl(found.baseUrl);
+                    }
+                  }}
+                  className="mt-1 block w-full rounded-lg border border-(--color-border) bg-(--color-bg) px-3 py-2 text-sm outline-none focus:border-(--color-text)"
+                >
+                  {PRESETS.map((p) => (
+                    <option key={p.id} value={p.id}>
+                      {p.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              {PRESETS.find((p) => p.id === preset)?.hint && (
+                <p className="text-xs text-(--color-muted)">
+                  {PRESETS.find((p) => p.id === preset)?.hint}
+                </p>
+              )}
               <label className="block text-xs text-(--color-muted)">
                 模型
                 <input
@@ -319,6 +406,37 @@ export default function SettingsPage() {
               {providers.data?.length === 0 && (
                 <p className="text-xs text-(--color-muted)">
                   尚未配置模型服务。一键直出与真实翻译需要至少一个模型服务商。
+                </p>
+              )}
+            </div>
+          </section>
+
+          <section>
+            <h2 className="text-sm font-semibold">数据位置</h2>
+            <p className="mt-1 text-xs text-(--color-muted)">
+              项目原文、译文、知识库与数据库的保存目录。更改后需重启应用生效，已有数据不会自动迁移。
+            </p>
+            <div className="mt-3 rounded-xl bg-(--color-panel) px-4 py-3">
+              {isTauri ? (
+                <>
+                  <p className="break-all font-mono text-xs">
+                    {storage.data?.data_dir ?? "读取中…"}
+                  </p>
+                  <div className="mt-2 flex items-center gap-2">
+                    <button
+                      onClick={changeDataDir}
+                      className="rounded-lg border border-(--color-border) bg-(--color-bg) px-3 py-1 text-xs hover:bg-(--color-panel2)"
+                    >
+                      更改位置
+                    </button>
+                    {storage.data?.uses_custom_dir && (
+                      <span className="text-xs text-(--color-muted)">使用自定义目录</span>
+                    )}
+                  </div>
+                </>
+              ) : (
+                <p className="text-xs text-(--color-muted)">
+                  开发模式：数据目录由 MT_DATA_DIR 环境变量控制；桌面版可在应用内选择目录。
                 </p>
               )}
             </div>

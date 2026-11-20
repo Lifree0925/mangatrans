@@ -60,16 +60,22 @@ class OpenAICompatProvider:
                         + json.dumps(response_schema, ensure_ascii=False),
                     }
                 ]
-        headers = {
-            "Authorization": f"Bearer {self.api_key}",
-            "Content-Type": "application/json",
-        }
+        headers = {"Content-Type": "application/json"}
+        # 本地模型（Ollama / vLLM 等）通常无需 API Key
+        if self.api_key:
+            headers["Authorization"] = f"Bearer {self.api_key}"
         t0 = time.perf_counter()
         try:
             async with httpx.AsyncClient(timeout=timeout) as client:
                 r = await client.post(
                     f"{self.base_url}/chat/completions", json=body, headers=headers
                 )
+                # 本地模型可能不支持 response_format：降级为纯 Prompt 约束后重试一次
+                if r.status_code == 400 and "response_format" in body:
+                    body.pop("response_format", None)
+                    r = await client.post(
+                        f"{self.base_url}/chat/completions", json=body, headers=headers
+                    )
         except httpx.TimeoutException as exc:
             raise LLMError("请求超时", retryable=True, code="timeout") from exc
         except httpx.HTTPError as exc:

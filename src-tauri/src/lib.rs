@@ -11,7 +11,8 @@ use std::time::Duration;
 
 use rand::distributions::Alphanumeric;
 use rand::Rng;
-use tauri::{Manager, State};
+use serde::{Deserialize, Serialize};
+use tauri::{AppHandle, Manager, State};
 use tauri_plugin_shell::process::{CommandChild, CommandEvent};
 use tauri_plugin_shell::ShellExt;
 
@@ -19,12 +20,38 @@ use tauri_plugin_shell::ShellExt;
 struct BackendState {
     port: u16,
     token: String,
+    data_dir: String,
     child: Mutex<Option<CommandChild>>,
 }
 
 #[tauri::command]
 fn get_backend_config(state: State<'_, BackendState>) -> (u16, String) {
     (state.port, state.token.clone())
+}
+
+#[tauri::command]
+fn get_storage_info(app: AppHandle, state: State<'_, BackendState>) -> serde_json::Value {
+    serde_json::json!({
+        "data_dir": state.data_dir,
+        "config_path": config_path(&app).to_string_lossy(),
+        "uses_custom_dir": load_config(&app).data_dir.is_some(),
+    })
+}
+
+/// 打开系统目录选择器，保存自定义数据目录（重启应用后生效）。
+#[tauri::command]
+async fn choose_data_dir(app: AppHandle) -> Result<Option<String>, String> {
+    use tauri_plugin_dialog::DialogExt;
+
+    let picked = app.dialog().file().blocking_pick_folder();
+    let Some(path) = picked else {
+        return Ok(None);
+    };
+    let dir = path.to_string();
+    let mut config = load_config(&app);
+    config.data_dir = Some(dir.clone());
+    save_config(&app, &config)?;
+    Ok(Some(dir))
 }
 
 /// 由系统分配空闲端口（绑定 0 后立即释放，交给 sidecar 使用）。
@@ -42,6 +69,51 @@ fn generate_token() -> String {
         .take(32)
         .map(char::from)
         .collect()
+}
+
+/// 应用配置文件（固定在系统应用数据目录，不受自定义数据目录影响）。
+#[derive(Serialize, Deserialize, Default)]
+struct AppConfig {
+    /// 用户自定义数据目录（磁盘上的项目数据位置）
+    data_dir: Option<String>,
+}
+
+fn config_path(app: &AppHandle) -> PathBuf {
+    let dir = app
+        .path()
+        .app_data_dir()
+        .unwrap_or_else(|_| PathBuf::from("."));
+    let _ = std::fs::create_dir_all(&dir);
+    dir.join("config.json")
+}
+
+fn load_config(app: &AppHandle) -> AppConfig {
+    std::fs::read_to_string(config_path(app))
+        .ok()
+        .and_then(|text| serde_json::from_str(&text).ok())
+        .unwrap_or_default()
+}
+
+fn save_config(app: &AppHandle, config: &AppConfig) -> Result<(), String> {
+    let text = serde_json::to_string_pretty(config).map_err(|e| e.to_string())?;
+    std::fs::write(config_path(app), text).map_err(|e| e.to_string())
+}
+
+/// 数据目录优先级：MT_DATA_DIR 环境变量 > config.json > 系统应用数据目录。
+fn resolve_data_dir(app: &AppHandle) -> PathBuf {
+    if let Ok(dir) = std::env::var("MT_DATA_DIR") {
+        if !dir.is_empty() {
+            return PathBuf::from(dir);
+        }
+    }
+    if let Some(dir) = load_config(app).data_dir {
+        if !dir.is_empty() {
+            return PathBuf::from(dir);
+        }
+    }
+    app.path()
+        .app_data_dir()
+        .unwrap_or_else(|_| PathBuf::from("."))
 }
 
 /// sidecar 日志路径：用户数据目录/logs/sidecar.log。
@@ -76,13 +148,12 @@ fn wait_until_healthy(port: u16, log_path: &Path) {
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
+        .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             let port = find_free_port().expect("无法分配本地端口");
             let token = generate_token();
-            // MT_DATA_DIR 可覆盖数据目录（便携测试隔离用），否则用系统应用数据目录
-            let data_dir = std::env::var("MT_DATA_DIR")
-                .map(std::path::PathBuf::from)
-                .unwrap_or_else(|_| app.path().app_data_dir().expect("无法获取应用数据目录"));
+            // 数据目录：MT_DATA_DIR > 用户配置 > 系统应用数据目录
+            let data_dir = resolve_data_dir(app.handle());
             let log_path = sidecar_log_path(&data_dir);
 
             let sidecar = app
@@ -137,11 +208,16 @@ pub fn run() {
             app.manage(BackendState {
                 port,
                 token,
+                data_dir: data_dir.to_string_lossy().to_string(),
                 child: Mutex::new(child),
             });
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![get_backend_config])
+        .invoke_handler(tauri::generate_handler![
+            get_backend_config,
+            get_storage_info,
+            choose_data_dir
+        ])
         .build(tauri::generate_context!())
         .expect("Tauri 构建失败")
         .run(|app, event| {
