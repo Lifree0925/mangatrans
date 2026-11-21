@@ -10,7 +10,14 @@ from app.models.document import SourceSegment
 from app.models.knowledge import KnowledgeItem
 from app.models.qa import WindowQuality
 from app.models.translation import Translation
-from app.services import knowledge_service, qa_service, scene_card_service, style_guide_service
+from app.services import (
+    knowledge_service,
+    profile_service,
+    qa_service,
+    scene_card_service,
+    storyline_service,
+    style_guide_service,
+)
 from app.services.importer import sha256
 from app.services.translation import PROMPT_VERSION
 from app.services.translation_batch import _persist_window_translations, translate_window_direct
@@ -53,6 +60,18 @@ async def run_express(db_factory, project_id: str, source_document_id: str, mode
         _sync_progress(db_factory, task_id, report["steps"], "knowledge")
         report["steps"]["knowledge"] = await knowledge_service.extract_knowledge_for_document(
             db_factory, project_id, source_document_id, provider, model, mode="express"
+        )
+    _sync_progress(db_factory, task_id, report["steps"], "profiles")
+    # 1b. 角色档案（性格/说话方式：Polish 润色依据）
+    if "profiles" not in report["steps"]:
+        report["steps"]["profiles"] = await profile_service.extract_profiles(
+            db_factory, project_id, source_document_id, provider, model
+        )
+    _sync_progress(db_factory, task_id, report["steps"], "storylines")
+    # 1c. 章节剧情卡（重要情节/伏笔/前情：连续一致性关键）
+    if "storylines" not in report["steps"]:
+        report["steps"]["storylines"] = await storyline_service.generate_for_document(
+            db_factory, project_id, source_document_id, provider, model
         )
     _sync_progress(db_factory, task_id, report["steps"], "scene_cards")
     # 2. 场景卡

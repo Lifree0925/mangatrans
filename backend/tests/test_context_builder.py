@@ -6,7 +6,7 @@ from app.services.context_builder import build_context
 def test_assembly_order_and_snapshot() -> None:
     segs = [
         {"segment_id": "S1", "segment_no": 1, "segment_type": "dialogue",
-         "speaker_name": "林晓", "source_text": "你好。\n"},
+         "speaker_name": "林晓", "source_text": "天机阁的秘密，你好。\n"},
     ]
     result = build_context(
         segments=segs,
@@ -29,6 +29,24 @@ def test_assembly_order_and_snapshot() -> None:
     assert "MUST NOT use" in text
     assert result.snapshot["knowledge_ids"] == ["K1", "K2"]
     assert result.snapshot["scene_card_id"] == "C1"
+
+
+def test_unrelated_knowledge_excluded() -> None:
+    """按需匹配：窗口未出现的角色/术语不进上下文。"""
+    result = build_context(
+        segments=[{"segment_id": "S1", "segment_no": 1, "segment_type": "narrative",
+                   "speaker_name": None, "source_text": "深夜，街头无人。"}],
+        scene_card=None,
+        knowledge=[
+            {"id": "K1", "item_type": "character", "canonical_key": "林晓", "data": {}},
+            {"id": "K2", "item_type": "term", "canonical_key": "天机阁", "data": {"translation": "Tianji Pavilion"}},
+        ],
+        style_guide=None,
+        carry_over=None,
+    )
+    assert "APPROVED CHARACTERS" not in result.prompt_text
+    assert "FORCED TERMS" not in result.prompt_text
+    assert result.snapshot["knowledge_ids"] == []
 
 
 def test_budget_trim_drops_adjacent_not_core() -> None:

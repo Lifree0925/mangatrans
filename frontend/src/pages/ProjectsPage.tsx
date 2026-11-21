@@ -141,49 +141,54 @@ export default function ProjectsPage() {
                 key={p.id}
                 className="group flex items-center gap-3 rounded-xl px-4 py-3 hover:bg-(--color-panel)"
               >
-                <Link to={`/projects/${p.id}`} className="flex min-w-0 flex-1 items-center gap-3">
-                  <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-(--color-panel2)">
-                    <Folder size={17} className="text-(--color-muted)" />
+                {renamingId === p.id ? (
+                  <div className="flex min-w-0 flex-1 items-center gap-3">
+                    <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-(--color-panel2)">
+                      <Folder size={17} className="text-(--color-muted)" />
+                    </div>
+                    <div className="flex min-w-0 flex-1 items-center gap-1.5">
+                      <input
+                        value={renameDraft}
+                        onChange={(e) => setRenameDraft(e.target.value)}
+                        onKeyDown={(e) => e.key === "Enter" && renameDraft.trim() && rename.mutate({ id: p.id, name: renameDraft.trim() })}
+                        autoFocus
+                        className="w-full max-w-64 rounded-lg border border-(--color-accent) bg-(--color-bg) px-2 py-1 text-sm font-medium outline-none"
+                      />
+                      <button
+                        onClick={() => renameDraft.trim() && rename.mutate({ id: p.id, name: renameDraft.trim() })}
+                        className="rounded p-1 text-(--color-accent) hover:bg-(--color-panel2)"
+                        title="保存"
+                      >
+                        <Check size={14} />
+                      </button>
+                      <button
+                        onClick={() => setRenamingId(null)}
+                        className="rounded p-1 text-(--color-muted) hover:bg-(--color-panel2)"
+                        title="取消"
+                      >
+                        <X size={14} />
+                      </button>
+                    </div>
                   </div>
-                  <div className="min-w-0">
-                    {renamingId === p.id ? (
-                      <div className="flex items-center gap-1.5">
-                        <input
-                          value={renameDraft}
-                          onChange={(e) => setRenameDraft(e.target.value)}
-                          onKeyDown={(e) => e.key === "Enter" && renameDraft.trim() && rename.mutate({ id: p.id, name: renameDraft.trim() })}
-                          autoFocus
-                          className="w-full rounded-lg border border-(--color-accent) bg-(--color-bg) px-2 py-1 text-sm font-medium outline-none"
-                        />
-                        <button
-                          onClick={() => renameDraft.trim() && rename.mutate({ id: p.id, name: renameDraft.trim() })}
-                          className="rounded p-1 text-(--color-accent) hover:bg-(--color-panel2)"
-                          title="保存"
-                        >
-                          <Check size={14} />
-                        </button>
-                        <button
-                          onClick={() => setRenamingId(null)}
-                          className="rounded p-1 text-(--color-muted) hover:bg-(--color-panel2)"
-                          title="取消"
-                        >
-                          <X size={14} />
-                        </button>
-                      </div>
-                    ) : (
+                ) : (
+                  <Link to={`/projects/${p.id}`} className="flex min-w-0 flex-1 items-center gap-3">
+                    <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-(--color-panel2)">
+                      <Folder size={17} className="text-(--color-muted)" />
+                    </div>
+                    <div className="min-w-0">
                       <p className="truncate text-sm font-medium">{p.name}</p>
-                    )}
-                    <p className="text-xs text-(--color-muted)">
-                      {p.source_language} → {p.target_language} ·{" "}
-                      {new Date(p.updated_at).toLocaleString()}
-                    </p>
-                    {p.storage_path && (
-                      <p className="truncate font-mono text-[11px] text-(--color-muted)">
-                        {p.storage_path}
+                      <p className="text-xs text-(--color-muted)">
+                        {p.source_language} → {p.target_language} ·{" "}
+                        {new Date(p.updated_at).toLocaleString()}
                       </p>
-                    )}
-                  </div>
-                </Link>
+                      {p.storage_path && (
+                        <p className="truncate font-mono text-[11px] text-(--color-muted)">
+                          {p.storage_path}
+                        </p>
+                      )}
+                    </div>
+                  </Link>
+                )}
                 <button
                   onClick={() => {
                     setRenamingId(p.id);

@@ -119,3 +119,13 @@ export interface KnowledgeEntry {
   source: string;
   version: number;
 }
+
+export interface ChapterStoryline {
+  id: string;
+  chapter_id: string;
+  chapter_no: number;
+  chapter_title: string;
+  card_json: string;
+  status: string;
+  version: number;
+}

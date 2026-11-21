@@ -48,6 +48,8 @@ def expand_translation_task(
 
 
 def _load_window_context(db: Session, project_id: str, window: list[SourceSegment]) -> tuple:
+    from app.models.storyline import ChapterStoryline
+
     first = window[0]
     card_row = db.scalar(
         select(SceneContextCard)
@@ -57,6 +59,16 @@ def _load_window_context(db: Session, project_id: str, window: list[SourceSegmen
     card = json.loads(card_row.card_json) if card_row else None
     if card is not None:
         card["id"] = card_row.id
+
+    # 当前章节剧情卡
+    story_row = db.scalar(
+        select(ChapterStoryline)
+        .where(ChapterStoryline.chapter_id == first.chapter_id)
+        .order_by(ChapterStoryline.version.desc())
+    ) if first.chapter_id else None
+    storyline = json.loads(story_row.card_json) if story_row else None
+    if storyline is not None:
+        storyline["id"] = story_row.id
 
     items = [
         {
@@ -72,7 +84,7 @@ def _load_window_context(db: Session, project_id: str, window: list[SourceSegmen
             )
         )
     ]
-    return card, items
+    return card, items, storyline
 
 
 def _persist_window_translations(
@@ -111,7 +123,7 @@ async def translate_window_direct(
 ) -> tuple:
     """直接执行一个窗口（不依赖 task_item），返回 (carry_over, draft, polished, context)。"""
     with db_factory() as db:
-        card, knowledge = _load_window_context(db, project_id, window)
+        card, knowledge, storyline = _load_window_context(db, project_id, window)
         sg = db.scalar(
             select(StyleGuide)
             .where(StyleGuide.project_id == project_id)
@@ -135,6 +147,7 @@ async def translate_window_direct(
         knowledge=knowledge,
         style_guide=style_guide,
         carry_over=carry_over,
+        storyline=storyline,
     )
     draft, polished, carry = await translate_window(
         provider=get_provider(), model=model, window_id="EXPRESS", context=context
@@ -160,7 +173,7 @@ async def process_window_item(db_factory, task_id: str, item_id: str, model: str
             .order_by(StyleGuide.version.desc())
         )
         style_guide = json.loads(sg.guide_json) if sg else None
-        card, knowledge = _load_window_context(db, task.project_id, window)
+        card, knowledge, storyline = _load_window_context(db, task.project_id, window)
 
     seg_dicts = [
         {
@@ -178,6 +191,7 @@ async def process_window_item(db_factory, task_id: str, item_id: str, model: str
         knowledge=knowledge,
         style_guide=style_guide,
         carry_over=carry_over,
+        storyline=storyline,
     )
 
     provider = get_provider()

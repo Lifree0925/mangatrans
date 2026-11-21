@@ -5,7 +5,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
-from app.models.document import SourceDocument
+from app.models.document import Chapter, SourceDocument
 from app.models.knowledge import KnowledgeItem, SceneContextCard
 from app.models.project import Project
 from app.pipeline.runner import create_task, launch
@@ -156,6 +156,55 @@ def add_knowledge(project_id: str, payload: dict, db: Session = Depends(get_db))
     db.refresh(item)
     return {"id": item.id, "item_type": item.item_type, "canonical_key": item.canonical_key,
             "status": item.status, "data_json": item.data_json}
+
+
+@router.get("/storylines")
+def list_storylines(project_id: str, db: Session = Depends(get_db)) -> list[dict]:
+    """章节剧情卡列表（含章节号与标题，最新版本）。"""
+    import json as _json
+
+    from app.models.storyline import ChapterStoryline
+
+    _project(db, project_id)
+    chapters = {c.id: c for c in db.scalars(select(Chapter).where(Chapter.project_id == project_id))}
+    rows = list(
+        db.scalars(
+            select(ChapterStoryline)
+            .where(ChapterStoryline.project_id == project_id)
+            .order_by(ChapterStoryline.updated_at.desc())
+        )
+    )
+    latest: dict[str, dict] = {}
+    for r in rows:
+        if r.chapter_id not in latest:
+            latest[r.chapter_id] = {
+                "id": r.id,
+                "chapter_id": r.chapter_id,
+                "chapter_no": chapters[r.chapter_id].chapter_no if r.chapter_id in chapters else 0,
+                "chapter_title": (chapters[r.chapter_id].title or "") if r.chapter_id in chapters else "",
+                "card_json": r.card_json,
+                "status": r.status,
+                "version": r.version,
+            }
+    return sorted(latest.values(), key=lambda x: x["chapter_no"])
+
+
+@router.patch("/storylines/{storyline_id}")
+def patch_storyline(project_id: str, storyline_id: str, payload: dict, db: Session = Depends(get_db)) -> dict:
+    """人工修改章节剧情卡（重要情节/伏笔等）。"""
+    import json as _json
+
+    from app.models.storyline import ChapterStoryline
+
+    row = db.get(ChapterStoryline, storyline_id)
+    if row is None or row.project_id != project_id:
+        raise HTTPException(status_code=404, detail="剧情卡不存在")
+    if "card" in payload and isinstance(payload["card"], dict):
+        row.card_json = _json.dumps(payload["card"], ensure_ascii=False)
+        row.status = "edited"
+        row.version += 1
+    db.commit()
+    return {"id": row.id, "status": row.status, "version": row.version}
 
 
 @router.get("/scene-cards", response_model=list[SceneCardOut])

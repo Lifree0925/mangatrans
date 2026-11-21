@@ -33,6 +33,7 @@ def build_context(
     knowledge: list[dict],
     style_guide: dict | None,
     carry_over: dict | None,
+    storyline: dict | None = None,
     adjacent_prev: str = "",
     adjacent_next: str = "",
     budget: int = DEFAULT_BUDGET,
@@ -66,8 +67,37 @@ def build_context(
                 + json.dumps(scene_card["spoiler_guard"], ensure_ascii=False)
             )
 
-    chars = [k for k in knowledge if k.get("item_type") == "character"]
-    terms = [k for k in knowledge if k.get("item_type") == "term"]
+    if storyline:
+        story_body = {
+            "summary": storyline.get("summary", ""),
+            "key_events": storyline.get("key_events", []),
+            "prior_deps": storyline.get("prior_deps", []),
+            "character_states": storyline.get("character_states", {}),
+        }
+        blocks.append(_json_block("CHAPTER STORYLINE (current chapter)", story_body))
+        if storyline.get("foreshadowing"):
+            blocks.append(
+                "[FORESHADOWING — MUST NOT reveal these in translation (spoilers)]\n"
+                + json.dumps(storyline["foreshadowing"], ensure_ascii=False)
+            )
+        snapshot["storyline_id"] = storyline.get("id")
+
+    # 按窗口匹配知识：只带本窗口出现的角色/术语，避免全量塞入稀释重点
+    window_speakers = {seg.get("speaker_name") for seg in segments if seg.get("speaker_name")}
+    window_text = "".join(seg.get("source_text", "") for seg in segments)
+
+    def _mention(item: dict) -> bool:
+        key = item.get("canonical_key", "")
+        if key and key in window_text:
+            return True
+        data = item.get("data", {}) if isinstance(item.get("data"), dict) else {}
+        for addr in data.get("forms_of_address", []) or []:
+            if addr and addr in window_text:
+                return True
+        return key in window_speakers
+
+    chars = [k for k in knowledge if k.get("item_type") == "character" and _mention(k)]
+    terms = [k for k in knowledge if k.get("item_type") == "term" and _mention(k)]
     rules = [k for k in knowledge if k.get("item_type") in ("rule", "relation")]
     if chars:
         blocks.append(
@@ -78,6 +108,13 @@ def build_context(
         )
         report["matched_characters"] = [c["canonical_key"] for c in chars]
         snapshot["knowledge_ids"] += [c["id"] for c in chars]
+        profiles = [
+            {"name": c["canonical_key"], "data": c.get("data", {})}
+            for c in chars
+            if c.get("data", {}).get("speech_style") or c.get("data", {}).get("personality")
+        ]
+        if profiles:
+            blocks.append(_json_block("CHARACTER PROFILES (personality & speech style)", profiles))
     if terms:
         forced_terms = [
             {"term": t["canonical_key"], "translation": t.get("data", {}).get("translation")}
