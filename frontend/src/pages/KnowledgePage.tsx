@@ -79,6 +79,18 @@ export default function KnowledgePage() {
     refetchInterval: 8000,
   });
 
+  const patchRoleWeight = useMutation({
+    mutationFn: ({ id, weight }: { id: string; weight: "major" | "minor" }) =>
+      api(`/projects/${active}/knowledge/${id}`, {
+        method: "PATCH",
+        body: JSON.stringify({ data: { role_weight: weight } }),
+      }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["knowledge", active] });
+      toast.success("角色分组已更新");
+    },
+    onError: (err) => toast.error(`更新失败：${String(err)}`),
+  });
   const patchCharacter = useMutation({
     mutationFn: ({ id, body }: { id: string; body: Record<string, unknown> }) =>
       api(`/projects/${active}/knowledge/${id}`, { method: "PATCH", body: JSON.stringify(body) }),
@@ -302,9 +314,15 @@ export default function KnowledgePage() {
               )}
               {(() => {
                 const chars = (characters.data ?? []).filter((k) => k.item_type === "character");
-                // 按出场数分类：出现 >= 5 句为主要（常驻/重要），其余为次要（出场少/无权重）
-                const major = chars.filter((k) => (k.occurrence_count ?? 0) >= 5);
-                const minor = chars.filter((k) => (k.occurrence_count ?? 0) < 5);
+                // 分类：用户手动指定优先（role_weight），否则按出场数（>=5 句为主要）
+                const isMajor = (k: KnowledgeEntry) => {
+                  const d = (() => { try { return JSON.parse(k.data_json || "{}"); } catch { return {}; } })();
+                  if (d.role_weight === "major") return true;
+                  if (d.role_weight === "minor") return false;
+                  return (k.occurrence_count ?? 0) >= 5;
+                };
+                const major = chars.filter(isMajor);
+                const minor = chars.filter((k) => !isMajor(k));
                 const Card = ({ k }: { k: KnowledgeEntry }) => {
                   const data = (() => { try { return JSON.parse(k.data_json || "{}"); } catch { return {}; } })();
                   const occ = k.occurrence_count;
@@ -318,6 +336,13 @@ export default function KnowledgePage() {
                           </span>
                         )}
                         <div className="ml-auto flex items-center gap-1">
+                          <button
+                            onClick={() => patchRoleWeight.mutate({ id: k.id, weight: isMajor(k) ? "minor" : "major" })}
+                            className="rounded border border-(--color-border) px-1.5 py-0.5 text-[11px] text-(--color-muted) hover:bg-(--color-panel2) hover:text-(--color-accent)"
+                            title={isMajor(k) ? "调整为次要角色" : "调整为主要角色"}
+                          >
+                            {isMajor(k) ? "设次要" : "设主要"}
+                          </button>
                           <button onClick={() => openCharEdit(k)}
                             className="rounded p-1.5 text-(--color-muted) hover:text-(--color-accent)" title="编辑角色档案">
                             <Pencil size={14} />
