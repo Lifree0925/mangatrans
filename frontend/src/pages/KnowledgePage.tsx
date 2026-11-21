@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { BookOpen, Check, Pencil, Plus, Trash2, X } from "lucide-react";
+import { Check, Pencil, Plus, Trash2, X } from "lucide-react";
 import { api } from "../lib/api";
 import { confirmAction, toast } from "../lib/feedback";
 import type { KnowledgeEntry, Project } from "../lib/types";
@@ -27,6 +27,7 @@ export default function KnowledgePage() {
   const [draft, setDraft] = useState("");
   const [adding, setAdding] = useState(false);
   const [addForm, setAddForm] = useState({ item_type: "character", canonical_key: "", translation: "" });
+  const [typeFilter, setTypeFilter] = useState<string>("all");
 
   const projects = useQuery({ queryKey: ["projects"], queryFn: () => api<Project[]>("/projects") });
   const active = projectId ?? projects.data?.[0]?.id ?? null;
@@ -104,10 +105,10 @@ export default function KnowledgePage() {
         </button>
       </div>
 
-      <div className="flex-1 overflow-auto p-6">
-        <div className="mx-auto max-w-4xl space-y-2">
+      <div className="flex-1 overflow-auto p-4">
+        <div className="mx-auto max-w-5xl">
           {adding && (
-            <div className="flex flex-wrap items-center gap-2 rounded-xl border border-(--color-accent) bg-(--color-panel) px-4 py-3">
+            <div className="mb-3 flex flex-wrap items-center gap-2 rounded-xl border border-(--color-accent) bg-(--color-panel) px-4 py-2.5">
               <select
                 value={addForm.item_type}
                 onChange={(e) => setAddForm((f) => ({ ...f, item_type: e.target.value }))}
@@ -143,70 +144,119 @@ export default function KnowledgePage() {
             </div>
           )}
 
-          {items.data?.map((k) => {
-            const data = (() => { try { return JSON.parse(k.data_json || "{}"); } catch { return {}; } })();
+          {(() => {
+            const all = items.data ?? [];
+            const counts: Record<string, number> = {};
+            for (const k of all) counts[k.item_type] = (counts[k.item_type] ?? 0) + 1;
+            const filtered = typeFilter === "all" ? all : all.filter((k) => k.item_type === typeFilter);
             return (
-              <div key={k.id} className="flex items-center gap-3 rounded-xl border border-(--color-border) bg-(--color-panel) px-4 py-2.5">
-                <span className="w-12 shrink-0 rounded-md bg-(--color-panel2) px-1.5 py-0.5 text-center text-xs text-(--color-muted)">
-                  {typeLabel[k.item_type] ?? k.item_type}
-                </span>
-                {editingId === k.id ? (
-                  <>
-                    <input
-                      value={draft}
-                      onChange={(e) => setDraft(e.target.value)}
-                      autoFocus
-                      onKeyDown={(e) => e.key === "Enter" && draft.trim() && patchItem.mutate({ id: k.id, body: { data: { ...data, translation: draft.trim() } } })}
-                      placeholder="译名"
-                      className="w-64 rounded-lg border border-(--color-accent) bg-(--color-bg) px-2 py-1 text-sm outline-none"
-                    />
+              <>
+                <div className="mb-3 flex items-center gap-1.5">
+                  {[
+                    ["all", "全部", all.length],
+                    ["character", "人物", counts.character ?? 0],
+                    ["term", "术语", counts.term ?? 0],
+                    ["relation", "关系", counts.relation ?? 0],
+                    ["rule", "规则", counts.rule ?? 0],
+                  ].map(([key, label, count]) => (
                     <button
-                      onClick={() => draft.trim() && patchItem.mutate({ id: k.id, body: { data: { ...data, translation: draft.trim() } } })}
-                      className="rounded p-1 text-(--color-accent) hover:bg-(--color-panel2)" title="保存"
+                      key={key as string}
+                      onClick={() => setTypeFilter(key as string)}
+                      className={`rounded-lg px-3 py-1 text-sm ${
+                        typeFilter === key
+                          ? "bg-(--color-panel2) font-medium text-(--color-text)"
+                          : "text-(--color-muted) hover:bg-(--color-panel)"
+                      }`}
                     >
-                      <Check size={14} />
+                      {label} {count}
                     </button>
-                    <button onClick={() => setEditingId(null)} className="rounded p-1 text-(--color-muted) hover:bg-(--color-panel2)" title="取消">
-                      <X size={14} />
-                    </button>
-                  </>
-                ) : (
-                  <>
-                    <span className="font-medium">{k.canonical_key}</span>
-                    <span className="font-mono text-xs text-(--color-accent)">
-                      {data.translation || "（未设置译名）"}
-                    </span>
-                    <span className="rounded-md bg-(--color-panel2) px-1.5 py-0.5 text-xs text-(--color-muted)">
-                      {statusLabel[k.status] ?? k.status}
-                    </span>
-                    {k.source === "manual" && <span className="text-xs text-(--color-muted)">手动添加</span>}
-                  </>
-                )}
-                <div className="ml-auto flex items-center gap-1">
-                  {editingId !== k.id && (
-                    <button
-                      onClick={() => { setEditingId(k.id); setDraft(data.translation || ""); }}
-                      className="rounded p-1.5 text-(--color-muted) hover:text-(--color-accent)" title="修改译名"
-                    >
-                      <Pencil size={14} />
-                    </button>
-                  )}
-                  <button
-                    onClick={() => confirmRemove(k)}
-                    className="rounded p-1.5 text-(--color-muted) hover:text-red-600" title="删除条目"
-                  >
-                    <Trash2 size={14} />
-                  </button>
+                  ))}
                 </div>
-              </div>
+
+                <table className="w-full border-collapse text-sm">
+                  <thead>
+                    <tr className="border-b border-(--color-border) text-left text-xs text-(--color-muted)">
+                      <th className="px-3 py-2 font-medium">类型</th>
+                      <th className="px-3 py-2 font-medium">原文</th>
+                      <th className="px-3 py-2 font-medium">译名</th>
+                      <th className="px-3 py-2 font-medium">状态</th>
+                      <th className="w-24 px-3 py-2 text-right font-medium">操作</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {filtered.map((k) => {
+                      const data = (() => { try { return JSON.parse(k.data_json || "{}"); } catch { return {}; } })();
+                      return (
+                        <tr key={k.id} className="group border-b border-(--color-border) hover:bg-(--color-panel)">
+                          <td className="px-3 py-1.5">
+                            <span className="rounded-md bg-(--color-panel2) px-1.5 py-0.5 text-xs text-(--color-muted)">
+                              {typeLabel[k.item_type] ?? k.item_type}
+                            </span>
+                          </td>
+                          <td className="max-w-56 truncate px-3 py-1.5 font-medium">{k.canonical_key}</td>
+                          <td className="px-3 py-1.5">
+                            {editingId === k.id ? (
+                              <div className="flex items-center gap-1">
+                                <input
+                                  value={draft}
+                                  onChange={(e) => setDraft(e.target.value)}
+                                  autoFocus
+                                  onKeyDown={(e) => e.key === "Enter" && draft.trim() && patchItem.mutate({ id: k.id, body: { data: { ...data, translation: draft.trim() } } })}
+                                  placeholder="译名"
+                                  className="w-48 rounded-lg border border-(--color-accent) bg-(--color-bg) px-2 py-0.5 text-sm outline-none"
+                                />
+                                <button
+                                  onClick={() => draft.trim() && patchItem.mutate({ id: k.id, body: { data: { ...data, translation: draft.trim() } } })}
+                                  className="rounded p-0.5 text-(--color-accent) hover:bg-(--color-panel2)" title="保存"
+                                >
+                                  <Check size={14} />
+                                </button>
+                                <button onClick={() => setEditingId(null)} className="rounded p-0.5 text-(--color-muted) hover:bg-(--color-panel2)" title="取消">
+                                  <X size={14} />
+                                </button>
+                              </div>
+                            ) : (
+                              <span className={`font-mono text-xs ${data.translation ? "text-(--color-accent)" : "text-(--color-muted)"}`}>
+                                {data.translation || "（未设置译名）"}
+                              </span>
+                            )}
+                          </td>
+                          <td className="px-3 py-1.5">
+                            <span className="rounded-md bg-(--color-panel2) px-1.5 py-0.5 text-xs text-(--color-muted)">
+                              {statusLabel[k.status] ?? k.status}
+                            </span>
+                          </td>
+                          <td className="px-3 py-1.5">
+                            <div className="flex items-center justify-end gap-0.5 opacity-0 transition-opacity group-hover:opacity-100">
+                              {editingId !== k.id && (
+                                <button
+                                  onClick={() => { setEditingId(k.id); setDraft(data.translation || ""); }}
+                                  className="rounded p-1 text-(--color-muted) hover:text-(--color-accent)" title="修改译名"
+                                >
+                                  <Pencil size={13} />
+                                </button>
+                              )}
+                              <button
+                                onClick={() => confirmRemove(k)}
+                                className="rounded p-1 text-(--color-muted) hover:text-red-600" title="删除条目"
+                              >
+                                <Trash2 size={13} />
+                              </button>
+                            </div>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+                {filtered.length === 0 && (
+                  <p className="py-8 text-center text-sm text-(--color-muted)">
+                    该分类暂无条目（先运行一键直出自动提取，或手动添加）
+                  </p>
+                )}
+              </>
             );
-          })}
-          {items.data?.length === 0 && (
-            <div className="py-12 text-center">
-              <BookOpen size={28} className="mx-auto text-(--color-border)" />
-              <p className="mt-3 text-sm text-(--color-muted)">暂无知识条目（先运行一键直出自动提取，或手动添加）</p>
-            </div>
-          )}
+          })()}
         </div>
       </div>
     </div>
