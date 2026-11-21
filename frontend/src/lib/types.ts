@@ -121,6 +121,14 @@ export interface KnowledgeEntry {
   occurrence_count?: number | null;
 }
 
+export interface DocInfo {
+  id: string;
+  version: number;
+  filename: string;
+  format: string;
+  status: string;
+}
+
 export interface ChapterStoryline {
   id: string;
   chapter_id: string;

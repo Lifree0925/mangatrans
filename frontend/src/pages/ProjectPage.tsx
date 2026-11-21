@@ -6,7 +6,7 @@ import { ArrowLeft, Check, ChevronLeft, ChevronRight, Download, FileUp, Loader2,
 import { Link, useParams } from "react-router-dom";
 import { api } from "../lib/api";
 import { toast } from "../lib/feedback";
-import type { Chapter, ExportResult, LatestTranslation, Project, ProviderInfo, Scene, Segment, TaskInfo } from "../lib/types";
+import type { Chapter, DocInfo, ExportResult, LatestTranslation, Project, ProviderInfo, Scene, Segment, TaskInfo } from "../lib/types";
 
 
 export default function ProjectPage() {
@@ -82,6 +82,12 @@ export default function ProjectPage() {
   const hasActiveTask = (projectTasks.data ?? []).some(
     (t) => t.status === "running" || t.status === "queued"
   );
+  const documents = useQuery({
+    queryKey: ["documents", id],
+    queryFn: () => api<DocInfo[]>(`/projects/${id}/documents`),
+    refetchInterval: 15000,
+  });
+  const activeDoc = (documents.data ?? []).find((d) => d.status === "active") ?? documents.data?.[0];
   const chapters = useQuery({
     queryKey: ["chapters", id],
     queryFn: () => api<Chapter[]>(`/projects/${id}/chapters`),
@@ -292,6 +298,12 @@ export default function ProjectPage() {
             未配置模型 → 去设置
           </Link>
         )}
+        <div className="flex flex-1 items-center justify-center gap-2 overflow-hidden">
+          {activeDoc && (
+            <span className="truncate font-mono text-xs text-(--color-muted)" title={activeDoc.filename}>
+              {activeDoc.filename}
+            </span>
+          )}
         {(() => {
           const list = projectTasks.data ?? [];
           const running = list.find(
@@ -326,7 +338,8 @@ export default function ProjectPage() {
             </span>
           );
         })()}
-        <div className="ml-auto flex items-center gap-2">
+        </div>
+        <div className="flex items-center gap-2">
           {/* 1. 数据准备 */}
           <button
             onClick={() => fileRef.current?.click()}
