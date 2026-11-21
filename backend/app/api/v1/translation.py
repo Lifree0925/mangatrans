@@ -267,7 +267,19 @@ def start_batch_translation(project_id: str, payload: dict, db: Session = Depend
             "model": payload.get("model") or default_model_name(db),
         },
     )
-    count = expand_translation_task(db, task, doc.id)
+    subset = None
+    chapter_ids = payload.get("chapter_ids") or []
+    if chapter_ids:
+        subset = [
+            s.id
+            for s in db.scalars(
+                select(SourceSegment).where(
+                    SourceSegment.source_document_id == doc.id,
+                    SourceSegment.chapter_id.in_(chapter_ids),
+                )
+            )
+        ]
+    count = expand_translation_task(db, task, doc.id, segment_subset=subset)
     task.progress_json = json.dumps({"done": 0, "total": count})
     db.commit()
     return {"task_id": task.id, "windows": count}

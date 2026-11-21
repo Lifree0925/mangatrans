@@ -2,7 +2,7 @@
 
 import { useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { ArrowLeft, Check, CheckCircle2, ChevronLeft, ChevronRight, Download, FileUp, Loader2, Pencil, ScanText, ShieldCheck, X, Zap } from "lucide-react";
+import { ArrowLeft, Check, ChevronLeft, ChevronRight, Download, FileUp, Loader2, Pencil, RotateCcw, ScanText, ShieldCheck, X, Zap } from "lucide-react";
 import { Link, useParams } from "react-router-dom";
 import { api } from "../lib/api";
 import { toast } from "../lib/feedback";
@@ -46,6 +46,9 @@ export default function ProjectPage() {
   const [expressTaskId, setExpressTaskId] = useState<string | null>(null);
   const [exporting, setExporting] = useState(false);
   const [exportOpen, setExportOpen] = useState(false);
+  // 重新翻译浮层：全部重翻 / 章节多选重译
+  const [retranslateOpen, setRetranslateOpen] = useState(false);
+  const [retranslateChapters, setRetranslateChapters] = useState<Set<string>>(new Set());
   const [exportBilingual, setExportBilingual] = useState(true);
   const [exportFormat, setExportFormat] = useState<"md" | "txt" | "docx">("md");
   const isTauri = !!(
@@ -163,6 +166,19 @@ export default function ProjectPage() {
     onError: (err) => toast.error(`更新翻译失败：${String(err)}`),
   });
 
+  const retranslate = useMutation({
+    mutationFn: (chapterIds: string[] | null) =>
+      api<{ task_id: string }>(`/projects/${id}/translation/start`, {
+        method: "POST",
+        body: JSON.stringify(chapterIds && chapterIds.length > 0 ? { chapter_ids: chapterIds } : {}),
+      }),
+    onSuccess: (r: { task_id?: string; windows?: number }) => {
+      setRetranslateOpen(false);
+      qc.invalidateQueries({ queryKey: ["project-tasks", id] });
+      toast.success(r.task_id ? `重新翻译已开始（${r.windows ?? 0} 个窗口）` : "没有需要翻译的内容");
+    },
+    onError: (err) => toast.error(`启动重新翻译失败：${String(err)}`),
+  });
   const express = useMutation({
     mutationFn: () => api<{ task_id: string }>(`/projects/${id}/translation/express`, { method: "POST", body: "{}" }),
     onSuccess: (d) => setExpressTaskId(d.task_id),
@@ -346,18 +362,13 @@ export default function ProjectPage() {
             }
             if (translatedCount > 0) {
               return (
-                <span className="flex items-center gap-2">
-                  <span className="flex items-center gap-1 rounded-lg bg-emerald-50 px-3 py-1.5 text-sm font-medium text-emerald-700">
-                    <CheckCircle2 size={15} /> 已翻译完成
-                  </span>
-                  <button
-                    onClick={() => express.mutate()}
-                    className="rounded-lg border border-(--color-border) px-3 py-1.5 text-sm text-(--color-muted) hover:bg-(--color-panel2)"
-                    title="重新翻译全部内容（覆盖已有译文）"
-                  >
-                    重新翻译
-                  </button>
-                </span>
+                <button
+                  onClick={() => setRetranslateOpen(true)}
+                  className="rounded-lg border border-(--color-border) px-3 py-1.5 text-sm text-(--color-muted) hover:bg-(--color-panel2)"
+                  title="重新翻译：可选全部重翻或指定章节重译"
+                >
+                  重新翻译
+                </button>
               );
             }
             return (
@@ -668,6 +679,100 @@ export default function ProjectPage() {
           </div>
         )}
       </div>
+
+      {retranslateOpen && (() => {
+        const chs = chapters.data ?? [];
+        const sel = retranslateChapters;
+        return (
+          <div
+            className="fixed inset-0 z-[65] flex items-center justify-center bg-black/30 p-6"
+            onClick={() => setRetranslateOpen(false)}
+          >
+            <div
+              className="flex max-h-[80vh] w-full max-w-md flex-col rounded-2xl bg-(--color-bg) p-5 shadow-2xl"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <div className="flex items-center justify-between">
+                <h3 className="text-base font-semibold">重新翻译</h3>
+                <button
+                  onClick={() => setRetranslateOpen(false)}
+                  className="rounded-lg p-1.5 text-(--color-muted) hover:bg-(--color-panel2)"
+                >
+                  <X size={18} />
+                </button>
+              </div>
+
+              <button
+                onClick={() => retranslate.mutate(null)}
+                disabled={retranslate.isPending}
+                className="mt-4 flex items-center gap-2 rounded-xl border border-(--color-border) bg-(--color-panel) px-4 py-3 text-left text-sm hover:bg-(--color-panel2) disabled:opacity-50"
+              >
+                <RotateCcw size={16} className="text-(--color-accent)" />
+                <span>
+                  全部重翻
+                  <span className="mt-0.5 block text-xs font-normal text-(--color-muted)">
+                    覆盖现有全部译文，重新生成
+                  </span>
+                </span>
+              </button>
+
+              <div className="mt-3 flex items-center justify-between text-xs text-(--color-muted)">
+                <span>或按章节翻译（可多选）</span>
+                <button
+                  onClick={() =>
+                    setRetranslateChapters(
+                      sel.size === chs.length ? new Set() : new Set(chs.map((c) => c.id))
+                    )
+                  }
+                  className="rounded px-1.5 py-0.5 hover:bg-(--color-panel)"
+                >
+                  {sel.size === chs.length ? "清空" : "全选"}
+                </button>
+              </div>
+              <div className="mt-1.5 flex-1 space-y-1 overflow-auto rounded-xl border border-(--color-border) p-2">
+                {chs.map((c) => (
+                  <label
+                    key={c.id}
+                    className="flex cursor-pointer items-center gap-2 rounded-lg px-2 py-1.5 text-sm hover:bg-(--color-panel)"
+                  >
+                    <input
+                      type="checkbox"
+                      checked={sel.has(c.id)}
+                      onChange={(e) => {
+                        const next = new Set(sel);
+                        if (e.target.checked) next.add(c.id);
+                        else next.delete(c.id);
+                        setRetranslateChapters(next);
+                      }}
+                      className="accent-(--color-accent)"
+                    />
+                    第 {c.chapter_no ?? "?"} 章
+                    <span className="truncate text-xs text-(--color-muted)">
+                      {String(c.title ?? "").replace(/^#\s*第\d+回\s*/, "")}
+                    </span>
+                  </label>
+                ))}
+              </div>
+
+              <div className="mt-4 flex justify-end gap-2">
+                <button
+                  onClick={() => setRetranslateOpen(false)}
+                  className="rounded-lg border border-(--color-border) bg-(--color-bg) px-4 py-1.5 text-sm hover:bg-(--color-panel2)"
+                >
+                  取消
+                </button>
+                <button
+                  onClick={() => retranslate.mutate([...sel])}
+                  disabled={retranslate.isPending || sel.size === 0}
+                  className="rounded-lg bg-(--color-accent) px-4 py-1.5 text-sm text-white hover:bg-(--color-accent-hover) disabled:opacity-50"
+                >
+                  {retranslate.isPending ? "启动中…" : `翻译选中章节${sel.size > 0 ? `（${sel.size}）` : ""}`}
+                </button>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
 
       {exportOpen && (
         <div
