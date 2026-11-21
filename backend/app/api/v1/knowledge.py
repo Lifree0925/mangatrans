@@ -8,6 +8,7 @@ from app.core.database import get_db
 from app.models.document import Chapter, SourceDocument
 from app.models.knowledge import KnowledgeItem, SceneContextCard
 from app.models.project import Project
+from app.services.provider_service import default_model_name
 from app.pipeline.runner import create_task, launch
 from app.schemas.knowledge import KnowledgeOut, SceneCardOut
 
@@ -46,7 +47,7 @@ def extract_knowledge(
         {
             "source_document_id": doc.id,
             "mode": payload.get("mode", "guided"),
-            "model": payload.get("model", "fake-model"),
+            "model": payload.get("model") or default_model_name(db),
         },
     )
     launch(task.id)
@@ -61,7 +62,7 @@ def generate_scene_cards(project_id: str, payload: dict, db: Session = Depends(g
         db,
         project_id,
         "scene_cards",
-        {"source_document_id": doc.id, "model": payload.get("model", "fake-model")},
+        {"source_document_id": doc.id, "model": payload.get("model") or default_model_name(db)},
     )
     launch(task.id)
     return {"task_id": task.id}

@@ -28,7 +28,7 @@ class ProviderCapabilities:
     supports_json_object: bool = False
     supports_streaming: bool = False
     context_window: int = 8192
-    max_output_tokens: int = 2048
+    max_output_tokens: int = 8192
     supports_idempotency_key: bool = False
 
 

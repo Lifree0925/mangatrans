@@ -39,14 +39,14 @@ def start_express(project_id: str, payload: dict, db: Session = Depends(get_db))
 
     _ensure_no_running_task(db, project_id)
     doc = _active_doc(db, project)
-    from app.services.provider_service import ensure_verified_provider
+    from app.services.provider_service import default_model_name, ensure_verified_provider
 
     ensure_verified_provider(db)
     task = create_task(
         db,
         project_id,
         "express",
-        {"source_document_id": doc.id, "model": payload.get("model", "fake-model")},
+        {"source_document_id": doc.id, "model": payload.get("model") or default_model_name(db)},
     )
     launch(task.id)
     return {"task_id": task.id}

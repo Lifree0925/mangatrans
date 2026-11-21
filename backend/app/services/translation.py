@@ -8,7 +8,7 @@ from typing import Literal
 
 from pydantic import BaseModel, Field, ValidationError
 
-from app.llm.protocol import LLMProvider
+from app.llm.protocol import LLMError, LLMProvider
 from app.services.context_builder import ContextResult
 
 PROMPT_VERSION = "v1"
@@ -68,6 +68,9 @@ async def _chat_json(provider: LLMProvider, model: str, system: str, user: str, 
         response_schema=schema,
         temperature=0.3,
     )
+    if resp.finish_reason == "length":
+        # 输出预算耗尽被截断：重试大概率同样截断，直接抛出明确错误
+        raise LLMError("模型输出被截断（finish_reason=length）", retryable=False, code="output_truncated")
     try:
         return parse_llm_json(resp.content)
     except ValueError:
@@ -83,7 +86,63 @@ async def _chat_json(provider: LLMProvider, model: str, system: str, user: str, 
             response_schema=schema,
             temperature=0.2,
         )
+        if resp.finish_reason == "length":
+            raise LLMError("模型输出被截断（finish_reason=length）", retryable=False, code="output_truncated")
         return parse_llm_json(resp.content)
+
+
+async def translate_window_draft(
+    *,
+    provider: LLMProvider,
+    model: str,
+    window_id: str,
+    context: ContextResult,
+) -> list[dict]:
+    """Draft 阶段：只锁事实，不依赖 carry-over，可安全并发。"""
+    data = await _chat_json(provider, model, DRAFT_SYSTEM, context.prompt_text, DraftOutput.model_json_schema())
+    draft = DraftOutput.model_validate(data)
+    return [t.model_dump() for t in draft.translations]
+
+
+async def translate_window_polish(
+    *,
+    provider: LLMProvider,
+    model: str,
+    window_id: str,
+    context: ContextResult,
+    draft: list[dict],
+    carry_over: dict | None,
+    segments: list[dict] | None = None,
+) -> tuple[list[dict], dict]:
+    """Polish 阶段：情境自然化 + carry-over 生成；单窗口内串行。"""
+    draft_block = "\n\n[FAITHFUL DRAFT]\n" + json.dumps(draft, ensure_ascii=False, indent=2)
+    data = await _chat_json(
+        provider,
+        model,
+        POLISH_SYSTEM,
+        context.prompt_text + draft_block,
+        PolishOutput.model_json_schema(),
+    )
+    polish = PolishOutput.model_validate(data)
+    polish_list = [t.model_dump() for t in polish.translations]
+    # 完整性复查：译文显著短于原文的段判定为漏译（截断），单段重译一次
+    seg_map = {s["segment_id"]: s for s in (segments or [])}
+    ids = {x["segment_id"] for x in draft}
+    src_by_id = {sid: seg_map[sid] for sid in ids if sid in seg_map}
+    incomplete = [
+        e
+        for e in polish_list
+        if e["segment_id"] in src_by_id
+        and len(src_by_id[e["segment_id"]].get("source_text", "")) > 200
+        and len(e["target_text"]) < len(src_by_id[e["segment_id"]]["source_text"]) * 0.6
+    ]
+    for e in incomplete:
+        seg = src_by_id[e["segment_id"]]
+        fixed = await _retranslate_incomplete(provider, model, seg)
+        if fixed:
+            e["target_text"] = fixed
+            e["notes"] = e.get("notes", []) + ["incomplete-prev-replaced-by-single-segment-retranslation"]
+    return polish_list, polish.carry_over.model_dump()
 
 
 async def translate_window(
@@ -92,38 +151,41 @@ async def translate_window(
     model: str,
     window_id: str,
     context: ContextResult,
+    segments: list[dict] | None = None,
 ) -> tuple[list[dict], dict]:
-    """返回 (translations 列表(draft), polished 列表 + carry_over)。"""
-
-    async def _round(system: str, schema, polish: bool = False):
-        user = (
-            "Faithful draft below. Rewrite it into natural English.\n\n"
-            + context.prompt_text
-            if polish
-            else context.prompt_text
-        )
-        data = await _chat_json(provider, model, system, user, schema)
-        return data
-
-    # Draft 轮
-    draft_data = await _round(DRAFT_SYSTEM, DraftOutput.model_json_schema())
-    draft = DraftOutput.model_validate(draft_data)
-
-    # Polish 轮：把 draft 结果作为额外输入
-    draft_block = "\n\n[FAITHFUL DRAFT]\n" + json.dumps(
-        [t.model_dump() for t in draft.translations], ensure_ascii=False, indent=2
+    """兼容入口：串行完成 Draft+Polish（测试与独立调用用）。"""
+    draft = await translate_window_draft(
+        provider=provider, model=model, window_id=window_id, context=context
     )
-    polish_data = await _chat_json(
-        provider,
-        model,
-        POLISH_SYSTEM,
-        context.prompt_text + draft_block,
-        PolishOutput.model_json_schema(),
+    polish, carry = await translate_window_polish(
+        provider=provider, model=model, window_id=window_id, context=context,
+        draft=draft, carry_over=None, segments=segments,
     )
-    polish = PolishOutput.model_validate(polish_data)
-    return [t.model_dump() for t in draft.translations], [
-        t.model_dump() for t in polish.translations
-    ], polish.carry_over.model_dump()
+    return draft, polish, carry
+
+
+async def _retranslate_incomplete(provider: LLMProvider, model: str, seg: dict) -> str | None:
+    """漏译段单独重译：只译这一段，明确要求译完整个原文。"""
+    from app.llm.json_utils import parse_llm_json
+
+    user = (
+        "Translate the ENTIRE source segment below into English. "
+        "A previous attempt stopped early and missed the second half — you MUST translate every sentence to the end.\n\n"
+        f"[{seg['segment_id']}] {seg['source_text']}"
+    )
+    schema = {
+        "type": "object",
+        "properties": {"target_text": {"type": "string"}},
+        "required": ["target_text"],
+    }
+    try:
+        data = await _chat_json(provider, model, DRAFT_SYSTEM, user, schema)
+        text = (data or {}).get("target_text", "").strip()
+        if len(text) >= len(seg["source_text"]) * 0.6:
+            return text
+    except (LLMError, ValueError):
+        pass
+    return None
 
 
 async def repair_window(

@@ -3,11 +3,11 @@
 from app.models.document import SourceSegment
 
 TARGET_MIN = 800
-TARGET_MAX = 1500
+TARGET_MAX = 2200
 
 
 def build_windows(segments: list[SourceSegment]) -> list[list[SourceSegment]]:
-    """贪心累积窗口：硬边界（章节/场景变化）强制切断，软上限 1500 字符。"""
+    """贪心累积窗口：硬边界（章节/场景变化）强制切断，软上限 2200 字符。"""
     windows: list[list[SourceSegment]] = []
     current: list[SourceSegment] = []
     size = 0

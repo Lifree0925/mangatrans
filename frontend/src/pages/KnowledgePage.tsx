@@ -27,7 +27,7 @@ export default function KnowledgePage() {
   const [projectId, setProjectId] = useState<string | null>(
     () => localStorage.getItem("mt-knowledge-project") || null
   );
-  const [tab, setTab] = useState<"profiles" | "storylines">("profiles");
+  const [tab, setTab] = useState<"profiles" | "storylines" | "dialogue">("profiles");
   const [adding, setAdding] = useState(false);
   const [addForm, setAddForm] = useState({ canonical_key: "", translation: "" });
 
@@ -40,6 +40,11 @@ export default function KnowledgePage() {
   const [storyDraft, setStoryDraft] = useState<StoryCard>({ summary: "", key_events: [], foreshadowing: [], prior_deps: [], character_states: {} });
   const [storyActiveField, setStoryActiveField] = useState<(typeof STORY_FIELDS)[number]["key"]>("summary");
   const [storyFieldText, setStoryFieldText] = useState("");
+
+  // 台词编辑浮层
+  const [editingLine, setEditingLine] = useState<DialogueLineInfo | null>(null);
+  const [lineDraft, setLineDraft] = useState({ speaker_name: "", source_text: "" });
+  const [showLineTranslation, setShowLineTranslation] = useState(false);
 
   const projects = useQuery({ queryKey: ["projects"], queryFn: () => api<Project[]>("/projects") });
   // 默认不展示内容：未选择项目时显示"请选择项目"
@@ -103,6 +108,37 @@ export default function KnowledgePage() {
       qc.invalidateQueries({ queryKey: ["storylines", active] });
       setEditingStory(null);
       toast.success("剧情卡已保存");
+    },
+    onError: (err) => toast.error(`保存失败：${String(err)}`),
+  });
+
+  const dialogueLines = useQuery({
+    queryKey: ["dialogue-lines", active],
+    queryFn: () => api<DialogueLinesResponse>(`/projects/${active}/dialogue-lines`),
+    enabled: !!active && tab === "dialogue",
+    refetchInterval: 10000,
+  });
+  const extractDialogue = useMutation({
+    mutationFn: () => api(`/projects/${active}/dialogue-lines/extract`, {
+      method: "POST",
+      body: JSON.stringify({}),
+    }),
+    onSuccess: () => {
+      toast.success("台词本抽取任务已创建，进度可在任务中心查看");
+      qc.invalidateQueries({ queryKey: ["dialogue-lines", active] });
+    },
+    onError: (err) => toast.error(`抽取失败：${String(err)}`),
+  });
+  const patchDialogueLine = useMutation({
+    mutationFn: ({ id, body }: { id: string; body: Record<string, unknown> }) =>
+      api(`/projects/${active}/dialogue-lines/${id}`, { method: "PATCH", body: JSON.stringify(body) }),
+    onSuccess: (r: unknown) => {
+      const res = r as { wrote_back?: boolean; warning?: string | null };
+      qc.invalidateQueries({ queryKey: ["dialogue-lines", active] });
+      setEditingLine(null);
+      if (res.wrote_back) toast.success("已保存，片段原文已同步更新，译文标记待重译");
+      else if (res.warning) toast.success("已保存（" + res.warning + "）");
+      else toast.success("已保存");
     },
     onError: (err) => toast.error(`保存失败：${String(err)}`),
   });
@@ -205,7 +241,33 @@ export default function KnowledgePage() {
           >
             章节剧情
           </button>
+          <button
+            onClick={() => setTab("dialogue")}
+            className={`rounded-lg px-3 py-1 text-sm ${tab === "dialogue" ? "bg-(--color-panel2) font-medium" : "text-(--color-muted) hover:bg-(--color-panel)"}`}
+          >
+            台词本
+          </button>
         </div>
+        {tab === "dialogue" && active && (
+          <div className="ml-auto flex items-center gap-2">
+            <label className="flex items-center gap-1 text-xs text-(--color-muted)">
+              <input
+                type="checkbox"
+                checked={showLineTranslation}
+                onChange={(e) => setShowLineTranslation(e.target.checked)}
+                className="accent-(--color-accent)"
+              />
+              显示译文
+            </label>
+            <button
+              onClick={() => extractDialogue.mutate()}
+              disabled={extractDialogue.isPending}
+              className="rounded-lg bg-(--color-accent) px-3 py-1.5 text-sm text-white hover:bg-(--color-accent-hover) disabled:opacity-50"
+            >
+              {extractDialogue.isPending ? "创建任务中…" : "抽取台词本"}
+            </button>
+          </div>
+        )}
         {tab === "profiles" && (
           <button
             onClick={() => setAdding((v) => !v)}
@@ -332,6 +394,56 @@ export default function KnowledgePage() {
               )}
             </div>
           )}
+
+          {tab === "dialogue" && (
+            <div className="space-y-4">
+              {(dialogueLines.data?.chapters ?? []).map((ch) => (
+                <div key={ch.chapter_id} className="rounded-xl border border-(--color-border) bg-(--color-panel) px-4 py-3">
+                  <p className="text-sm font-semibold">
+                    {ch.chapter_id && ch.chapter_id !== "-" ? `第 ${ch.chapter_id} 章` : "未分章"}
+                  </p>
+                  {ch.scenes.map((sc) => (
+                    <div key={sc.scene_id} className="mt-2">
+                      {sc.scene_id && sc.scene_id !== "-" && (
+                        <p className="mb-1 text-xs text-(--color-muted)">场景 {sc.scene_id}</p>
+                      )}
+                      <div className="space-y-1">
+                        {sc.lines.map((ln) => (
+                          <div key={ln.id} className="group flex items-start gap-2 rounded px-1.5 py-0.5 hover:bg-(--color-panel2)">
+                            <span className="w-24 shrink-0 truncate text-right font-medium text-(--color-accent)">
+                              {ln.speaker_name}
+                              {ln.speaker_alias && ln.speaker_alias !== ln.speaker_name && (
+                                <span className="ml-1 text-[11px] text-(--color-muted)">({ln.speaker_alias})</span>
+                              )}
+                            </span>
+                            <span className="flex-1 text-sm leading-6">{ln.source_text}</span>
+                            {showLineTranslation && ln.segment_translation && (
+                              <span className="max-w-[45%] whitespace-pre-wrap text-xs leading-5 text-(--color-muted)">{ln.segment_translation}</span>
+                            )}
+                            <button
+                              onClick={() => {
+                                setEditingLine(ln);
+                                setLineDraft({ speaker_name: ln.speaker_name, source_text: ln.source_text });
+                              }}
+                              className="hidden shrink-0 rounded p-1 text-(--color-muted) hover:text-(--color-accent) group-hover:block"
+                              title="编辑台词"
+                            >
+                              <Pencil size={13} />
+                            </button>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              ))}
+              {(dialogueLines.data?.chapters ?? []).length === 0 && (
+                <p className="py-8 text-center text-sm text-(--color-muted)">
+                  暂无台词本。点击右上角「抽取台词本」，系统会按章节 → 场景 → 角色抽出纯对白流水。
+                </p>
+              )}
+            </div>
+          )}
         </div>
         )}
       </div>
@@ -420,6 +532,44 @@ export default function KnowledgePage() {
               <button onClick={saveStoryEdit} disabled={patchStoryline.isPending}
                 className="rounded-lg bg-(--color-accent) px-4 py-1.5 text-sm text-white hover:bg-(--color-accent-hover) disabled:opacity-50">
                 {patchStoryline.isPending ? "保存中…" : "保存"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 台词编辑浮层 */}
+      {editingLine && (
+        <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/30 p-6" onClick={() => setEditingLine(null)}>
+          <div className="w-full max-w-lg rounded-2xl bg-(--color-bg) p-5 shadow-2xl" onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-center justify-between">
+              <h2 className="text-base font-semibold">编辑台词</h2>
+              <button onClick={() => setEditingLine(null)} className="rounded-lg p-1.5 text-(--color-muted) hover:bg-(--color-panel2)"><X size={16} /></button>
+            </div>
+            <p className="mt-3 text-xs text-(--color-muted)">修改台词文本会同步回写片段原文，该段译文将标记为待重译。</p>
+            <div className="mt-3 space-y-3">
+              <label className="block text-xs text-(--color-muted)">
+                说话人
+                <input value={lineDraft.speaker_name} onChange={(e) => setLineDraft((d) => ({ ...d, speaker_name: e.target.value }))}
+                  className="mt-1 block w-full rounded-lg border border-(--color-border) bg-(--color-bg) px-3 py-1.5 text-sm outline-none focus:border-(--color-accent)" />
+              </label>
+              <label className="block text-xs text-(--color-muted)">
+                台词文本
+                <textarea value={lineDraft.source_text} onChange={(e) => setLineDraft((d) => ({ ...d, source_text: e.target.value }))} rows={4}
+                  className="mt-1 block w-full resize-y rounded-lg border border-(--color-border) bg-(--color-bg) px-3 py-1.5 text-sm outline-none focus:border-(--color-accent)" />
+              </label>
+            </div>
+            <div className="mt-4 flex justify-end gap-2">
+              <button onClick={() => setEditingLine(null)} className="rounded-lg border border-(--color-border) px-4 py-1.5 text-sm hover:bg-(--color-panel2)">取消</button>
+              <button
+                onClick={() => patchDialogueLine.mutate({
+                  id: editingLine.id,
+                  body: { speaker_name: lineDraft.speaker_name, source_text: lineDraft.source_text },
+                })}
+                disabled={patchDialogueLine.isPending}
+                className="rounded-lg bg-(--color-accent) px-4 py-1.5 text-sm text-white hover:bg-(--color-accent-hover) disabled:opacity-50"
+              >
+                {patchDialogueLine.isPending ? "保存中…" : "保存"}
               </button>
             </div>
           </div>

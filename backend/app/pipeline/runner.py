@@ -70,6 +70,16 @@ async def _run(task_id: str) -> None:
                 provider=get_provider(),
                 model=payload.get("model", "fake-model"),
             )
+        elif task.task_type == "dialogue":
+            from app.services import dialogue_service
+
+            result = await dialogue_service.extract_dialogue_lines(
+                _sess_factory,
+                project_id=task.project_id,
+                source_document_id=payload["source_document_id"],
+                provider=get_provider(),
+                model=payload.get("model", "fake-model"),
+            )
         elif task.task_type == "express":
             result = await express.run_express(
                 _sess_factory,

@@ -179,6 +179,7 @@ async def run_trial(
             model=model,
             window_id=f"TRIAL_{wi:02d}",
             context=context,
+            segments=window,
         )
         _persist_window(db_factory, window, draft, polished, carry, context, model)
         translated_windows += 1

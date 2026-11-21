@@ -42,6 +42,17 @@ def set_default_from_db(db: Session) -> LLMProvider:
     return get_provider()
 
 
+def default_model_name(db: Session) -> str:
+    """默认模型名：已验证的默认 Provider；无则回退 fake-model（开发环境）。"""
+    cfg = db.scalar(
+        select(ProviderConfig)
+        .where(ProviderConfig.is_verified.is_(True))
+        .order_by(ProviderConfig.is_default.desc(), ProviderConfig.created_at)
+        .limit(1)
+    )
+    return cfg.model_name if cfg else "fake-model"
+
+
 def ensure_verified_provider(db: Session) -> None:
     """翻译任务前置检查：没有已验证模型时拒绝创建任务。"""
     verified = db.scalar(

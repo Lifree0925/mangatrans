@@ -13,16 +13,18 @@ from app.models.translation import ProviderConfig
 
 
 class _FlakyProvider:
-    """第 N 次调用失败一次，其余转发 FakeProvider（模拟网络抖动）。"""
+    """翻译 Draft 阶段第一次调用必失败一次，其余转发 FakeProvider（模拟网络抖动）。"""
 
-    def __init__(self, fake: FakeProvider, fail_at: int):
+    def __init__(self, fake: FakeProvider):
         self._fake = fake
-        self._fail_at = fail_at
         self.calls = 0
+        self._failed_once = False
 
     async def chat(self, **kwargs):
         self.calls += 1
-        if self.calls == self._fail_at:
+        system = kwargs.get("messages", [{}])[0].get("content", "")
+        if "FAITHFUL DRAFT" in system and not self._failed_once:
+            self._failed_once = True
             raise LLMError("模拟故障", retryable=True, code="network")
         return await self._fake.chat(**kwargs)
 
@@ -96,7 +98,7 @@ def test_express_retry_resumes_from_failure_point(client) -> None:
     pid = _setup(client)
     fake = _fake()
     # 知识提取 1 批(1 次) + 场景卡 0 + 试译 1 窗×2 + 翻译窗口×2：让翻译第 1 个窗口 Draft 失败
-    flaky = _FlakyProvider(fake, fail_at=4)
+    flaky = _FlakyProvider(fake)
     set_provider(flaky)
     r = client.post(f"/api/v1/projects/{pid}/translation/express", json={})
     tid = r.json()["task_id"]

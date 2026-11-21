@@ -46,6 +46,10 @@ class TaskItem(Base):
     segment_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
     window_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     status: Mapped[str] = mapped_column(String(16), default="pending")
+    # 两阶段调度：draft（可并发）→ polish（串行 carry-over）
+    phase: Mapped[str] = mapped_column(
+        String(16), default="draft", server_default="draft", nullable=False
+    )
     attempts: Mapped[int] = mapped_column(Integer, default=0)
     request_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
     result_id: Mapped[str | None] = mapped_column(String(32), nullable=True)

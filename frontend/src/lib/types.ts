@@ -129,3 +129,26 @@ export interface ChapterStoryline {
   status: string;
   version: number;
 }
+
+export interface DialogueLineInfo {
+  id: string;
+  chapter_id: string | null;
+  scene_id: string | null;
+  segment_id: string | null;
+  speaker_name: string;
+  speaker_alias: string | null;
+  line_no: number;
+  source_text: string;
+  segment_translation: string | null;
+}
+
+export interface DialogueLinesResponse {
+  count: number;
+  chapters: Array<{
+    chapter_id: string | null;
+    scenes: Array<{
+      scene_id: string | null;
+      lines: DialogueLineInfo[];
+    }>;
+  }>;
+}

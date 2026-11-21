@@ -49,7 +49,7 @@ def start_trial(project_id: str, payload: dict, db: Session = Depends(get_db)) -
     """试译与风格基线任务（自动建立，无需人工确认）。"""
     project = _project(db, project_id)
     doc = _active_doc(db, project)
-    from app.services.provider_service import ensure_verified_provider
+    from app.services.provider_service import default_model_name, ensure_verified_provider
 
     ensure_verified_provider(db)
     task = create_task(
@@ -59,7 +59,7 @@ def start_trial(project_id: str, payload: dict, db: Session = Depends(get_db)) -
         {
             "kind": "trial",
             "source_document_id": doc.id,
-            "model": payload.get("model", "fake-model"),
+            "model": payload.get("model") or default_model_name(db),
         },
     )
     launch(task.id)
@@ -191,7 +191,7 @@ def start_update_translation(project_id: str, payload: dict, db: Session = Depen
     """增量翻译：只重译「待重译/无译文」片段（知识库或原文修改后使用）。"""
     project = _project(db, project_id)
     doc = _active_doc(db, project)
-    from app.services.provider_service import ensure_verified_provider
+    from app.services.provider_service import default_model_name, ensure_verified_provider
 
     ensure_verified_provider(db)
     from app.services.window_planner import build_windows
@@ -236,7 +236,7 @@ def start_update_translation(project_id: str, payload: dict, db: Session = Depen
             "kind": "update",
             "mode": payload.get("mode", "guided"),
             "source_document_id": doc.id,
-            "model": payload.get("model", "fake-model"),
+            "model": payload.get("model") or default_model_name(db),
         },
     )
     count = expand_translation_task(db, task, doc.id, segment_subset=[s.id for s in targets])
@@ -251,7 +251,7 @@ def start_batch_translation(project_id: str, payload: dict, db: Session = Depend
     """创建批量翻译任务并展开窗口。payload: {mode?, model?}"""
     project = _project(db, project_id)
     doc = _active_doc(db, project)
-    from app.services.provider_service import ensure_verified_provider
+    from app.services.provider_service import default_model_name, ensure_verified_provider
 
     ensure_verified_provider(db)
     from app.services.translation_batch import expand_translation_task
@@ -264,7 +264,7 @@ def start_batch_translation(project_id: str, payload: dict, db: Session = Depend
             "kind": "batch",
             "mode": payload.get("mode", "guided"),
             "source_document_id": doc.id,
-            "model": payload.get("model", "fake-model"),
+            "model": payload.get("model") or default_model_name(db),
         },
     )
     count = expand_translation_task(db, task, doc.id)

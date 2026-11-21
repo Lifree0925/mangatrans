@@ -10,9 +10,12 @@ from app.models.document import SourceDocument, SourceSegment
 from app.models.knowledge import KnowledgeItem, SceneContextCard
 from app.models.task import Task, TaskItem
 from app.models.translation import StyleGuide, Translation
-from app.services.context_builder import build_context
+from app.services.context_builder import ContextResult, build_context
 from app.services.importer import sha256
-from app.services.translation import PROMPT_VERSION, translate_window, validate_window
+from app.services.translation import (
+    PROMPT_VERSION, translate_window, translate_window_draft, translate_window_polish,
+    validate_window,
+)
 from app.services.window_planner import build_windows
 
 
@@ -163,9 +166,41 @@ async def _qa_check_loop(
     return polished, carry, issues
 
 
+def _persist_stage(
+    db: Session, window: list[SourceSegment], entries: list[dict], stage: str,
+    context, model: str,
+) -> None:
+    """按阶段入库：draft 与 polished 分别持久化（两轮都入库）。"""
+    for src, entry in zip(window, entries):
+        base = (
+            db.scalar(
+                select(func.max(Translation.version)).where(
+                    Translation.segment_id == src.id
+                )
+            )
+            or 0
+        )
+        db.add(
+            Translation(
+                segment_id=src.id,
+                version=base + 1,
+                stage=stage,
+                target_text=entry["target_text"],
+                notes_json=json.dumps(entry.get("notes", []), ensure_ascii=False),
+                ambiguity_json=json.dumps(entry.get("ambiguity", []), ensure_ascii=False),
+                model_name=model,
+                provider_id="default",
+                prompt_version=PROMPT_VERSION,
+                context_snapshot_json=json.dumps(context.snapshot, ensure_ascii=False),
+                source_hash=sha256(src.source_text),
+            )
+        )
+
+
 def _persist_window_translations(
     db: Session, window: list[SourceSegment], draft, polished, context, model: str
 ) -> None:
+    """draft 与 polished 连续版本入库（共享 base 递增，避免版本冲突）。"""
     for src, dr, po in zip(window, draft, polished):
         base = (
             db.scalar(
@@ -194,10 +229,10 @@ def _persist_window_translations(
             )
 
 
-async def translate_window_direct(
-    db_factory, project_id: str, window: list[SourceSegment], carry_over: dict | None, model: str
-) -> tuple:
-    """直接执行一个窗口（不依赖 task_item），返回 (carry_over, draft, polished, context)。"""
+async def _window_material(
+    db_factory, project_id: str, window: list[SourceSegment], carry_over: dict | None
+) -> tuple[list[dict], ContextResult, dict | None, dict | None]:
+    """窗口公共材料：segment dicts、style guide、场景卡/知识/剧情卡、context。"""
     with db_factory() as db:
         card, knowledge, storyline = _load_window_context(db, project_id, window)
         sg = db.scalar(
@@ -225,25 +260,60 @@ async def translate_window_direct(
         carry_over=carry_over,
         storyline=storyline,
     )
-    draft, polished, carry = await translate_window(
-        provider=get_provider(), model=model, window_id="EXPRESS", context=context
-    )
-    polished, carry, _issues = await _qa_check_loop(
-        db_factory=db_factory,
-        project_id=project_id,
-        window=window,
-        draft=draft,
-        polished=polished,
-        carry=carry,
-        context=context,
-        provider=get_provider(),
-        model=model,
-    )
-    return carry, draft, polished, context
+    return seg_dicts, context, style_guide, card
 
 
-async def process_window_item(db_factory, task_id: str, item_id: str, model: str) -> dict:
-    """执行一个翻译窗口：读上下文 → 两段式 → 校验 → 事务提交。"""
+async def translate_window_draft_direct(
+    db_factory, project_id: str, window: list[SourceSegment], model: str
+) -> tuple[list[dict], ContextResult]:
+    """Draft 阶段（可并发）：不依赖 carry-over。返回 (draft, context)。"""
+    seg_dicts, context, _sg, _card = await _window_material(db_factory, project_id, window, None)
+    draft = await translate_window_draft(
+        provider=get_provider(), model=model, window_id="DRAFT", context=context
+    )
+    return draft, context
+
+
+async def translate_window_polish_direct(
+    db_factory, project_id: str, window: list[SourceSegment], draft: list[dict],
+    carry_over: dict | None, model: str,
+) -> tuple[list[dict], dict]:
+    """Polish 阶段（串行）：carry-over 入上下文，生成 polished + 新 carry。"""
+    seg_dicts, context, _sg, _card = await _window_material(
+        db_factory, project_id, window, carry_over
+    )
+    polished, carry = await translate_window_polish(
+        provider=get_provider(), model=model, window_id="POLISH",
+        context=context, draft=draft, carry_over=carry_over, segments=seg_dicts,
+    )
+    return polished, carry
+
+
+async def process_window_draft_item(db_factory, task_id: str, item_id: str, model: str) -> dict:
+    """Draft 阶段 item：并发执行（无 carry-over），完成后转入 polish 阶段。"""
+    with db_factory() as db:
+        task = db.get(Task, task_id)
+        item = db.get(TaskItem, item_id)
+        if task is None or item is None:
+            return {"error": "task/item not found"}
+        seg_ids = json.loads(item.window_segments_json or "[]")
+        window = list(db.scalars(select(SourceSegment).where(SourceSegment.id.in_(seg_ids))))
+        window.sort(key=lambda s: seg_ids.index(s.id))
+        project_id = task.project_id
+
+    draft, context = await translate_window_draft_direct(db_factory, project_id, window, model)
+    with db_factory() as db:
+        _persist_stage(db, window, draft, "draft", context, model)
+        item = db.get(TaskItem, item_id)
+        item.phase = "polish"
+        item.status = "pending"
+        item.finished_at = func.now()
+        db.commit()
+    return {"done": 1}
+
+
+async def process_window_polish_item(db_factory, task_id: str, item_id: str, model: str) -> dict:
+    """Polish 阶段 item：串行执行，carry-over 窗口间传递。"""
     with db_factory() as db:
         task = db.get(Task, task_id)
         item = db.get(TaskItem, item_id)
@@ -254,47 +324,52 @@ async def process_window_item(db_factory, task_id: str, item_id: str, model: str
         window.sort(key=lambda s: seg_ids.index(s.id))
         progress = json.loads(task.progress_json or "{}")
         carry_over = progress.get("carry_over")
-        sg = db.scalar(
-            select(StyleGuide)
-            .where(StyleGuide.project_id == task.project_id)
-            .order_by(StyleGuide.version.desc())
+        project_id = task.project_id
+        # Draft 已入库：读本窗口最新 draft
+        draft_rows = list(
+            db.scalars(
+                select(Translation)
+                .where(
+                    Translation.segment_id.in_([s.id for s in window]),
+                    Translation.stage == "draft",
+                )
+                .order_by(Translation.version.desc())
+            )
         )
-        style_guide = json.loads(sg.guide_json) if sg else None
-        card, knowledge, storyline = _load_window_context(db, task.project_id, window)
+        latest_draft: dict[str, Translation] = {}
+        for t in draft_rows:
+            latest_draft.setdefault(t.segment_id, t)
+        if len(latest_draft) != len(window):
+            return {"error": "draft 缺失，窗口需重新执行 draft 阶段"}
+        draft = [
+            {"segment_id": s.id, "target_text": latest_draft[s.id].target_text,
+             "notes": json.loads(latest_draft[s.id].notes_json or "[]"),
+             "ambiguity": json.loads(latest_draft[s.id].ambiguity_json or "[]")}
+            for s in window
+        ]
 
-    seg_dicts = [
-        {
-            "segment_id": s.id,
-            "segment_no": s.segment_no,
-            "segment_type": s.segment_type,
-            "speaker_name": s.speaker_name,
-            "source_text": s.source_text,
-        }
-        for s in window
-    ]
-    context = build_context(
-        segments=seg_dicts,
-        scene_card=card,
-        knowledge=knowledge,
-        style_guide=style_guide,
-        carry_over=carry_over,
-        storyline=storyline,
+    polished, carry = await translate_window_polish_direct(
+        db_factory, project_id, window, draft, carry_over, model
     )
-
-    provider = get_provider()
-    draft, polished, carry = await translate_window(
-        provider=provider,
-        model=model,
-        window_id=item.window_id or "",
-        context=context,
+    errors = validate_window(
+        [
+            {"segment_id": s.id, "segment_no": s.segment_no, "segment_type": s.segment_type,
+             "speaker_name": s.speaker_name, "source_text": s.source_text}
+            for s in window
+        ],
+        polished,
     )
-    errors = validate_window(seg_dicts, polished)
     if errors:
         return {"error": "; ".join(errors)}
 
+    # context 供 QA 循环使用
+    seg_dicts, context, _sg, _card = await _window_material(
+        db_factory, project_id, window, carry_over
+    )
+    provider = get_provider()
     polished, carry, _issues = await _qa_check_loop(
         db_factory=db_factory,
-        project_id=task.project_id,
+        project_id=project_id,
         window=window,
         draft=draft,
         polished=polished,
@@ -305,8 +380,7 @@ async def process_window_item(db_factory, task_id: str, item_id: str, model: str
     )
 
     with db_factory() as db:
-        _persist_window_translations(db, window, draft, polished, context, model)
-        # 串行推进：更新任务级 carry-over 与进度
+        _persist_stage(db, window, polished, "polished", context, model)
         task = db.get(Task, task_id)
         progress = json.loads(task.progress_json or "{}")
         progress["carry_over"] = carry

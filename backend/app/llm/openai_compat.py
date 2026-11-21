@@ -95,6 +95,8 @@ class OpenAICompatProvider:
             "model": model,
             "messages": messages,
             "temperature": temperature if temperature is not None else 0.3,
+            # 显式限制输出预算：依赖供应商默认值曾导致长段翻译被静默截断（漏译后半情节）
+            "max_tokens": max(1, int(self.capabilities.max_output_tokens)),
         }
         if response_schema is not None:
             if self.capabilities.supports_json_schema:

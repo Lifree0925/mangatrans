@@ -20,7 +20,11 @@ from app.services import (
 )
 from app.services.importer import sha256
 from app.services.translation import PROMPT_VERSION
-from app.services.translation_batch import _persist_window_translations, translate_window_direct
+from app.services.translation_batch import (
+    _persist_window_translations,
+    translate_window_draft_direct,
+    translate_window_polish_direct,
+)
 from app.services.window_planner import build_windows
 
 
@@ -73,6 +77,14 @@ async def run_express(db_factory, project_id: str, source_document_id: str, mode
         report["steps"]["storylines"] = await storyline_service.generate_for_document(
             db_factory, project_id, source_document_id, provider, model
         )
+    _sync_progress(db_factory, task_id, report["steps"], "dialogue")
+    # 1d. 台词本（章节→场景→角色纯对白：反推全文一致性的地基）
+    if "dialogue" not in report["steps"]:
+        from app.services import dialogue_service
+
+        report["steps"]["dialogue"] = await dialogue_service.extract_dialogue_lines(
+            db_factory, project_id, source_document_id, provider, model
+        )
     _sync_progress(db_factory, task_id, report["steps"], "scene_cards")
     # 2. 场景卡
     if "scene_cards" not in report["steps"]:
@@ -102,17 +114,33 @@ async def run_express(db_factory, project_id: str, source_document_id: str, mode
     start_win = max(0, min(prev_done - 1, total)) if prev_done > 0 else 0
     carry: dict | None = None
     done = start_win
-    report["steps"]["translation"] = {"done": done, "total": total}
+    report["steps"]["translation"] = {"done": done, "total": total, "phase": "draft"}
     _sync_progress(db_factory, task_id, report["steps"], "translation")
-    for wi, window in enumerate(windows[start_win:], start=start_win):
-        carry, draft, polished, context = await translate_window_direct(
-            db_factory, project_id, window, carry, model
+
+    # 阶段 1：未完成窗口的 Draft 并发（Draft 不依赖 carry-over）
+    todo = windows[start_win:]
+    import asyncio as _aio
+    _sem = _aio.Semaphore(6)
+
+    async def _draft_one(win):
+        async with _sem:
+            return await translate_window_draft_direct(db_factory, project_id, win, model)
+
+    draft_results = await _aio.gather(*[_draft_one(w) for w in todo])
+
+    # 阶段 2：Polish 串行（carry-over 连续性底线）
+    report["steps"]["translation"] = {"done": done, "total": total, "phase": "polish"}
+    _sync_progress(db_factory, task_id, report["steps"], "translation")
+    for wi, window in enumerate(todo, start=start_win):
+        draft, context = draft_results[wi - start_win]
+        polished, carry = await translate_window_polish_direct(
+            db_factory, project_id, window, draft, carry, model
         )
         with db_factory() as db:
             _persist_window_translations(db, window, draft, polished, context, model)
             db.commit()
         done += 1
-        report["steps"]["translation"] = {"done": done, "total": total}
+        report["steps"]["translation"] = {"done": done, "total": total, "phase": "polish"}
         _sync_progress(db_factory, task_id, report["steps"], "translation")
 
     # 5. QA：确定性全量 + 风险窗口语义 QA

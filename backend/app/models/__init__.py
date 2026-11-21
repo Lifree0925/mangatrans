@@ -7,6 +7,7 @@ from app.models.knowledge import KnowledgeAlias, KnowledgeEvidence, KnowledgeIte
 from app.models.project import Project
 from app.models.storyline import ChapterStoryline
 from app.models.task import Task, TaskItem
+from app.models.dialogue import DialogueLine
 from app.models.translation import ProviderConfig, StyleGuide, Translation
 
 __all__ = [
@@ -28,4 +29,5 @@ __all__ = [
     "Translation",
     "ProviderConfig",
     "StyleGuide",
+    "DialogueLine",
 ]
