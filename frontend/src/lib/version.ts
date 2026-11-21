@@ -14,12 +14,14 @@ const MANIFESTS = [
 interface UpdateManifest {
   version: string;
   download_url: string;
+  installer_url?: string;
 }
 
 export interface UpdateInfo {
   current: string;
   latest: string | null;
   download_url: string | null;
+  installer_url: string | null;
   has_update: boolean;
   error?: string;
 }
@@ -61,11 +63,12 @@ async function fetchManifest(force: boolean): Promise<UpdateManifest> {
 
 export async function checkUpdate(force = false): Promise<UpdateInfo> {
   const current = APP_VERSION;
-  const info: UpdateInfo = { current, latest: null, download_url: null, has_update: false };
+  const info: UpdateInfo = { current, latest: null, download_url: null, installer_url: null, has_update: false };
   try {
     const manifest = await fetchManifest(force);
     info.latest = manifest.version.replace(/^v/, "");
     info.download_url = manifest.download_url;
+    info.installer_url = manifest.installer_url ?? null;
     info.has_update = compareVersions(info.latest, current) > 0;
   } catch (err) {
     info.error = err instanceof Error ? err.message : String(err);

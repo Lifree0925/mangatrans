@@ -1,6 +1,6 @@
 /** 任务中心：任务步骤明细、进度与错误（中文）。 */
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
 import { Archive, Circle, CheckCircle2, History, Loader2, Pause, Play, RotateCcw, Trash2, Undo2, X, XCircle } from "lucide-react";
@@ -113,7 +113,8 @@ function stepDetail(key: string, step: Record<string, unknown> | undefined): str
       return `润色情境化 ${s.done ?? 0} / ${s.total} 个窗口（${pct}%）`;
     }
     case "qa": {
-      const s = step as { done?: number; total?: number; issues?: number; needs_review?: number; blocked?: number; severity_counts?: Record<string, number> };
+      const s = step as { done?: number; total?: number; issues?: number; needs_review?: number; blocked?: number; severity_counts?: Record<string, number>; semantic_done?: number; semantic_total?: number };
+      const sem = s.semantic_total ? `语义质检 ${s.semantic_done ?? 0} / ${s.semantic_total}` : "";
       const base = s.total != null ? `已检查 ${s.done ?? 0} / ${s.total} 个窗口` : "";
       const sc = s.severity_counts ?? {};
       const sevParts = [
@@ -128,7 +129,7 @@ function stepDetail(key: string, step: Record<string, unknown> | undefined): str
         s.needs_review ? `待复核 ${s.needs_review} 窗` : "",
         s.blocked ? `拦截 ${s.blocked} 窗` : "",
       ].filter(Boolean).join(" · ");
-      return [base, extra].filter(Boolean).join(" · ");
+      return [sem, base, extra].filter(Boolean).join(" · ");
     }
     case "approve": {
       const s = step as { approved?: number };
@@ -279,6 +280,12 @@ function TranslateSteps({ task }: { task: TaskInfo }) {
 export default function TasksPage() {
   const qc = useQueryClient();
   const [showHistory, setShowHistory] = useState(false);
+  // 每秒本地时钟：运行时长等动态文案不依赖查询刷新（structuralSharing 下数据不变不重渲染）
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const t = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(t);
+  }, []);
 
   const tasks = useQuery({
     queryKey: ["tasks"],
@@ -390,7 +397,7 @@ export default function TasksPage() {
                   )}
                   {t.created_at && (t.status === "running" || t.status === "queued") && (
                     <span className="text-xs text-(--color-muted)">
-                      已运行 {fmtSecs(Math.max(0, (Date.now() - new Date(t.created_at).getTime()) / 1000))}
+                      已运行 {fmtSecs(Math.max(0, (now - new Date(t.created_at).getTime()) / 1000))}
                     </span>
                   )}
                   {t.model && (

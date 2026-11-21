@@ -44,7 +44,6 @@ export default function ProjectPage() {
       startTransition(() => setActiveChapterId(current));
     });
   };
-  const [expressTaskId, setExpressTaskId] = useState<string | null>(null);
   const [exporting, setExporting] = useState(false);
   const [exportOpen, setExportOpen] = useState(false);
   // 重新翻译浮层：全部重翻 / 章节多选重译
@@ -129,17 +128,6 @@ export default function ProjectPage() {
     }
   };
 
-  const expressTask = useQuery({
-    queryKey: ["task", expressTaskId],
-    queryFn: () => api<TaskInfo>(`/tasks/${expressTaskId!}`),
-    enabled: !!expressTaskId,
-    refetchInterval: (q) => {
-      const s = q.state.data?.status;
-      // 未拿到终态前持续轮询；完成/失败/取消后停止
-      return s && !["completed", "failed", "cancelled"].includes(s) ? 1500 : false;
-    },
-  });
-
   const invalidate = () => {
     qc.invalidateQueries({ queryKey: ["chapters", id] });
     qc.invalidateQueries({ queryKey: ["scenes", id] });
@@ -187,7 +175,7 @@ export default function ProjectPage() {
   });
   const express = useMutation({
     mutationFn: () => api<{ task_id: string }>(`/projects/${id}/translation/express`, { method: "POST", body: "{}" }),
-    onSuccess: (d) => setExpressTaskId(d.task_id),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["project-tasks", id] }),
     onError: (err) => toast.error(`启动一键直出失败：${String(err)}`),
   });
 
@@ -448,39 +436,18 @@ export default function ProjectPage() {
         >
           <div className="mx-auto max-w-4xl">
             {(() => {
+              // 仅当 AI 翻译任务(translate/express)处于运行中才显示状态，导入/解析等一律不显示
               const list = projectTasks.data ?? [];
-              const running = list.find(
-                (t) => t.status === "running" || t.status === "queued"
+              const anyTask = list.find(
+                (t) =>
+                  (t.status === "running" || t.status === "queued") &&
+                  (t.task_type === "translate" || t.task_type === "express")
               );
-              const anyTask =
-                (expressTaskId ? list.find((t) => t.id === expressTaskId) : undefined) ??
-                running ??
-                (expressTask?.data ?? null);
               if (!anyTask) return null;
-              const isRunning = anyTask.status === "running" || anyTask.status === "queued";
-              if (anyTask.status === "completed") return null; // 完成后不残留状态
-              const isTranslate = anyTask.task_type === "translate" || anyTask.task_type === "express";
-              const label = isRunning
-                ? isTranslate
-                  ? "翻译中…"
-                  : anyTask.task_type === "parse"
-                    ? "解析中…"
-                    : "处理中…"
-                : anyTask.status === "failed"
-                  ? "任务失败"
-                  : "已暂停";
               return (
-                <span
-                  className={`mb-2 inline-flex items-center gap-1.5 rounded-lg px-2 py-1 text-xs ${
-                    isRunning
-                      ? "bg-(--color-panel) font-medium text-(--color-accent)"
-                      : anyTask.status === "failed"
-                        ? "bg-red-50 text-red-600"
-                        : "bg-amber-50 text-amber-600"
-                  }`}
-                >
-                  {isRunning && <Loader2 size={12} className="animate-spin" />}
-                  {label}
+                <span className="mb-2 inline-flex items-center gap-1.5 rounded-lg bg-(--color-panel) px-2 py-1 text-xs font-medium text-(--color-accent)">
+                  <Loader2 size={12} className="animate-spin" />
+                  翻译中…
                 </span>
               );
             })()}

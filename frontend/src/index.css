@@ -46,6 +46,11 @@ body {
   display: none;
 }
 ::-webkit-scrollbar-track { background: transparent; }
+/* 桌面端统一导航条：隐藏横向滚动条，避免与项目内容区(纯纵向)不一致 */
+::-webkit-scrollbar:horizontal {
+  height: 0px;
+  display: none;
+}
 
 /* 译文流式渐显：新完成的窗口淡入，翻译中光标闪烁 */
 @keyframes fadeIn {

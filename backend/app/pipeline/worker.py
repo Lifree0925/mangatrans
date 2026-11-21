@@ -18,7 +18,7 @@ from app.services.translation_batch import process_window_draft_item, process_wi
 
 LEASE_TIMEOUT_MINUTES = 30
 POLL_SECONDS = 1.0
-WINDOW_TIMEOUT_SECONDS = 600  # 单窗口硬超时：思考模式慢调用兜底，防 gather 僵死
+WINDOW_TIMEOUT_SECONDS = 240  # 单窗口硬超时：思考模式慢调用兜底（截断已有降级重试，240s 足够）
 DRAFT_CONCURRENCY = 10
 POLISH_CONCURRENCY = 10
 
@@ -28,10 +28,13 @@ def recover_stale_items(db) -> int:
     cutoff = datetime.now(timezone.utc) - timedelta(minutes=LEASE_TIMEOUT_MINUTES)
     rows = list(
         db.scalars(
-            select(TaskItem).where(
+            select(TaskItem)
+            .join(Task, TaskItem.task_id == Task.id)
+            .where(
                 TaskItem.status == "running",
                 TaskItem.started_at.is_not(None),
                 TaskItem.started_at < cutoff,
+                Task.status.in_(["running", "queued", "paused"]),
             )
         )
     )
@@ -44,7 +47,16 @@ def recover_stale_items(db) -> int:
 def recover_all_running(db) -> int:
     """进程启动时回收全部 running 项（单机单 Worker：进程重启后不存在
     正在执行的窗口，running 全部是上次进程的残留，无需等 30 分钟超时）。"""
-    rows = list(db.scalars(select(TaskItem).where(TaskItem.status == "running")))
+    rows = list(
+        db.scalars(
+            select(TaskItem)
+            .join(Task, TaskItem.task_id == Task.id)
+            .where(
+                TaskItem.status == "running",
+                Task.status.in_(["running", "queued", "paused"]),
+            )
+        )
+    )
     for item in rows:
         item.status = "pending"
         item.finished_at = None
@@ -64,11 +76,16 @@ def _model_of(db, task_id: str) -> str:
 
 
 def claim_draft_batch(db, limit: int = DRAFT_CONCURRENCY) -> list[TaskItem]:
-    """原子领取最多 limit 个 draft 待办（并发执行）。"""
+    """原子领取最多 limit 个 draft 待办（并发执行；只领取活动任务的窗口）。"""
     rows = list(
         db.scalars(
             select(TaskItem)
-            .where(TaskItem.status == "pending", TaskItem.phase == "draft")
+            .join(Task, TaskItem.task_id == Task.id)
+            .where(
+                TaskItem.status == "pending",
+                TaskItem.phase == "draft",
+                Task.status.in_(["running", "queued"]),
+            )
             .order_by(TaskItem.window_id)
             .limit(limit)
         )
@@ -86,11 +103,16 @@ def claim_draft_batch(db, limit: int = DRAFT_CONCURRENCY) -> list[TaskItem]:
 
 
 def claim_polish_batch(db, limit: int = POLISH_CONCURRENCY) -> list[TaskItem]:
-    """原子领取最多 limit 个 polish 待办（并发执行；carry 来自前一窗口 Draft，无串行依赖）。"""
+    """原子领取最多 limit 个 polish 待办（并发执行；只领取活动任务的窗口）。"""
     rows = list(
         db.scalars(
             select(TaskItem)
-            .where(TaskItem.status == "pending", TaskItem.phase == "polish")
+            .join(Task, TaskItem.task_id == Task.id)
+            .where(
+                TaskItem.status == "pending",
+                TaskItem.phase == "polish",
+                Task.status.in_(["running", "queued"]),
+            )
             .order_by(TaskItem.window_id)
             .limit(limit)
         )
@@ -192,7 +214,12 @@ async def _maybe_lock_terms(factory) -> int:
     with factory() as db:
         tid = db.scalar(
             select(TaskItem.task_id)
-            .where(TaskItem.phase == "polish", TaskItem.status == "pending")
+            .join(Task, TaskItem.task_id == Task.id)
+            .where(
+                TaskItem.phase == "polish",
+                TaskItem.status == "pending",
+                Task.status.in_(["running", "queued"]),
+            )
             .limit(1)
         )
         if tid is None:
@@ -310,6 +337,54 @@ async def run_once(db_factory=None) -> int:
     return len(jobs)
 
 
+def finalize_stale_tasks(db) -> int:
+    """任务与窗口状态校准（worker 空闲时执行）：
+
+    1. 已完成/失败/取消任务的残留 pending/running 窗口 → failed（防"已完成的上一个任务"被重跑）；
+    2. status=running 且全部窗口已到终态的任务 → completed（补齐崩溃前未落的状态）。
+    """
+    fixed = 0
+    # 非活动任务的残留窗口一律终止，不再领取执行
+    rows = list(
+        db.scalars(
+            select(TaskItem)
+            .join(Task, TaskItem.task_id == Task.id)
+            .where(
+                TaskItem.status.in_(["pending", "running"]),
+                Task.status.notin_(["running", "queued", "paused"]),
+            )
+        )
+    )
+    for it in rows:
+        it.status = "failed"
+        it.error_code = "stale_task"
+        it.finished_at = datetime.now(timezone.utc)
+        fixed += 1
+
+    # 窗口全终态的 running 任务补齐 completed 状态
+    for tid in db.scalars(select(Task.id).where(Task.status == "running")).all():
+        has_items = db.scalar(
+            select(TaskItem.id).where(TaskItem.task_id == tid).limit(1)
+        )
+        if has_items is None:
+            continue  # 线程型任务（express/parse 等）由 runner 管理状态
+        pending = db.scalar(
+            select(func.count())
+            .select_from(TaskItem)
+            .where(
+                TaskItem.task_id == tid,
+                TaskItem.status.in_(["pending", "running"]),
+            )
+        )
+        if pending == 0:
+            t = db.get(Task, tid)
+            t.status = "completed"
+            t.error_message = None
+            fixed += 1
+    db.commit()
+    return fixed
+
+
 async def worker_loop(stop_event: asyncio.Event | None = None) -> None:
     """常驻循环：并发 Draft 批次 + 并发 Polish 批次。"""
     while stop_event is None or not stop_event.is_set():
@@ -318,4 +393,10 @@ async def worker_loop(stop_event: asyncio.Event | None = None) -> None:
         except Exception:  # noqa: BLE001 Worker 不因单个错误退出
             ran = 0
         if ran == 0:
+            # 空闲时校准任务与窗口状态：杜绝已完成任务的残留窗口被重跑
+            try:
+                with dbmod.SessionLocal() as db:
+                    finalize_stale_tasks(db)
+            except Exception:  # noqa: BLE001 校准失败不影响主循环
+                pass
             await asyncio.sleep(POLL_SECONDS)

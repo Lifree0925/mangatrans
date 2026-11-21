@@ -73,6 +73,12 @@ class PolishOutput(BaseModel):
     carry_over: CarryOver = Field(default_factory=CarryOver)
 
 
+class RepairOutput(BaseModel):
+    """QA 定点修复输出：只包含问题段的译文。"""
+    window_id: str
+    translations: list[TranslationEntry]
+
+
 async def _chat_json_validate(
     provider: LLMProvider, model: str, system: str, user: str, schema: dict,
     out_model: type, thinking: str | None = "disabled", reasoning_effort: str | None = None,
@@ -119,7 +125,21 @@ async def _chat_json(
         reasoning_effort=reasoning_effort,
     )
     if resp.finish_reason == "length":
-        # 输出预算耗尽被截断：重试大概率同样截断，直接抛出明确错误
+        # 输出预算耗尽被截断：思考模式最易挤占输出预算 → 关思考重试一次
+        if thinking == "enabled":
+            resp = await provider.chat(
+                model=model,
+                messages=messages,
+                response_schema=schema,
+                temperature=0.3,
+                thinking="disabled",
+                reasoning_effort=None,
+            )
+            if resp.finish_reason != "length":
+                try:
+                    return parse_llm_json(resp.content)
+                except ValueError:
+                    pass
         raise LLMError("模型输出被截断（finish_reason=length）", retryable=False, code="output_truncated")
     try:
         return parse_llm_json(resp.content)
@@ -139,6 +159,21 @@ async def _chat_json(
             reasoning_effort=reasoning_effort,
         )
         if resp.finish_reason == "length":
+            if thinking == "enabled":
+                # 同上：关思考再试一次，避免润色窗口因思考占预算反复截断
+                resp = await provider.chat(
+                    model=model,
+                    messages=messages,
+                    response_schema=schema,
+                    temperature=0.2,
+                    thinking="disabled",
+                    reasoning_effort=None,
+                )
+                if resp.finish_reason != "length":
+                    try:
+                        return parse_llm_json(resp.content)
+                    except ValueError:
+                        pass
             raise LLMError("模型输出被截断（finish_reason=length）", retryable=False, code="output_truncated")
         return parse_llm_json(resp.content)
 
@@ -293,13 +328,8 @@ def validate_window(segments: list[dict], translations: list[dict]) -> list[str]
         if not t.get("target_text", "").strip():
             errors.append(f"空译文: {t.get('segment_id')}")
     # 窗口内重复译文校验：相邻段译文完全相同是「台词重复+丢失」的根因
-    seen: dict[str, str] = {}
-    for t in translations:
-        text = t.get("target_text", "").strip()
-        if len(text) > 40 and text in seen:
-            errors.append(f"重复译文: {t.get('segment_id')} 与 {seen[text]} 相同")
-        else:
-            seen[text] = t.get("segment_id")
+    for sid in sorted(duplicate_segment_ids(translations)):
+        errors.append(f"重复译文: {sid}")
     # 多行段行数校验：译文缺行会让后续段整体错位（历史漏译/标签错位的根因）
     src_by_id = {s["segment_id"]: s for s in segments}
     for t in translations:
@@ -313,6 +343,85 @@ def validate_window(segments: list[dict], translations: list[dict]) -> list[str]
                 f"段内缺行: {t.get('segment_id')} 原文 {len(src_lines)} 行 / 译文 {len(tgt_lines)} 行"
             )
     return errors
+
+
+def duplicate_segment_ids(translations: list[dict]) -> set[str]:
+    """返回译文内容重复（长度>40）的段 id 集合。"""
+    seen: dict[str, str] = {}
+    dup: set[str] = set()
+    for t in translations:
+        text = (t.get("target_text") or "").strip()
+        if len(text) > 40 and text in seen:
+            dup.add(t.get("segment_id") or "")
+            dup.add(seen[text])
+        else:
+            seen[text] = t.get("segment_id") or ""
+    dup.discard("")
+    return dup
+
+
+def locate_problem_segments(segments: list[dict], translations: list[dict]) -> set[str]:
+    """整窗校验失败后定位问题段：缺失 / 空译文 / 段内缺行 / 重复译文。"""
+    bad: set[str] = set()
+    got = {t.get("segment_id") for t in translations}
+    for s in segments:
+        sid = s["segment_id"]
+        if sid not in got:
+            bad.add(sid)
+            continue
+        one = [t for t in translations if t.get("segment_id") == sid]
+        if validate_window([{"segment_id": sid, "source_text": s["source_text"]}], one):
+            bad.add(sid)
+    bad |= duplicate_segment_ids(translations)
+    return bad
+
+
+async def repair_segments(
+    *,
+    provider: LLMProvider,
+    model: str,
+    window_id: str,
+    context: ContextResult,
+    draft: list[dict],
+    issues: list[dict],
+    seg_ids: list[str],
+) -> dict[str, str]:
+    """QA 定点修复：只重译问题段，窗口其余译文保持不变（避免整窗重做浪费时间）。
+
+    复用原窗口上下文与 Draft 保持连续性，输出仅覆盖 seg_ids 中的段。
+    """
+    target = sorted(set(seg_ids))
+    if not target:
+        return {}
+    issue_block = "\n".join(
+        f"- [{i.get('issue_type','')}] segment {i.get('segment_id','?')}: {i.get('explanation','')}"
+        + (f"（建议：{i.get('suggested_fix')}）" if i.get("suggested_fix") else "")
+        for i in issues[:12]
+    )
+    sub_draft = [d for d in draft if d.get("segment_id") in target]
+    user = (
+        context.prompt_text
+        + "\n\n[FAITHFUL DRAFT — ONLY THE PROBLEM SEGMENTS]\n"
+        + json.dumps(sub_draft, ensure_ascii=False, indent=2)
+        + "\n\n[QA ISSUES]\n"
+        + issue_block
+        + "\n\nRepair ONLY these segment_ids: "
+        + ", ".join(target)
+        + ". Do NOT output any other segment. Keep all other segments unchanged. Return ONLY the required JSON."
+    )
+    system = POLISH_SYSTEM + (
+        "\n\nYou are REPAIRING only the listed segments flagged by QA. "
+        "Fix every issue for those segments while keeping their facts identical to the draft."
+    )
+    out = await _chat_json_validate(
+        provider, model, system, user, RepairOutput.model_json_schema(), RepairOutput,
+        thinking="enabled", reasoning_effort="low",
+    )
+    return {
+        e.segment_id: e.target_text
+        for e in out.translations
+        if e.segment_id in target and e.target_text.strip()
+    }
 
 
 def request_hash_of(segments: list[dict], snapshot: dict, model: str, prompt_version: str) -> str:

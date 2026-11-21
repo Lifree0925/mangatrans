@@ -230,6 +230,9 @@ class OpenAICompatProvider:
                 async with httpx.AsyncClient(timeout=timeout) as client:
                     retry_body = dict(body)
                     retry_body["messages"] = retry_messages
+                    # 截断重试降级：关闭思考模式，输出预算全部留给译文
+                    retry_body.pop("reasoning_effort", None)
+                    retry_body["thinking"] = {"type": "disabled"}
                     r2 = await client.post(
                         f"{self.base_url}/chat/completions",
                         json=retry_body,

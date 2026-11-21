@@ -21,6 +21,8 @@ let nextId = 1;
 export const useToastStore = create<ToastState>((set, get) => ({
   toasts: [],
   push: (type, message) => {
+    // 相同类型与消息的 toast 仍显示时不重复添加（多入口触发同一错误只显示一条）
+    if (get().toasts.some((t) => t.type === type && t.message === message)) return;
     const id = nextId++;
     set({ toasts: [...get().toasts, { id, type, message }] });
     setTimeout(() => get().remove(id), 5000);

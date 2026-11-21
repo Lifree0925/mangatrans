@@ -27,6 +27,23 @@ struct BackendState {
     child_exited: Arc<AtomicBool>,
 }
 
+/// 用系统默认浏览器打开外部链接（更新下载等）。仅允许 GitHub 相关域名白名单。
+#[tauri::command]
+fn open_external(app: AppHandle, url: String) -> Result<(), String> {
+    const ALLOWED_PREFIXES: [&str; 4] = [
+        "https://github.com/",
+        "https://raw.githubusercontent.com/",
+        "https://objects.githubusercontent.com/",
+        "https://cdn.jsdelivr.net/",
+    ];
+    if !ALLOWED_PREFIXES.iter().any(|p| url.starts_with(p)) {
+        return Err(format!("不允许打开的链接: {url}"));
+    }
+    app.shell()
+        .open(url, None)
+        .map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 fn get_backend_config(state: State<'_, BackendState>) -> (u16, String) {
     (state.port, state.token.clone())
@@ -332,6 +349,7 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            open_external,
             get_backend_config,
             get_backend_status,
             get_storage_info,

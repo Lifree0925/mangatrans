@@ -3,6 +3,7 @@
 import json
 
 from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.llm.registry import get_provider
@@ -132,33 +133,71 @@ async def _qa_check_loop(
     model: str,
     max_loops: int = 3,
 ) -> tuple[list[dict], dict, list[dict]]:
-    """质检打回重做：QA 发现 high/critical 问题则带问题重译，最多 3 轮。
-
-    返回 (最终 polished, carry, 最终问题列表)。
+    """质检打回定点修复：QA 发现 high/critical 问题时，AI 只重译问题段（窗口其余段保持不变），
+    每轮只修剩余问题段，最多 3 轮。返回 (最终 polished, carry, 最终问题列表)。
     """
     from app.services import qa_service
-    from app.services.translation import repair_window
+    from app.services.translation import repair_segments
 
     issues: list[dict] = []
     for _ in range(max_loops):
         with db_factory() as db:
             forced = _window_forced_terms(db, project_id, window)
             issues = []
+            seg_high: dict[str, list[dict]] = {}
             for seg, tr in zip(window, polished):
                 # 临时 Translation 对象用于 QA
                 class _FakeTr:
                     target_text = tr["target_text"]
                 det = qa_service.deterministic_qa(db, seg, _FakeTr(), forced)
                 issues.extend(det)
-        high = [i for i in issues if i.get("severity") in ("high", "critical")]
-        if not high:
+                high_here = [i for i in det if i.get("severity") in ("high", "critical")]
+                if high_here:
+                    seg_high[seg.id] = high_here
+        if not seg_high:
             break
-        # 语义 QA 不再逐段调用（性能）；确定性问题直接打回修复
-        draft, polished, carry = await repair_window(
-            provider=provider, model=model, window_id="QA-FIX", context=context,
-            draft=draft, issues=high,
-        )
+        # 定点修复：只重译问题段；修复失败则保持原样退出（不整窗重做）
+        try:
+            fixed_map = await repair_segments(
+                provider=provider, model=model, window_id="QA-FIX", context=context,
+                draft=draft,
+                issues=[i for lst in seg_high.values() for i in lst],
+                seg_ids=sorted(seg_high),
+            )
+        except Exception:  # noqa: BLE001 定点修复异常：保持原译文，不阻塞窗口
+            fixed_map = {}
+        if not fixed_map:
+            break
+        for e in polished:
+            if e.get("segment_id") in fixed_map:
+                e["target_text"] = fixed_map[e["segment_id"]]
     return polished, carry, issues
+
+
+def insert_translation_row(db: Session, *, segment_id: str, **kw) -> Translation:
+    """并发安全的译文插入：UNIQUE(segment_id, version) 冲突时在 SAVEPOINT 内
+    重读最大版本重试（最多 3 次），避免双任务并发写同版本撞约束。"""
+    last_exc: IntegrityError | None = None
+    for _ in range(3):
+        try:
+            with db.begin_nested():
+                base = (
+                    db.scalar(
+                        select(func.max(Translation.version)).where(
+                            Translation.segment_id == segment_id
+                        )
+                    )
+                    or 0
+                )
+                t = Translation(segment_id=segment_id, version=base + 1, **kw)
+                db.add(t)
+                db.flush()
+            return t
+        except IntegrityError as exc:
+            last_exc = exc
+            continue
+    assert last_exc is not None
+    raise last_exc
 
 
 def _persist_stage(
@@ -167,28 +206,18 @@ def _persist_stage(
 ) -> None:
     """按阶段入库：draft 与 polished 分别持久化（两轮都入库）。"""
     for src, entry in zip(window, entries):
-        base = (
-            db.scalar(
-                select(func.max(Translation.version)).where(
-                    Translation.segment_id == src.id
-                )
-            )
-            or 0
-        )
-        db.add(
-            Translation(
-                segment_id=src.id,
-                version=base + 1,
-                stage=stage,
-                target_text=entry["target_text"],
-                notes_json=json.dumps(entry.get("notes", []), ensure_ascii=False),
-                ambiguity_json=json.dumps(entry.get("ambiguity", []), ensure_ascii=False),
-                model_name=model,
-                provider_id="default",
-                prompt_version=PROMPT_VERSION,
-                context_snapshot_json=json.dumps(context.snapshot, ensure_ascii=False),
-                source_hash=sha256(src.source_text),
-            )
+        insert_translation_row(
+            db,
+            segment_id=src.id,
+            stage=stage,
+            target_text=entry["target_text"],
+            notes_json=json.dumps(entry.get("notes", []), ensure_ascii=False),
+            ambiguity_json=json.dumps(entry.get("ambiguity", []), ensure_ascii=False),
+            model_name=model,
+            provider_id="default",
+            prompt_version=PROMPT_VERSION,
+            context_snapshot_json=json.dumps(context.snapshot, ensure_ascii=False),
+            source_hash=sha256(src.source_text),
         )
 
 
@@ -197,30 +226,19 @@ def _persist_window_translations(
 ) -> None:
     """draft 与 polished 连续版本入库（共享 base 递增，避免版本冲突）。"""
     for src, dr, po in zip(window, draft, polished):
-        base = (
-            db.scalar(
-                select(func.max(Translation.version)).where(
-                    Translation.segment_id == src.id
-                )
-            )
-            or 0
-        )
-        for stage, entry in (("draft", dr), ("polished", po)):
-            base += 1
-            db.add(
-                Translation(
-                    segment_id=src.id,
-                    version=base,
-                    stage=stage,
-                    target_text=entry["target_text"],
-                    notes_json=json.dumps(entry.get("notes", []), ensure_ascii=False),
-                    ambiguity_json=json.dumps(entry.get("ambiguity", []), ensure_ascii=False),
-                    model_name=model,
-                    provider_id="default",
-                    prompt_version=PROMPT_VERSION,
-                    context_snapshot_json=json.dumps(context.snapshot, ensure_ascii=False),
-                    source_hash=sha256(src.source_text),
-                )
+        for entry in (dr, po):
+            insert_translation_row(
+                db,
+                segment_id=src.id,
+                stage="draft" if entry is dr else "polished",
+                target_text=entry["target_text"],
+                notes_json=json.dumps(entry.get("notes", []), ensure_ascii=False),
+                ambiguity_json=json.dumps(entry.get("ambiguity", []), ensure_ascii=False),
+                model_name=model,
+                provider_id="default",
+                prompt_version=PROMPT_VERSION,
+                context_snapshot_json=json.dumps(context.snapshot, ensure_ascii=False),
+                source_hash=sha256(src.source_text),
             )
 
 

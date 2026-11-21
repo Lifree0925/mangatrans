@@ -17,16 +17,18 @@ router = APIRouter(prefix="/projects/{project_id}", tags=["translation"])
 
 
 def _ensure_no_running_task(db: Session, project_id: str) -> None:
-    """同一项目不允许并发任务：已有运行中任务时拒绝创建新任务。"""
+    """同一项目不允许并发任务：已有运行中/排队/暂停任务时拒绝创建新任务
+    （并发任务会给同一段译文计算相同版本号，撞数据库唯一约束）。"""
     running = db.scalar(
         select(Task.id).where(
-            Task.project_id == project_id, Task.status.in_(["running", "queued"])
+            Task.project_id == project_id,
+            Task.status.in_(["running", "queued", "paused"]),
         ).limit(1)
     )
     if running:
         raise HTTPException(
             status_code=409,
-            detail="该项目已有任务正在执行，请等待完成后再启动新任务",
+            detail="该项目已有任务在执行或暂停中，请等待完成或删除后再启动新任务",
         )
 
 

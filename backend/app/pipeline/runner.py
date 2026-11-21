@@ -114,10 +114,18 @@ async def _run(task_id: str) -> None:
         else:
             raise ValueError(f"未知任务类型: {task.task_type}")
     except Exception as exc:  # noqa: BLE001 任务失败必须记录
+        from app.llm.protocol import LLMError
+
         with _sess_factory() as db:
             task = db.get(Task, task_id)
             task.status = "failed"
-            task.error_message = f"{type(exc).__name__}: {exc}"[:2000]
+            # LLMError 自带中文消息，去掉类名前缀噪音；code 单独入库供前端识别
+            if isinstance(exc, LLMError):
+                task.error_code = (exc.code or "llm_error")[:32]
+                task.error_message = str(exc)[:2000]
+            else:
+                task.error_code = type(exc).__name__[:32]
+                task.error_message = str(exc)[:2000] or type(exc).__name__
             task.started_at = None  # 无执行线程
             db.commit()
         return

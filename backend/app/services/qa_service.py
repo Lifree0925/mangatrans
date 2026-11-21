@@ -99,22 +99,52 @@ def _issue(issue_type: str, severity: str, src: str, tgt: str, explanation: str)
 async def semantic_qa(
     provider: LLMProvider, model: str, source_text: str, target_text: str
 ) -> list[dict]:
-    """语义 QA（只读，可并发）：按原文与译文文本检查，不依赖 session 对象。"""
+    """语义 QA（只读，可并发）：按原文与译文文本检查，不依赖 session 对象。
+
+    容错策略：思考模式请求设硬超时；截断/异常/解析失败自动关思考降级重试一次；
+    仍失败降级为「无发现」，绝不抛异常阻塞整本翻译。
+    """
     prompt = SEMANTIC_PROMPT.format(source=source_text, target=target_text)
-    resp = await provider.chat(
-        model=model,
-        messages=[{"role": "user", "content": prompt}],
-        response_schema=SemanticOutput.model_json_schema(),
-        temperature=0.2,
-        thinking="enabled",  # 质检需要推理，开启思考（轻量 effort）
-        reasoning_effort="low",
-    )
     try:
-        out = SemanticOutput.model_validate(parse_llm_json(resp.content))
-    except (ValueError, ValidationError):
-        # 语义 QA 是质量增强：模型输出瑕疵时降级为无发现，不阻塞整本
-        return []
-    return [i.model_dump() for i in out.issues]
+        resp = await provider.chat(
+            model=model,
+            messages=[{"role": "user", "content": prompt}],
+            response_schema=SemanticOutput.model_json_schema(),
+            temperature=0.2,
+            timeout=90,  # 质检请求硬超时：思考模式慢调用兜底，避免 QA 阶段卡住
+            thinking="enabled",  # 质检需要推理，开启思考（轻量 effort）
+            reasoning_effort="low",
+        )
+        if resp.finish_reason == "length":
+            # 思考挤占输出预算被截断：关思考重试一次，预算全部留给 QA 结果
+            resp = await provider.chat(
+                model=model,
+                messages=[{"role": "user", "content": prompt}],
+                response_schema=SemanticOutput.model_json_schema(),
+                temperature=0.2,
+                timeout=90,
+                thinking="disabled",
+            )
+        return [
+            i.model_dump()
+            for i in SemanticOutput.model_validate(parse_llm_json(resp.content)).issues
+        ]
+    except Exception:  # noqa: BLE001 语义 QA 是质量增强：超时/瑕疵时降级为无发现，不阻塞
+        try:
+            resp = await provider.chat(
+                model=model,
+                messages=[{"role": "user", "content": prompt}],
+                response_schema=SemanticOutput.model_json_schema(),
+                temperature=0.2,
+                timeout=90,
+                thinking="disabled",
+            )
+            return [
+                i.model_dump()
+                for i in SemanticOutput.model_validate(parse_llm_json(resp.content)).issues
+            ]
+        except Exception:  # noqa: BLE001 两次尝试都失败：放弃本段语义 QA
+            return []
 
 
 def persist_issues(db: Session, project_id: str, translation_id: str, issues: list[dict]) -> None:

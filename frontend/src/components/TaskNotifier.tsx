@@ -57,9 +57,9 @@ export default function TaskNotifier() {
     const prev = loadSnapshot();
     const next: Record<string, string> = {};
     for (const t of data) {
-      const key = `${t.id}:${t.status}`;
-      next[t.id] = t.status;
-      if (!firedRef.current.has(key) && prev[t.id] && prev[t.id] !== t.status) {
+      const key = `${t.id}:${t.status}:${t.error_message ?? ""}`;
+      next[t.id] = `${t.status}|${t.error_message ?? ""}`;
+      if (!firedRef.current.has(key) && prev[t.id] && prev[t.id] !== `${t.status}|${t.error_message ?? ""}`) {
         firedRef.current.add(key);
         const name = `${t.project_name ? `${t.project_name} · ` : ""}${typeLabel[t.task_type] ?? t.task_type}`;
         if (t.status === "completed") {

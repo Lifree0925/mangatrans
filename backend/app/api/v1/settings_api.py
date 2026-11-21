@@ -171,6 +171,16 @@ def resume_task(task_id: str, db: Session = Depends(get_db)) -> dict:
     task = db.get(Task, task_id)
     if task is None:
         raise HTTPException(status_code=404, detail="任务不存在")
+    # 同项目并发防护：已有其他运行/排队任务时拒绝继续，防止双任务写冲突
+    other = db.scalar(
+        select(Task.id).where(
+            Task.project_id == task.project_id,
+            Task.status.in_(["running", "queued"]),
+            Task.id != task.id,
+        ).limit(1)
+    )
+    if other:
+        raise HTTPException(status_code=409, detail="该项目已有任务正在执行，请等待完成后再继续")
     has_items = db.scalar(
         select(TaskItem.id).where(TaskItem.task_id == task_id).limit(1)
     )
@@ -202,6 +212,16 @@ def retry_task(task_id: str, db: Session = Depends(get_db)) -> dict:
         raise HTTPException(status_code=404, detail="任务不存在")
     if task.status == "completed":
         return {"id": task.id, "status": task.status}
+    # 同项目并发防护：已有运行中任务时禁止重试，防止两个任务互相卡住
+    other = db.scalar(
+        select(Task.id).where(
+            Task.project_id == task.project_id,
+            Task.status.in_(["running", "queued"]),
+            Task.id != task.id,
+        ).limit(1)
+    )
+    if other:
+        raise HTTPException(status_code=409, detail="该项目已有任务正在执行，请等待完成后再重试")
     from sqlalchemy import update
 
     failed_items = db.scalar(

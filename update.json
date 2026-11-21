@@ -1,4 +1,5 @@
 {
-  "version": "0.1.7",
-  "download_url": "https://github.com/Lifree0925/mangatrans/releases/latest"
+  "version": "0.1.8",
+  "download_url": "https://github.com/Lifree0925/mangatrans/releases/latest",
+  "installer_url": "https://github.com/Lifree0925/mangatrans/releases/download/v0.1.8/mangatrans_0.1.8_x64-setup.exe"
 }

@@ -6,6 +6,7 @@ import { Eye, EyeOff, Plus, Trash2, X } from "lucide-react";
 import { api } from "../lib/api";
 import { confirmAction, toast } from "../lib/feedback";
 import { APP_VERSION, checkUpdate, type UpdateInfo } from "../lib/version";
+import { openExternal } from "../lib/open";
 import type { ProviderInfo } from "../lib/types";
 
 const HELP_SECTIONS: { title: string; items: string[] }[] = [
@@ -507,12 +508,23 @@ export default function SettingsPage() {
 
           <section>
             <h2 className="text-sm font-semibold">软件更新</h2>
-            <div className="mt-3 flex items-center gap-3 rounded-xl bg-(--color-panel) px-4 py-3 text-sm">
+            <div className="mt-3 flex flex-wrap items-center gap-3 rounded-xl bg-(--color-panel) px-4 py-3 text-sm">
               <span className="text-(--color-muted)">当前版本 v{APP_VERSION}</span>
-              {updateInfo?.has_update && updateInfo.download_url && (
-                <a href={updateInfo.download_url} target="_blank" rel="noreferrer" className="text-xs underline">
-                  发现新版本 v{updateInfo.latest}，去下载 →
-                </a>
+              {updateInfo?.has_update && (updateInfo.download_url || updateInfo.installer_url) && (
+                <>
+                  <span className="text-xs font-medium text-amber-600">发现新版本 v{updateInfo.latest}</span>
+                  <button
+                    onClick={() =>
+                      openExternal(updateInfo.installer_url || updateInfo.download_url || "")
+                    }
+                    className="rounded-lg bg-(--color-accent) px-3 py-1.5 text-xs font-medium text-white hover:bg-(--color-accent-hover)"
+                  >
+                    立即下载更新
+                  </button>
+                  <span className="text-xs text-(--color-muted)">
+                    下载完成后运行安装包，按提示覆盖安装即可
+                  </span>
+                </>
               )}
               {updateInfo && !updateInfo.has_update && (
                 <span className="text-xs text-emerald-600">
