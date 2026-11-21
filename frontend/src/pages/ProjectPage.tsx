@@ -231,11 +231,10 @@ export default function ProjectPage() {
   };
 
   const parse = useMutation({
-    mutationFn: () => api<{ coverage_ok: boolean }>(`/projects/${id}/parse`, { method: "POST" }),
+    mutationFn: () => api<{ task_id: string }>(`/projects/${id}/parse`, { method: "POST" }),
     onSuccess: () => {
       invalidate();
-      report.refetch();
-      setShowReport(true);
+      qc.invalidateQueries({ queryKey: ["project-tasks", id] });
     },
     onError: (err) => toast.error(`解析失败：${String(err)}`),
   });
