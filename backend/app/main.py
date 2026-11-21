@@ -18,9 +18,15 @@ from app.core.config import settings
 ALLOWED_ORIGINS = [
     "http://localhost:5173",
     "http://127.0.0.1:5173",
+    "http://localhost:1420",
+    "http://127.0.0.1:1420",
     "tauri://localhost",
     "https://tauri.localhost",
+    "http://tauri.localhost",  # Tauri v2 打包后 WebView 的实际 Origin（Windows/Linux）
 ]
+
+# 兜底：任意本机回环端口（开发/打包环境端口不固定）
+ALLOWED_ORIGIN_REGEX = r"https?://(tauri\.localhost|localhost|127\.0\.0\.1)(:\d+)?"
 
 PUBLIC_PATHS = {"/health", "/docs", "/openapi.json", "/redoc"}
 
@@ -90,6 +96,7 @@ def create_app() -> FastAPI:
     app.add_middleware(
         CORSMiddleware,
         allow_origins=ALLOWED_ORIGINS,
+        allow_origin_regex=ALLOWED_ORIGIN_REGEX,
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],

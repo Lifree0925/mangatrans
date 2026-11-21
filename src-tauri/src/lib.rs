@@ -246,6 +246,13 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
+        // 单实例锁：重复启动时聚焦已有窗口，避免 sidecar 后端进程堆积
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.unminimize();
+                let _ = window.set_focus();
+            }
+        }))
         .setup(|app| {
             let port = find_free_port().expect("无法分配本地端口");
             let token = generate_token();
