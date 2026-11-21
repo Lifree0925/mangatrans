@@ -326,10 +326,15 @@ export default function ProjectPage() {
           {/* 2. 主操作：翻译（情境化） */}
           <span className="mx-1 h-5 w-px bg-(--color-border)" />
           {(() => {
+            // busy 仅指 AI 翻译任务；解析等准备任务不占用直出按钮
             const busy =
               express.isPending ||
               update.isPending ||
-              (projectTasks.data ?? []).some((t) => t.status === "running" || t.status === "queued");
+              (projectTasks.data ?? []).some(
+                (t) =>
+                  (t.status === "running" || t.status === "queued") &&
+                  (t.task_type === "translate" || t.task_type === "express")
+              );
             const items = latestTranslations.data?.items ?? [];
             const staleCount = items.filter((i) => i.freshness_status === "stale").length;
             const translatedCount = items.length;

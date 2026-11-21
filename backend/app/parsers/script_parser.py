@@ -225,7 +225,6 @@ def parse_script(text: str) -> ParseResult:
                 len(chapters) == 1
                 and chapters[0].rule_id == RULE_OTHER
                 and not chapters[0].title.strip()
-                and all(s.type == "narrative" for s in segments)
             ):
                 chapters.pop()
                 for s in segments:
