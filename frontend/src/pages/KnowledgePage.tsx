@@ -123,17 +123,6 @@ export default function KnowledgePage() {
     enabled: !!active && tab === "dialogue",
     refetchInterval: 10000,
   });
-  const extractDialogue = useMutation({
-    mutationFn: () => api(`/projects/${active}/dialogue-lines/extract`, {
-      method: "POST",
-      body: JSON.stringify({}),
-    }),
-    onSuccess: () => {
-      toast.success("台词本抽取任务已创建，进度可在任务中心查看");
-      qc.invalidateQueries({ queryKey: ["dialogue-lines", active] });
-    },
-    onError: (err) => toast.error(`抽取失败：${String(err)}`),
-  });
   const patchDialogueLine = useMutation({
     mutationFn: ({ id, body }: { id: string; body: Record<string, unknown> }) =>
       api(`/projects/${active}/dialogue-lines/${id}`, { method: "PATCH", body: JSON.stringify(body) }),
@@ -148,17 +137,6 @@ export default function KnowledgePage() {
     onError: (err) => toast.error(`保存失败：${String(err)}`),
   });
 
-  const alignDialogue = useMutation({
-    mutationFn: () => api(`/projects/${active}/dialogue-lines/align`, {
-      method: "POST",
-      body: JSON.stringify({}),
-    }),
-    onSuccess: () => {
-      toast.success("台词译文对齐任务已创建，完成前请勿重复提交");
-      qc.invalidateQueries({ queryKey: ["dialogue-lines", active] });
-    },
-    onError: (err) => toast.error(`对齐失败：${String(err)}`),
-  });
   const patchSegmentTranslation = useMutation({
     mutationFn: ({ segmentId, targetText }: { segmentId: string; targetText: string }) =>
       api(`/projects/${active}/segments/${segmentId}/translations`, {
@@ -281,21 +259,8 @@ export default function KnowledgePage() {
           </button>
         </div>
         {tab === "dialogue" && active && (
-          <div className="ml-auto flex items-center gap-2">
-            <button
-              onClick={() => alignDialogue.mutate()}
-              disabled={alignDialogue.isPending}
-              className="rounded-lg border border-(--color-border) px-3 py-1.5 text-sm hover:bg-(--color-panel2) disabled:opacity-50"
-            >
-              {alignDialogue.isPending ? "创建对齐任务中…" : "对齐译文"}
-            </button>
-            <button
-              onClick={() => extractDialogue.mutate()}
-              disabled={extractDialogue.isPending}
-              className="rounded-lg bg-(--color-accent) px-3 py-1.5 text-sm text-white hover:bg-(--color-accent-hover) disabled:opacity-50"
-            >
-              {extractDialogue.isPending ? "创建任务中…" : "抽取台词本"}
-            </button>
+          <div className="ml-auto flex items-center gap-2 text-xs text-(--color-muted)">
+            台词本由系统在翻译时自动抽取与对齐，此处仅供审查和编辑
           </div>
         )}
         {tab === "profiles" && (
@@ -453,7 +418,7 @@ export default function KnowledgePage() {
                 ))}
                 {(dialogueLines.data?.chapters ?? []).length === 0 && (
                   <p className="px-3 py-4 text-xs text-(--color-muted)">
-                    暂无台词本。点击右上角「抽取台词本」，系统会按章节 → 场景 → 角色抽出纯对白流水。
+                    暂无台词本。一键直出时会自动抽取章节 → 场景 → 角色的纯对白流水并逐句对齐译文。
                   </p>
                 )}
               </div>
@@ -592,7 +557,7 @@ export default function KnowledgePage() {
               ))}
               {(dialogueLines.data?.chapters ?? []).length === 0 && (
                 <p className="py-8 text-center text-sm text-(--color-muted)">
-                  暂无台词本。点击右上角「抽取台词本」，系统会按章节 → 场景 → 角色抽出纯对白流水。
+                  暂无台词本。一键直出时会自动抽取章节 → 场景 → 角色的纯对白流水并逐句对齐译文。
                 </p>
               )}
             </div>

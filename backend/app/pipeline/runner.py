@@ -70,51 +70,6 @@ async def _run(task_id: str) -> None:
                 provider=get_provider(),
                 model=payload.get("model", "fake-model"),
             )
-        elif task.task_type == "dialogue":
-            from app.services import dialogue_service
-
-            def _cb(p: dict) -> None:
-                with _sess_factory() as sdb:
-                    t = sdb.get(Task, task_id)
-                    if t is not None:
-                        t.progress_json = json.dumps(
-                            {
-                                "done": p["done_batches"],
-                                "total": p["total_batches"],
-                                "lines": p["lines"],
-                                "discarded": p["discarded"],
-                                "failed_batches": p["failed_batches"],
-                            },
-                            ensure_ascii=False,
-                        )
-                        sdb.commit()
-
-            result = await dialogue_service.extract_dialogue_lines(
-                _sess_factory,
-                project_id=task.project_id,
-                source_document_id=payload["source_document_id"],
-                provider=get_provider(),
-                model=payload.get("model", "fake-model"),
-                progress_cb=_cb,
-            )
-        elif task.task_type == "dialogue_align":
-            from app.services import dialogue_service
-
-            def _cb(p: dict) -> None:
-                with _sess_factory() as sdb:
-                    t = sdb.get(Task, task_id)
-                    if t is not None:
-                        t.progress_json = json.dumps(p, ensure_ascii=False)
-                        sdb.commit()
-
-            result = await dialogue_service.align_dialogue_translations(
-                _sess_factory,
-                project_id=task.project_id,
-                source_document_id=payload["source_document_id"],
-                provider=get_provider(),
-                model=payload.get("model", "fake-model"),
-                progress_cb=_cb,
-            )
         elif task.task_type == "express":
             result = await express.run_express(
                 _sess_factory,
