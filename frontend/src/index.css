@@ -32,9 +32,9 @@ body {
   /* 滑块默认高度：占总长 1/7 */
   min-height: calc(100% / 7);
 }
-/* 目录栏与知识库角色区：滑块更短（总长 1/28） */
+/* 目录栏与知识库角色区：滑块更短（总长 1/56） */
 .slim-scroll::-webkit-scrollbar-thumb {
-  min-height: calc(100% / 28);
+  min-height: calc(100% / 56);
 }
 ::-webkit-scrollbar-track { background: transparent; }
 
@@ -58,4 +58,10 @@ body {
   background: var(--color-accent);
   animation: blink 1s step-start infinite;
   vertical-align: -2px;
+}
+
+/* 长文本滚动性能：视口外段落跳过布局与绘制 */
+.cv-auto {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 120px;
 }

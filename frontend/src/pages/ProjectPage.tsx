@@ -73,20 +73,29 @@ export default function ProjectPage() {
       }),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["providers"] }),
   });
+  const projectTasks = useQuery({
+    queryKey: ["project-tasks", id],
+    queryFn: () => api<TaskInfo[]>(`/projects/${id}/tasks`),
+    refetchInterval: 2000,
+  });
+  // 仅在项目有运行中任务时轮询（数据解析/翻译完成后停止，避免每 3 秒全列表重渲染卡顿）
+  const hasActiveTask = (projectTasks.data ?? []).some(
+    (t) => t.status === "running" || t.status === "queued"
+  );
   const chapters = useQuery({
     queryKey: ["chapters", id],
     queryFn: () => api<Chapter[]>(`/projects/${id}/chapters`),
-    refetchInterval: 3000,
+    refetchInterval: hasActiveTask ? 3000 : false,
   });
   const scenes = useQuery({
     queryKey: ["scenes", id],
     queryFn: () => api<Scene[]>(`/projects/${id}/scenes`),
-    refetchInterval: 3000,
+    refetchInterval: hasActiveTask ? 3000 : false,
   });
   const segments = useQuery({
     queryKey: ["segments", id],
     queryFn: () => api<Segment[]>(`/projects/${id}/segments`),
-    refetchInterval: 3000,
+    refetchInterval: hasActiveTask ? 3000 : false,
   });
 
   const latestTranslations = useQuery({
@@ -118,12 +127,6 @@ export default function ProjectPage() {
       toast.error(`保存失败：${String(err)}`);
     }
   };
-
-  const projectTasks = useQuery({
-    queryKey: ["project-tasks", id],
-    queryFn: () => api<TaskInfo[]>(`/projects/${id}/tasks`),
-    refetchInterval: 2000,
-  });
 
   const expressTask = useQuery({
     queryKey: ["task", expressTaskId],
@@ -479,7 +482,7 @@ export default function ProjectPage() {
                   key={s.id}
                   data-seg-no={s.segment_no}
                   data-chapter-id={s.chapter_id ?? ""}
-                  className="group border-b border-(--color-border) py-2"
+                  className="cv-auto group border-b border-(--color-border) py-2"
                   onMouseLeave={() => {
                     if (editMenuFor === s.id) {
                       setEditMenuFor(null);
