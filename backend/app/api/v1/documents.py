@@ -70,12 +70,15 @@ def list_documents(project_id: str, db: Session = Depends(get_db)) -> list[Sourc
 
 @router.post("/parse")
 def parse_document(project_id: str, db: Session = Depends(get_db)) -> dict:
-    """同步解析当前项目最新文档版本。翻译进行中禁止重解析（会破坏译文）。"""
+    """创建解析任务（异步）：解析报告在任务中心展示。"""
+    from app.pipeline.runner import create_task, launch
+    from app.services.provider_service import default_model_name
+
+    project = _get_project(db, project_id)
     from sqlalchemy import select as sa_select
 
     from app.models.task import Task
 
-    project = _get_project(db, project_id)
     running = db.scalar(
         sa_select(Task.id).where(
             Task.project_id == project_id, Task.status.in_(["running", "queued"])
@@ -84,7 +87,7 @@ def parse_document(project_id: str, db: Session = Depends(get_db)) -> dict:
     if running:
         raise HTTPException(
             status_code=409,
-            detail="项目翻译正在进行中，无法重新解析。请等待任务完成或先重试/暂停任务。",
+            detail="项目有进行中的任务，无法重新解析",
         )
     doc = db.scalar(
         select(SourceDocument)
@@ -93,11 +96,14 @@ def parse_document(project_id: str, db: Session = Depends(get_db)) -> dict:
     )
     if doc is None:
         raise HTTPException(status_code=404, detail="尚未导入原文")
-    text = importer.read_normalized(doc)
-    result = parse_and_persist(db, doc, text)
-    project.active_source_document_id = doc.id
-    db.commit()
-    return {"document_id": doc.id, "coverage_ok": result.report.coverage_ok}
+    task = create_task(
+        db,
+        project_id,
+        "parse",
+        {"source_document_id": doc.id, "model": default_model_name(db)},
+    )
+    launch(task.id)
+    return {"task_id": task.id}
 
 
 @router.get("/parse-report")

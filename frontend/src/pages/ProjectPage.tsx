@@ -2,11 +2,11 @@
 
 import { useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { ArrowLeft, Check, ChevronLeft, ChevronRight, Download, FileUp, Loader2, Pencil, RotateCcw, ScanText, ShieldCheck, X, Zap } from "lucide-react";
+import { ArrowLeft, Check, ChevronLeft, ChevronRight, Download, FileUp, Loader2, Pencil, RotateCcw, X, Zap } from "lucide-react";
 import { Link, useParams } from "react-router-dom";
 import { api } from "../lib/api";
 import { toast } from "../lib/feedback";
-import type { Chapter, ExportResult, LatestTranslation, ParseReport, Project, ProviderInfo, QAIssueInfo, Scene, Segment, TaskInfo } from "../lib/types";
+import type { Chapter, ExportResult, LatestTranslation, Project, ProviderInfo, Scene, Segment, TaskInfo } from "../lib/types";
 
 
 export default function ProjectPage() {
@@ -116,16 +116,6 @@ export default function ProjectPage() {
     }
   };
 
-  const report = useQuery({
-    queryKey: ["parse-report", id],
-    queryFn: () => api<ParseReport>(`/projects/${id}/parse-report`),
-    enabled: false,
-  });
-  const qaIssues = useQuery({
-    queryKey: ["qa-issues", id],
-    queryFn: () => api<QAIssueInfo[]>(`/projects/${id}/qa-issues`),
-    enabled: showQA,
-  });
   const projectTasks = useQuery({
     queryKey: ["project-tasks", id],
     queryFn: () => api<TaskInfo[]>(`/projects/${id}/tasks`),
@@ -152,7 +142,10 @@ export default function ProjectPage() {
       form.append("file", file);
       await api(`/projects/${id}/documents/import`, { method: "POST", body: form });
     },
-    onSuccess: () => invalidate(),
+    onSuccess: () => {
+      invalidate();
+      parse.mutate(); // 导入后自动解析（解析任务与报告在任务中心展示）
+    },
     onError: (err) => toast.error(`导入失败：${String(err)}`),
   });
 
@@ -319,15 +312,6 @@ export default function ProjectPage() {
             className="hidden"
             onChange={(e) => e.target.files?.[0] && upload.mutate(e.target.files[0])}
           />
-          <button
-            onClick={() => parse.mutate()}
-            disabled={parse.isPending}
-            className="flex items-center gap-1.5 rounded-lg border border-(--color-border) bg-(--color-bg) px-3 py-1.5 text-sm hover:bg-(--color-panel2) disabled:opacity-50"
-            title="切分章节/场景/对白并校验原文覆盖"
-          >
-            <ScanText size={15} /> {parse.isPending ? "解析中…" : "解析"}
-          </button>
-
           {/* 2. 主操作：翻译（情境化） */}
           <span className="mx-1 h-5 w-px bg-(--color-border)" />
           {(() => {
@@ -384,13 +368,7 @@ export default function ProjectPage() {
 
           {/* 3. 检查与交付 */}
           <span className="mx-1 h-5 w-px bg-(--color-border)" />
-          <button
-            onClick={() => setShowQA((v) => !v)}
-            className="flex items-center gap-1.5 rounded-lg border border-(--color-border) bg-(--color-bg) px-3 py-1.5 text-sm hover:bg-(--color-panel2)"
-            title="查看译文质量问题"
-          >
-            <ShieldCheck size={15} /> QA
-          </button>
+
           <button
             onClick={() => setExportOpen(true)}
             className="flex items-center gap-1.5 rounded-lg border border-(--color-border) bg-(--color-bg) px-3 py-1.5 text-sm hover:bg-(--color-panel2)"
@@ -558,126 +536,6 @@ export default function ProjectPage() {
           </div>
         </div>
 
-        {showReport && (
-          <div className="fixed right-6 top-20 z-[60] max-h-[70vh] w-80 overflow-auto rounded-2xl border border-(--color-border) bg-(--color-bg) p-4 text-xs shadow-2xl">
-            <div className="mb-2 flex items-center justify-between">
-              <p className="font-semibold">解析报告</p>
-              <button
-                onClick={() => setShowReport(false)}
-                className="rounded-lg p-1.5 text-(--color-muted) hover:bg-(--color-panel2)"
-                title="关闭"
-              >
-                <X size={18} />
-              </button>
-            </div>
-            {report.data ? (
-              <>
-                <p className={report.data.coverage_ok ? "text-emerald-600" : "text-red-600"}>
-                  覆盖：{report.data.covered_chars}/{report.data.total_chars}
-                  {report.data.coverage_ok ? " ✓" : " ✗"}
-                </p>
-                <p className="mt-1 text-(--color-muted)">
-                  章节 {report.data.chapter_count} · 场景 {report.data.scene_count} · 对白{" "}
-                  {report.data.dialogue_count} · 叙述 {report.data.narrative_count} · other{" "}
-                  {report.data.other_count}
-                </p>
-                {report.data.anomalies.length > 0 && (
-                  <div className="mt-2">
-                    <p className="text-amber-600">异常 {report.data.anomalies.length} 项</p>
-                    {report.data.anomalies.slice(0, 20).map((a, i) => (
-                      <p key={i} className="mt-1 break-all text-(--color-muted)">{a}</p>
-                    ))}
-                  </div>
-                )}
-              </>
-            ) : (
-              <p className="text-(--color-muted)">加载中…</p>
-            )}
-          </div>
-        )}
-
-        {editing && (() => {
-          const seg = segs.find((x) => x.id === editing.segmentId);
-          const sideLabel = editing.side === "source" ? "原文" : "译文";
-          return (
-            <div className="fixed inset-0 z-[90] flex items-center justify-center bg-black/40 p-6">
-              <div className="w-full max-w-2xl rounded-2xl bg-(--color-bg) p-5 shadow-2xl">
-                <div className="flex items-center justify-between">
-                  <h3 className="text-base font-semibold">
-                    编辑{sideLabel}
-                    {seg && (
-                      <span className="ml-2 font-sans text-xs font-normal text-(--color-muted)">
-                        片段 {seg.segment_no} · {seg.segment_type === "dialogue" ? "对白" : seg.segment_type === "narrative" ? "叙述" : seg.segment_type}
-                      </span>
-                    )}
-                  </h3>
-                  <button
-                    onClick={() => setEditing(null)}
-                    className="rounded-lg p-1.5 text-(--color-muted) hover:bg-(--color-panel2)"
-                    title="关闭"
-                  >
-                    <X size={18} />
-                  </button>
-                </div>
-                <textarea
-                  value={editDraft}
-                  onChange={(e) => setEditDraft(e.target.value)}
-                  rows={Math.min(16, Math.max(6, editDraft.split("\n").length + 1))}
-                  autoFocus
-                  className="mt-4 w-full resize-y rounded-xl border border-(--color-border) bg-(--color-bg) px-3 py-2 font-mono text-[13px] leading-6 outline-none focus:border-(--color-text)"
-                />
-                <div className="mt-3 flex justify-between">
-                  <p className="font-sans text-xs leading-5 text-(--color-muted)">
-                    {editing.side === "source"
-                      ? "修改原文后，该段译文将标记为「待重译」，可一键重译。"
-                      : "直接修改译文将保存为新校对版本，不会被重译覆盖。"}
-                  </p>
-                  <div className="flex gap-2">
-                    <button
-                      onClick={() => setEditing(null)}
-                      className="rounded-lg border border-(--color-border) bg-(--color-bg) px-4 py-1.5 text-sm hover:bg-(--color-panel2)"
-                    >
-                      取消
-                    </button>
-                    <button
-                      onClick={saveEdit}
-                      className="flex items-center gap-1 rounded-lg bg-(--color-accent) px-4 py-1.5 text-sm text-white hover:bg-(--color-accent-hover)"
-                    >
-                      <Check size={14} /> 保存
-                    </button>
-                  </div>
-                </div>
-              </div>
-            </div>
-          );
-        })()}
-
-        {showQA && (
-          <div className="fixed right-6 top-20 z-[60] max-h-[70vh] w-96 overflow-auto rounded-2xl border border-(--color-border) bg-(--color-bg) p-4 text-xs shadow-2xl">
-            <div className="mb-2 flex items-center justify-between">
-              <p className="font-semibold">QA 问题</p>
-              <button
-                onClick={() => setShowQA(false)}
-                className="rounded-lg p-1.5 text-(--color-muted) hover:bg-(--color-panel2)"
-                title="关闭"
-              >
-                <X size={18} />
-              </button>
-            </div>
-            {qaIssues.data?.length === 0 && <p className="text-(--color-muted)">无问题记录</p>}
-            {qaIssues.data?.map((i) => (
-              <div key={i.id} className="mb-2 rounded-xl border border-(--color-border) bg-(--color-panel) p-2">
-                <p className="font-medium">
-                  <span className={i.severity === "high" || i.severity === "critical" ? "text-red-600" : "text-amber-600"}>
-                    [{i.severity}]
-                  </span>{" "}
-                  {i.issue_type}
-                </p>
-                <p className="mt-1 break-all text-(--color-muted)">{i.explanation}</p>
-              </div>
-            ))}
-          </div>
-        )}
       </div>
 
       {retranslateOpen && (() => {

@@ -22,7 +22,7 @@ class _BrokenProvider:
         return ProviderTestResult(ok=False, model_name="broken", detail="")
 
 
-def _setup(client, provider) -> str:
+def _setup(client, provider, wait_task) -> str:
     import app.core.database as dbmod
     from app.models.translation import ProviderConfig
 
@@ -44,7 +44,7 @@ def _setup(client, provider) -> str:
         f"/api/v1/projects/{pid}/documents/import",
         files={"file": ("s.txt", "林风：我们走。\n夜色降临。\n".encode(), "text/plain")},
     )
-    client.post(f"/api/v1/projects/{pid}/parse", json={})
+    wait_task(client, client.post(f"/api/v1/projects/{pid}/parse", json={}).json()["task_id"])
     set_provider(provider)
     return pid
 
@@ -119,8 +119,8 @@ def _universal_fake() -> FakeProvider:
     return f
 
 
-def test_express_fail_then_resume_completes(client) -> None:
-    pid = _setup(client, _BrokenProvider())
+def test_express_fail_then_resume_completes(client, wait_task) -> None:
+    pid = _setup(client, _BrokenProvider(), wait_task)
     r = client.post(f"/api/v1/projects/{pid}/translation/express", json={})
     task_id = r.json()["task_id"]
     assert _wait(task_id) == "failed"
@@ -132,8 +132,8 @@ def test_express_fail_then_resume_completes(client) -> None:
     assert _wait(task_id, timeout=30) == "completed"
 
 
-def test_express_fail_then_retry_completes(client) -> None:
-    pid = _setup(client, _BrokenProvider())
+def test_express_fail_then_retry_completes(client, wait_task) -> None:
+    pid = _setup(client, _BrokenProvider(), wait_task)
     r = client.post(f"/api/v1/projects/{pid}/translation/express", json={})
     task_id = r.json()["task_id"]
     assert _wait(task_id) == "failed"

@@ -21,6 +21,7 @@ const taskTypeLabel: Record<string, string> = {
   translate: "全文翻译",
   trial: "试译",
   knowledge: "知识提取",
+  parse: "解析",
   dialogue: "台词本抽取",
   scene_cards: "场景卡",
   qa: "质量检查",
@@ -308,6 +309,33 @@ export default function TasksPage() {
                 )}
 
                 {t.task_type === "express" && <ExpressSteps task={t} />}
+                {t.task_type === "parse" && (() => {
+                  const p = t.progress as {
+                    coverage_ok?: boolean; total_chars?: number; covered_chars?: number;
+                    chapter_count?: number; scene_count?: number; dialogue_count?: number;
+                    narrative_count?: number; anomalies?: string[];
+                  };
+                  if (p.total_chars == null) return null;
+                  return (
+                    <div className="mt-2 rounded-lg bg-(--color-panel) px-3 py-2 text-xs leading-5 text-(--color-muted)">
+                      <p className={p.coverage_ok ? "text-emerald-600" : "text-red-600"}>
+                        覆盖：{p.covered_chars}/{p.total_chars} 字符 {p.coverage_ok ? "✓ 完整" : "✗ 有缺口"}
+                      </p>
+                      <p className="mt-1">
+                        章节 {p.chapter_count} · 场景 {p.scene_count} · 对白 {p.dialogue_count} · 叙述 {p.narrative_count}
+                      </p>
+                      {(p.anomalies ?? []).length > 0 && (
+                        <div className="mt-1">
+                          <p className="text-amber-600">异常 {p.anomalies!.length} 项</p>
+                          {p.anomalies!.slice(0, 10).map((a, i) => (
+                            <p key={i} className="break-all">{a}</p>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })()}
+
                 {t.task_type !== "express" && prog.total != null && (
                   <div className="mt-2 flex items-center gap-2 text-xs text-(--color-muted)">
                     {t.status === "running" && <Loader2 size={13} className="animate-spin text-(--color-accent)" />}
@@ -322,6 +350,9 @@ export default function TasksPage() {
                       <span>
                         已处理 {prog.done ?? 0} / {prog.total} 个窗口
                         （{prog.total ? Math.round(((prog.done ?? 0) / prog.total) * 100) : 0}%）
+                        {(t.progress as { qa_issues?: number }).qa_issues != null && (
+                          <> · QA 问题 {(t.progress as { qa_issues?: number }).qa_issues} 条</>
+                        )}
                       </span>
                     )}
                   </div>

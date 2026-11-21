@@ -32,7 +32,7 @@ class _FlakyProvider:
         return await self._fake.test_connection()
 
 
-def _setup(client):
+def _setup(client, wait_task):
     with dbmod.SessionLocal() as db:
         db.add(ProviderConfig(display_name="t", base_url="http://127.0.0.1:9",
                               model_name="m", credential_ref="r", is_default=True, is_verified=True))
@@ -44,7 +44,7 @@ def _setup(client):
     )
     client.post(f"/api/v1/projects/{pid}/documents/import",
                 files={"file": ("s.txt", body.encode(), "text/plain")})
-    client.post(f"/api/v1/projects/{pid}/parse", json={})
+    wait_task(client, client.post(f"/api/v1/projects/{pid}/parse", json={}).json()["task_id"])
     return pid
 
 
@@ -94,8 +94,8 @@ def _wait(task_id: str, timeout: float = 60) -> str:
     return "timeout"
 
 
-def test_express_retry_resumes_from_failure_point(client) -> None:
-    pid = _setup(client)
+def test_express_retry_resumes_from_failure_point(client, wait_task) -> None:
+    pid = _setup(client, wait_task)
     fake = _fake()
     # 知识提取 1 批(1 次) + 场景卡 0 + 试译 1 窗×2 + 翻译窗口×2：让翻译第 1 个窗口 Draft 失败
     flaky = _FlakyProvider(fake)

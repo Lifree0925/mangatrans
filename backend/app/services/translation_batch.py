@@ -367,7 +367,7 @@ async def process_window_polish_item(db_factory, task_id: str, item_id: str, mod
         db_factory, project_id, window, carry_over
     )
     provider = get_provider()
-    polished, carry, _issues = await _qa_check_loop(
+    polished, carry, qa_issues = await _qa_check_loop(
         db_factory=db_factory,
         project_id=project_id,
         window=window,
@@ -384,6 +384,7 @@ async def process_window_polish_item(db_factory, task_id: str, item_id: str, mod
         task = db.get(Task, task_id)
         progress = json.loads(task.progress_json or "{}")
         progress["carry_over"] = carry
+        progress["qa_issues"] = int(progress.get("qa_issues", 0)) + len(qa_issues)
         done = int(progress.get("done", 0)) + 1
         progress["done"] = done
         total = int(progress.get("total", 0)) or db.scalar(

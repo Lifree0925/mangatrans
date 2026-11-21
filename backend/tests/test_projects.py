@@ -3,7 +3,7 @@
 from fastapi.testclient import TestClient
 
 
-def test_crud_roundtrip(client: TestClient) -> None:
+def test_crud_roundtrip(client: TestClient, wait_task) -> None:
     r = client.post("/api/v1/projects", json={"name": "测试项目"})
     assert r.status_code == 201
     pid = r.json()["id"]
@@ -35,13 +35,13 @@ def test_unauthorized_without_token() -> None:
     assert bare.get("/api/v1/projects").status_code == 401
 
 
-def test_health_is_public(client: TestClient) -> None:
+def test_health_is_public(client: TestClient, wait_task) -> None:
     r = client.get("/health")
     assert r.status_code == 200
     assert r.json()["status"] == "ok"
 
 
-def test_delete_project_with_dialogue_lines(client) -> None:
+def test_delete_project_with_dialogue_lines(client, wait_task) -> None:
     """删除带台词本/剧情卡/审计的项目不因外键失败。"""
     import app.core.database as dbmod
     from app.models.dialogue import DialogueLine
@@ -52,7 +52,7 @@ def test_delete_project_with_dialogue_lines(client) -> None:
         f"/api/v1/projects/{pid}/documents/import",
         files={"file": ("s.txt", "林风：你好。\n".encode(), "text/plain")},
     )
-    client.post(f"/api/v1/projects/{pid}/parse", json={})
+    wait_task(client, client.post(f"/api/v1/projects/{pid}/parse", json={}).json()["task_id"])
     with dbmod.SessionLocal() as db:
         p = db.get(Project, pid)
         db.add(DialogueLine(project_id=pid, source_document_id=p.active_source_document_id, speaker_name="林风", source_text="你好。"))

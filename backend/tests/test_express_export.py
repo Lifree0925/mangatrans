@@ -29,7 +29,7 @@ def _add_verified_provider() -> None:
         db.commit()
 
 
-def _setup(client: TestClient) -> str:
+def _setup(client: TestClient, wait_task) -> str:
     pid = client.post("/api/v1/projects", json={"name": "一键直出"}).json()["id"]
     script = """第一集 初遇
 【咖啡厅·日内】
@@ -43,7 +43,7 @@ def _setup(client: TestClient) -> str:
         files={"file": ("s.txt", script.encode(), "text/plain")},
     )
     assert r.status_code == 201
-    assert client.post(f"/api/v1/projects/{pid}/parse").status_code == 200
+    assert wait_task(client, client.post(f"/api/v1/projects/{pid}/parse").json()["task_id"])["status"] == "completed"
     _add_verified_provider()
     return pid
 
@@ -145,8 +145,8 @@ def _wait(task_id: str, timeout: float = 60) -> str:
     return "timeout", "", "{}"
 
 
-def test_express_end_to_end(client: TestClient) -> None:
-    pid = _setup(client)
+def test_express_end_to_end(client: TestClient, wait_task) -> None:
+    pid = _setup(client, wait_task)
     set_provider(_universal_fake(client, pid))
 
     r = client.post(f"/api/v1/projects/{pid}/translation/express", json={})
@@ -184,8 +184,8 @@ def test_express_end_to_end(client: TestClient) -> None:
     assert isinstance(issues, list)
 
 
-def test_export_bilingual_contains_original(client: TestClient) -> None:
-    pid = _setup(client)
+def test_export_bilingual_contains_original(client: TestClient, wait_task) -> None:
+    pid = _setup(client, wait_task)
     set_provider(_universal_fake(client, pid))
     # 直接跑批量翻译
     r = client.post(f"/api/v1/projects/{pid}/translation/start", json={})

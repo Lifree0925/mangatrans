@@ -28,7 +28,7 @@ def _add_verified_provider() -> None:
         db.commit()
 
 
-def _setup(client: TestClient) -> str:
+def _setup(client: TestClient, wait_task) -> str:
     pid = client.post("/api/v1/projects", json={"name": "试译测试"}).json()["id"]
     script = """第一集 初遇
 【咖啡厅·日内】
@@ -45,7 +45,7 @@ def _setup(client: TestClient) -> str:
         files={"file": ("s.txt", script.encode(), "text/plain")},
     )
     assert r.status_code == 201
-    assert client.post(f"/api/v1/projects/{pid}/parse").status_code == 200
+    assert wait_task(client, client.post(f"/api/v1/projects/{pid}/parse").json()["task_id"])["status"] == "completed"
     _add_verified_provider()
     return pid
 
@@ -126,9 +126,9 @@ def _wait_task(task_id: str, timeout: float = 30) -> dict:
     return {"status": "timeout", "error": ""}
 
 
-def test_trial_creates_translations_and_style_guide(client: TestClient) -> None:
+def test_trial_creates_translations_and_style_guide(client: TestClient, wait_task) -> None:
     set_provider(_fake())
-    pid = _setup(client)
+    pid = _setup(client, wait_task)
     _collect_seg_ids(client, pid)
 
     r = client.post(f"/api/v1/projects/{pid}/translation/trial", json={})

@@ -9,7 +9,7 @@ from app.llm.registry import set_provider
 from app.llm.fake import FakeProvider
 
 
-def _setup_project(client: TestClient) -> str:
+def _setup_project(client: TestClient, wait_task) -> str:
     pid = client.post("/api/v1/projects", json={"name": "知识测试"}).json()["id"]
     script = """第一集 初遇
 【咖啡厅·日内】
@@ -25,7 +25,7 @@ def _setup_project(client: TestClient) -> str:
         files={"file": ("s.txt", script.encode("utf-8"), "text/plain")},
     )
     assert r.status_code == 201
-    assert client.post(f"/api/v1/projects/{pid}/parse").status_code == 200
+    assert wait_task(client, client.post(f"/api/v1/projects/{pid}/parse").json()["task_id"])["status"] == "completed"
     return pid
 
 
@@ -70,9 +70,9 @@ def _fake_provider() -> FakeProvider:
     return f
 
 
-def test_extract_knowledge_express_auto_approved(client: TestClient) -> None:
+def test_extract_knowledge_express_auto_approved(client: TestClient, wait_task) -> None:
     set_provider(_fake_provider())
-    pid = _setup_project(client)
+    pid = _setup_project(client, wait_task)
 
     r = client.post(
         f"/api/v1/projects/{pid}/knowledge/extract", json={"mode": "express"}
@@ -103,9 +103,9 @@ def test_extract_knowledge_express_auto_approved(client: TestClient) -> None:
     assert lin["status"] == "auto_approved"  # Express + explicit 证据
 
 
-def test_scene_cards_generated(client: TestClient) -> None:
+def test_scene_cards_generated(client: TestClient, wait_task) -> None:
     set_provider(_fake_provider())
-    pid = _setup_project(client)
+    pid = _setup_project(client, wait_task)
 
     r = client.post(f"/api/v1/projects/{pid}/scene-cards/generate", json={})
     assert r.status_code == 200

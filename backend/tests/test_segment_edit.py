@@ -8,11 +8,11 @@ from app.models.document import SourceSegment
 from app.models.translation import Translation
 
 
-def _setup(client) -> tuple[str, str]:
+def _setup(client, wait_task) -> tuple[str, str]:
     pid = client.post("/api/v1/projects", json={"name": "编辑测试"}).json()["id"]
     client.post(f"/api/v1/projects/{pid}/documents/import",
                 files={"file": ("s.txt", "林风：我们走。\n夜色降临。\n".encode(), "text/plain")})
-    client.post(f"/api/v1/projects/{pid}/parse", json={})
+    wait_task(client, client.post(f"/api/v1/projects/{pid}/parse", json={}).json()["task_id"])
     segs = client.get(f"/api/v1/projects/{pid}/segments").json()
     sid = next(s["id"] for s in segs if s["segment_type"] == "dialogue")
     # 预置一条译文（模拟翻译产出）
@@ -24,8 +24,8 @@ def _setup(client) -> tuple[str, str]:
     return pid, sid
 
 
-def test_edit_source_marks_translation_stale(client) -> None:
-    pid, sid = _setup(client)
+def test_edit_source_marks_translation_stale(client, wait_task) -> None:
+    pid, sid = _setup(client, wait_task)
     r = client.patch(f"/api/v1/projects/{pid}/segments/{sid}",
                      json={"source_text": "林风：我们快走！"})
     assert r.status_code == 200, r.text
@@ -42,8 +42,8 @@ def test_edit_source_marks_translation_stale(client) -> None:
         assert seg.source_text == "林风：我们快走！"
 
 
-def test_add_manual_translation_creates_new_version(client) -> None:
-    pid, sid = _setup(client)
+def test_add_manual_translation_creates_new_version(client, wait_task) -> None:
+    pid, sid = _setup(client, wait_task)
     r = client.post(f"/api/v1/projects/{pid}/segments/{sid}/translations",
                     json={"target_text": "Let us hurry!"})
     assert r.status_code == 201, r.text
@@ -58,15 +58,15 @@ def test_add_manual_translation_creates_new_version(client) -> None:
         assert rows[-1].review_status == "approved"
 
 
-def test_latest_translations_batch(client) -> None:
-    pid, sid = _setup(client)
+def test_latest_translations_batch(client, wait_task) -> None:
+    pid, sid = _setup(client, wait_task)
     r = client.get(f"/api/v1/projects/{pid}/translations/latest")
     assert r.status_code == 200
     items = r.json()["items"]
     assert any(i["segment_id"] == sid and i["target_text"] == "Let's go." for i in items)
 
 
-def test_edit_empty_source_rejected(client) -> None:
-    pid, sid = _setup(client)
+def test_edit_empty_source_rejected(client, wait_task) -> None:
+    pid, sid = _setup(client, wait_task)
     r = client.patch(f"/api/v1/projects/{pid}/segments/{sid}", json={"source_text": "   "})
     assert r.status_code == 400

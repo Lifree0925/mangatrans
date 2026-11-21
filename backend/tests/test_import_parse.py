@@ -11,7 +11,7 @@ def _create_project(client: TestClient) -> str:
     return r.json()["id"]
 
 
-def test_import_txt_parse_and_report(client: TestClient, tmp_path: Path) -> None:
+def test_import_txt_parse_and_report(client: TestClient, wait_task, tmp_path: Path) -> None:
     pid = _create_project(client)
     script = """第一集 初遇
 【咖啡厅·日内】
@@ -33,7 +33,7 @@ def test_import_txt_parse_and_report(client: TestClient, tmp_path: Path) -> None
 
     r = client.post(f"/api/v1/projects/{pid}/parse")
     assert r.status_code == 200
-    assert r.json()["coverage_ok"] is True
+    assert wait_task(client, r.json()["task_id"])["status"] == "completed"
 
     r = client.get(f"/api/v1/projects/{pid}/parse-report")
     report = r.json()
@@ -57,6 +57,6 @@ def test_import_rejected_format(client: TestClient, tmp_path: Path) -> None:
     assert r.status_code == 400
 
 
-def test_parse_without_import_404(client: TestClient) -> None:
+def test_parse_without_import_404(client: TestClient, wait_task) -> None:
     pid = _create_project(client)
     assert client.post(f"/api/v1/projects/{pid}/parse").status_code == 404

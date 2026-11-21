@@ -9,7 +9,7 @@ from app.models.task import Task
 from app.models.translation import ProviderConfig, Translation
 
 
-def _setup(client) -> str:
+def _setup(client, wait_task) -> str:
     with dbmod.SessionLocal() as db:
         db.add(ProviderConfig(
             display_name="t", base_url="http://127.0.0.1:9", model_name="m",
@@ -18,7 +18,7 @@ def _setup(client) -> str:
     pid = client.post("/api/v1/projects", json={"name": "重解析测试"}).json()["id"]
     client.post(f"/api/v1/projects/{pid}/documents/import",
                 files={"file": ("s.txt", "林风：我们走。\n夜色降临。\n".encode(), "text/plain")})
-    client.post(f"/api/v1/projects/{pid}/parse", json={})
+    wait_task(client, client.post(f"/api/v1/projects/{pid}/parse", json={}).json()["task_id"])
     return pid
 
 
@@ -56,8 +56,8 @@ def _fake() -> FakeProvider:
     return f
 
 
-def test_reparse_after_translation(client) -> None:
-    pid = _setup(client)
+def test_reparse_after_translation(client, wait_task) -> None:
+    pid = _setup(client, wait_task)
     set_provider(_fake())
 
     # 一键直出完成，产生译文
@@ -75,7 +75,9 @@ def test_reparse_after_translation(client) -> None:
 
     # 重复解析：必须 200，且旧译文已清理
     r = client.post(f"/api/v1/projects/{pid}/parse", json={})
+    result = wait_task(client, r.json()["task_id"])
     assert r.status_code == 200, r.text
-    assert r.json()["coverage_ok"] is True
+    assert result["status"] == "completed"
+    assert result["progress"]["coverage_ok"] is True
     with dbmod.SessionLocal() as db:
         assert db.query(Translation).count() == 0

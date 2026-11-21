@@ -68,15 +68,76 @@ def generate_scene_cards(project_id: str, payload: dict, db: Session = Depends(g
     return {"task_id": task.id}
 
 
-@router.get("/knowledge", response_model=list[KnowledgeOut])
-def list_knowledge(project_id: str, db: Session = Depends(get_db)) -> list[KnowledgeItem]:
-    return list(
+@router.get("/knowledge")
+def list_knowledge(project_id: str, db: Session = Depends(get_db)) -> list[dict]:
+    """知识条目列表：角色按剧本出现次数降序，其余按更新时间。"""
+    from sqlalchemy import func as _func
+
+    from app.models.dialogue import DialogueLine
+
+    _project(db, project_id)
+    items = list(
         db.scalars(
-            select(KnowledgeItem)
-            .where(KnowledgeItem.project_id == project_id)
-            .order_by(KnowledgeItem.updated_at.desc())
+            select(KnowledgeItem).where(KnowledgeItem.project_id == project_id)
         )
     )
+    # 角色出现次数：台词本说话人计数（无台词本时回退片段说话人计数）
+    speak_counts: dict[str, int] = dict(
+        db.execute(
+            select(DialogueLine.speaker_name, _func.count())
+            .where(DialogueLine.project_id == project_id)
+            .group_by(DialogueLine.speaker_name)
+        ).all()
+    )
+    if not speak_counts:
+        from app.models.document import SourceSegment
+
+        speak_counts = dict(
+            db.execute(
+                select(SourceSegment.speaker_name, _func.count())
+                .where(SourceSegment.project_id == project_id, SourceSegment.speaker_name.is_not(None))
+                .group_by(SourceSegment.speaker_name)
+            ).all()
+        )
+
+    def occ(item: KnowledgeItem) -> int:
+        n = speak_counts.get(item.canonical_key, 0)
+        if n == 0:
+            try:
+                import json as _json
+
+                aliases = _json.loads(item.data_json or "{}").get("aliases") or []
+                for a in aliases:
+                    n += speak_counts.get(a, 0)
+            except Exception:  # noqa: BLE001
+                pass
+        return n
+
+    chars = sorted(
+        (i for i in items if i.item_type == "character"),
+        key=lambda i: (occ(i), i.updated_at or ""),
+        reverse=True,
+    )
+    others = sorted(
+        (i for i in items if i.item_type != "character"),
+        key=lambda i: i.updated_at or "",
+        reverse=True,
+    )
+    ordered = chars + others
+
+    def dump(i: KnowledgeItem) -> dict:
+        return {
+            "id": i.id,
+            "item_type": i.item_type,
+            "canonical_key": i.canonical_key,
+            "data_json": i.data_json,
+            "status": i.status,
+            "source": i.source,
+            "version": i.version,
+            "occurrence_count": occ(i) if i.item_type == "character" else None,
+        }
+
+    return [dump(i) for i in ordered]
 
 
 @router.patch("/knowledge/{item_id}")

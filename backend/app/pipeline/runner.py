@@ -78,6 +78,39 @@ async def _run(task_id: str) -> None:
                 model=payload.get("model", "fake-model"),
                 task_id=task_id,
             )
+        elif task.task_type == "parse":
+            from app.models.document import SourceDocument
+            from app.models.project import Project
+            from app.services import importer, parse_service
+            from sqlalchemy import select as sa_select
+
+            with _sess_factory() as db:
+                project = db.get(Project, task.project_id)
+                running = db.scalar(
+                    sa_select(Task.id).where(
+                        Task.project_id == task.project_id,
+                        Task.status.in_(["running", "queued"]),
+                        Task.id != task.id,
+                    ).limit(1)
+                )
+                if running:
+                    raise RuntimeError("项目有进行中的任务，无法重新解析")
+                doc = db.get(SourceDocument, payload["source_document_id"])
+                text = importer.read_normalized(doc)
+                result = parse_service.parse_and_persist(db, doc, text)
+                project.active_source_document_id = doc.id
+                db.commit()
+            result = {
+                "coverage_ok": result.report.coverage_ok,
+                "total_chars": result.report.total_chars,
+                "covered_chars": result.report.covered_chars,
+                "chapter_count": result.report.chapter_count,
+                "scene_count": result.report.scene_count,
+                "dialogue_count": result.report.dialogue_count,
+                "narrative_count": result.report.narrative_count,
+                "other_count": result.report.other_count,
+                "anomalies": result.report.anomalies,
+            }
         elif task.task_type == "translate" and payload.get("kind") == "trial":
             result = await style_guide_service.run_trial(
                 _sess_factory,

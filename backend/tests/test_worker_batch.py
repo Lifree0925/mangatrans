@@ -91,7 +91,7 @@ def test_recover_stale_items() -> None:
     assert n == 1
 
 
-def _setup_script(client: TestClient) -> str:
+def _setup_script(client: TestClient, wait_task) -> str:
     pid = client.post("/api/v1/projects", json={"name": "批量翻译"}).json()["id"]
     script = """第一集 初遇
 【咖啡厅·日内】
@@ -107,13 +107,13 @@ def _setup_script(client: TestClient) -> str:
         files={"file": ("s.txt", script.encode(), "text/plain")},
     )
     assert r.status_code == 201
-    assert client.post(f"/api/v1/projects/{pid}/parse").status_code == 200
+    assert wait_task(client, client.post(f"/api/v1/projects/{pid}/parse").json()["task_id"])["status"] == "completed"
     _add_verified_provider()
     return pid
 
 
-def test_batch_translation_end_to_end(client: TestClient) -> None:
-    pid = _setup_script(client)
+def test_batch_translation_end_to_end(client: TestClient, wait_task) -> None:
+    pid = _setup_script(client, wait_task)
 
     with dbmod.SessionLocal() as db:
         seg_ids = [
@@ -180,9 +180,9 @@ def test_batch_translation_end_to_end(client: TestClient) -> None:
     assert len({t.segment_id for t in rows}) == len(seg_ids)
 
 
-def test_stale_marking_on_knowledge_change(client: TestClient) -> None:
+def test_stale_marking_on_knowledge_change(client: TestClient, wait_task) -> None:
     """知识修改后受影响译文标记 stale（走 context 快照）。"""
-    pid = _setup_script(client)
+    pid = _setup_script(client, wait_task)
     # 直接构造：一条 approved 知识 + 一篇引用它的译文
     from app.models.knowledge import KnowledgeItem
 
