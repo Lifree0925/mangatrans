@@ -3,7 +3,7 @@
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
-import { Archive, CheckCircle2, Circle, History, Loader2, RotateCcw, Trash2, Undo2, X, XCircle } from "lucide-react";
+import { Archive, Circle, CheckCircle2, History, Loader2, Pause, Play, RotateCcw, Trash2, Undo2, X, XCircle } from "lucide-react";
 import { api } from "../lib/api";
 import { toast } from "../lib/feedback";
 import type { TaskInfo } from "../lib/types";
@@ -182,6 +182,22 @@ export default function TasksPage() {
     refetchInterval: 2000,
   });
 
+  const pauseTask = useMutation({
+    mutationFn: (id: string) => api(`/tasks/${id}/pause`, { method: "POST", body: "{}" }),
+    onSuccess: () => {
+      toast.success("任务已暂停（当前窗口完成后停止）");
+      qc.invalidateQueries({ queryKey: ["tasks"] });
+    },
+    onError: (err) => toast.error(`暂停失败：${String(err)}`),
+  });
+  const resumeTask = useMutation({
+    mutationFn: (id: string) => api(`/tasks/${id}/resume`, { method: "POST", body: "{}" }),
+    onSuccess: () => {
+      toast.success("任务已继续执行");
+      qc.invalidateQueries({ queryKey: ["tasks"] });
+    },
+    onError: (err) => toast.error(`继续失败：${String(err)}`),
+  });
   const removeTask = useMutation({
     mutationFn: (taskId: string) => api(`/tasks/${taskId}`, { method: "DELETE" }),
     onSuccess: () => {
@@ -269,6 +285,26 @@ export default function TasksPage() {
                     </span>
                   )}
                   <div className="ml-auto flex items-center gap-2">
+                    {(t.status === "running" || t.status === "queued") && (
+                      <button
+                        onClick={() => pauseTask.mutate(t.id)}
+                        disabled={pauseTask.isPending}
+                        className="flex items-center gap-1 rounded-lg border border-(--color-border) px-2 py-1 text-xs hover:bg-(--color-panel2) disabled:opacity-50"
+                        title="暂停任务（当前窗口完成后停止，可随时继续）"
+                      >
+                        <Pause size={12} /> 暂停
+                      </button>
+                    )}
+                    {t.status === "paused" && (
+                      <button
+                        onClick={() => resumeTask.mutate(t.id)}
+                        disabled={resumeTask.isPending}
+                        className="flex items-center gap-1 rounded-lg border border-(--color-border) px-2 py-1 text-xs text-emerald-600 hover:bg-(--color-panel2) disabled:opacity-50"
+                        title="从暂停处继续执行"
+                      >
+                        <Play size={12} /> 继续
+                      </button>
+                    )}
                     {(t.status === "failed" || t.status === "paused") && (
                       <button
                         onClick={() => retry.mutate(t.id)}

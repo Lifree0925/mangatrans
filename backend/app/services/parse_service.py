@@ -14,10 +14,13 @@ def parse_and_persist(db: Session, doc: SourceDocument, text: str) -> ParseResul
     依赖链清理顺序（外键约束）：
     QA 问题 → 译文 → 片段；场景卡 → 场景 → 章节。
     """
+    from app.models.dialogue import DialogueLine
     from app.models.knowledge import SceneContextCard
     from app.models.qa import QAIssue
     from app.models.translation import Translation
 
+    # 台词本是派生数据：重解析后片段/章节重建，旧行必须清理（否则指向已删除章节）
+    db.execute(delete(DialogueLine).where(DialogueLine.source_document_id == doc.id))
     seg_ids = db.scalars(
         select(SourceSegment.id).where(SourceSegment.source_document_id == doc.id)
     ).all()

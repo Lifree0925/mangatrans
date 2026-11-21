@@ -132,6 +132,12 @@ async def _run(task_id: str) -> None:
 
     with _sess_factory() as db:
         task = db.get(Task, task_id)
+        if task.status == "paused":
+            # 用户暂停：不覆盖为 completed（保留进度，resume 重新调度续跑）
+            task.started_at = None
+            task.progress_json = json.dumps(result, ensure_ascii=False)
+            db.commit()
+            return
         task.status = "completed"
         task.started_at = None
         task.progress_json = json.dumps(result, ensure_ascii=False)

@@ -45,6 +45,11 @@ def _sync_progress(db_factory, task_id: str, steps: dict, current_step: str) -> 
 async def run_express(db_factory, project_id: str, source_document_id: str, model: str, task_id: str = "express") -> dict:
     provider = get_provider()
 
+    def _paused() -> bool:
+        with db_factory() as pdb:
+            t = pdb.get(Task, task_id)
+            return t is not None and t.status == "paused"
+
     # 断点续跑：读取上次进度，跳过已完成步骤（任务失败后重试不从头再来）
     from app.models.task import Task
 
@@ -142,6 +147,8 @@ async def run_express(db_factory, project_id: str, source_document_id: str, mode
     report["steps"]["translation"] = {"done": done, "total": total, "phase": "polish"}
     _sync_progress(db_factory, task_id, report["steps"], "translation")
     for wi, window in enumerate(todo, start=start_win):
+        if _paused():
+            break  # 暂停：保留进度，resume 续跑
         draft, context = draft_results[wi - start_win]
         polished, carry = await translate_window_polish_direct(
             db_factory, project_id, window, draft, carry, model
@@ -189,6 +196,8 @@ async def run_express(db_factory, project_id: str, source_document_id: str, mode
     report["steps"]["qa"] = {"done": qa_done, "total": len(windows), "issues": issues_total}
     _sync_progress(db_factory, task_id, report["steps"], "qa")
     for wi, window in enumerate(windows):
+        if _paused():
+            break  # 暂停：保留进度
         if wi < qa_done:
             continue  # 已检查过的窗口跳过
         gate = "passed"
