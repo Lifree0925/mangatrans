@@ -25,11 +25,33 @@ async function resolveConfig(): Promise<BackendConfig> {
   return _config;
 }
 
+/** HTTP 状态码 → 全中文提示（面向非技术用户）。 */
+const STATUS_CN: Record<number, string> = {
+  400: "请求参数有误",
+  401: "未授权：会话令牌无效",
+  403: "没有权限执行该操作",
+  404: "请求的内容不存在",
+  409: "操作冲突（可能存在进行中的任务）",
+  422: "提交的数据格式不正确",
+  429: "请求过于频繁，请稍后重试",
+  500: "服务器内部错误",
+  502: "本地服务暂时不可用",
+  503: "本地服务正在启动，请稍后重试",
+};
+
 export class ApiError extends Error {
   status: number;
-  constructor(status: number, message: string) {
-    super(message);
+  /** 原始报错文本（保留给技术人员排查） */
+  raw: string;
+  constructor(status: number, detail: string) {
+    // 报错策略：后端返回中文提示就直接显示；否则显示全中文状态提示 + 原文（供技术人员）
+    const hasCn = /[\u4e00-\u9fff]/.test(detail || "");
+    const friendly = hasCn
+      ? detail
+      : (STATUS_CN[status] ?? "请求失败") + (detail ? `（原始错误：${detail}）` : "");
+    super(friendly);
     this.status = status;
+    this.raw = detail || "";
   }
 }
 

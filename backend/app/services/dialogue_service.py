@@ -225,14 +225,21 @@ async def extract_dialogue_lines(
 
 def list_dialogue_lines(db, project_id: str) -> list[dict]:
     """按章节→场景→行号排序返回台词行（含所属片段当前译文，供聚合展示）。"""
+    from sqlalchemy import func as _func
+
     from app.models.document import Chapter, Scene
 
+    # 按章节号/场景号排序（chapter_id 是 UUID，字符串排序会乱序）
     rows = list(
         db.scalars(
             select(DialogueLine)
+            .outerjoin(Chapter, DialogueLine.chapter_id == Chapter.id)
+            .outerjoin(Scene, DialogueLine.scene_id == Scene.id)
             .where(DialogueLine.project_id == project_id)
             .order_by(
-                DialogueLine.chapter_id, DialogueLine.scene_id, DialogueLine.line_no
+                _func.coalesce(Chapter.chapter_no, 999999),
+                _func.coalesce(Scene.scene_no, 999999),
+                DialogueLine.line_no,
             )
         )
     )
@@ -332,3 +339,165 @@ def update_dialogue_line(db, line_id: str, text: str | None, speaker_name: str |
         "wrote_back": wrote_back,
         "warning": None if wrote_back else "未在片段原文中找到原台词，仅更新台词本本身",
     }
+
+
+ALIGN_SYSTEM = """You align Chinese dialogue lines to their English translations.
+For each Chinese line, extract the EXACT English sentence(s) from the translation that correspond to it.
+RULES:
+- Output ONLY JSON, no commentary: {"alignments":[{"line_index":0,"english":"exact substring from translation"}]}
+- english MUST be a verbatim substring of the given translation. Do NOT rewrite or translate.
+- A line may map to one or more consecutive sentences; join them with a single space.
+- If a Chinese line is narration, stage direction, or has no English counterpart, omit it.
+- The Chinese lines are in order; the English translation preserves the same order."""
+
+
+def _align_prompt(chunk_lines: list[dict], seg_src: str, seg_tgt: str) -> str:
+    lines_block = "\n".join(f"[{i}] {ln['source_text']}" for i, ln in enumerate(chunk_lines))
+    return (
+        "CHINESE LINES:\n" + lines_block
+        + "\n\nSEGMENT SOURCE:\n" + seg_src
+        + "\n\nTRANSLATION:\n" + seg_tgt
+    )
+
+
+async def _align_one(provider: LLMProvider, model: str, payload: dict):
+    resp = await provider.chat(
+        model=model,
+        messages=[
+            {"role": "system", "content": ALIGN_SYSTEM},
+            {"role": "user", "content": payload["user"]},
+        ],
+        response_schema={"type": "object"},
+        temperature=0.1,
+    )
+    data = parse_llm_json(resp.content)
+    return payload, data.get("alignments", []) if isinstance(data, dict) else []
+
+
+def _norm_en(text: str) -> str:
+    return re.sub(r"\s+", " ", text or "").strip()
+
+
+async def align_dialogue_translations(
+    db_factory, project_id: str, source_document_id: str, provider: LLMProvider,
+    model: str, progress_cb=None,
+) -> dict:
+    """翻译完成后：把每句台词的英文从片段译文中逐字摘录对齐。
+
+    - 单句片段直接用整段译文；
+    - 多句片段由 LLM 对齐（摘录必须是译文字面连续子串，不改写）；
+    - 对齐失败/无译文的行保持 target_text=null。
+    """
+    from app.models.translation import Translation
+
+    with db_factory() as db:
+        seg_rows = list(
+            db.scalars(
+                select(SourceSegment).where(
+                    SourceSegment.source_document_id == source_document_id,
+                    SourceSegment.segment_type == "dialogue",
+                ).order_by(SourceSegment.segment_no)
+            )
+        )
+        lines = list(
+            db.scalars(
+                select(DialogueLine)
+                .where(DialogueLine.source_document_id == source_document_id)
+                .order_by(DialogueLine.line_no)
+            )
+        )
+        line_by_seg: dict[str, list[DialogueLine]] = {}
+        for ln in lines:
+            line_by_seg.setdefault(ln.segment_id or "", []).append(ln)
+        seg_map = {s.id: s for s in seg_rows}
+        # 当前 polished 译文
+        trans_rows = list(
+            db.scalars(
+                select(Translation)
+                .where(
+                    Translation.segment_id.in_([s.id for s in seg_rows]),
+                    Translation.stage == "polished",
+                    Translation.freshness_status == "current",
+                ).order_by(Translation.version.desc())
+            )
+        )
+        latest: dict[str, Translation] = {}
+        for t in trans_rows:
+            latest.setdefault(t.segment_id, t)
+
+    jobs = []
+    single = 0
+    for seg in seg_rows:
+        seg_lines = line_by_seg.get(seg.id, [])
+        if not seg_lines:
+            continue
+        tr = latest.get(seg.id)
+        if tr is None or not (tr.target_text or "").strip():
+            continue
+        if len(seg_lines) == 1:
+            seg_lines[0].target_text = tr.target_text.strip()
+            single += 1
+            continue
+        jobs.append(
+            {
+                "seg": seg,
+                "lines": seg_lines,
+                "src": seg.source_text,
+                "tgt": tr.target_text,
+            }
+        )
+
+    sem = asyncio.Semaphore(6)
+
+    async def one(job):
+        async with sem:
+            for attempt in range(3):
+                try:
+                    payload = {"user": _align_prompt(
+                        [{"source_text": ln.source_text} for ln in job["lines"]],
+                        job["src"], job["tgt"],
+                    )}
+                    _payload, aligns = await _align_one(provider, model, payload)
+                    tgt_norm = _norm_en(job["tgt"])
+                    for a in aligns:
+                        try:
+                            idx = int(a.get("line_index"))
+                        except (TypeError, ValueError):
+                            continue
+                        en = _norm_en(a.get("english"))
+                        # 硬校验：必须是译文的连续子串
+                        if en and en in tgt_norm:
+                            if 0 <= idx < len(job["lines"]):
+                                job["lines"][idx].target_text = en
+                    return
+                except Exception:  # noqa: BLE001
+                    if attempt == 2:
+                        return
+                    await asyncio.sleep(4 * (attempt + 1))
+
+    tasks = [asyncio.create_task(one(j)) for j in jobs]
+    done = 0
+    aligned = 0
+    for fut in asyncio.as_completed(tasks):
+        await fut
+        done += 1
+        if progress_cb:
+            progress_cb({"done": done, "total": len(jobs) + single})
+        for ln in [x for j in jobs for x in j["lines"]]:
+            pass  # 计数在提交时统一算
+    with db_factory() as db:
+        touched = 0
+        for seg in seg_rows:
+            for ln in line_by_seg.get(seg.id, []):
+                t = db.get(DialogueLine, ln.id)
+                if t is not None and t.target_text != ln.target_text:
+                    t.target_text = ln.target_text
+                    touched += 1
+        db.commit()
+    for seg in seg_rows:
+        for ln in line_by_seg.get(seg.id, []):
+            if ln.target_text:
+                aligned += 1
+    if progress_cb:
+        progress_cb({"done": len(jobs) + single, "total": len(jobs) + single})
+    return {"aligned": aligned, "total_lines": len(lines), "segments": len(jobs) + single}

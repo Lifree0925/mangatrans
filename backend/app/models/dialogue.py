@@ -26,6 +26,8 @@ class DialogueLine(Base):
     line_no: Mapped[int] = mapped_column(Integer, default=0)
     # 单句台词（必须是所属片段 source_text 的连续子串）
     source_text: Mapped[str] = mapped_column(Text, default="")
+    # 该句对应的英文（从片段译文中逐字摘录；null=未对齐）
+    target_text: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utcnow, onupdate=utcnow
