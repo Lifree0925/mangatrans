@@ -32,15 +32,9 @@ body {
   /* 滑块默认高度：占总长 1/7 */
   min-height: calc(100% / 7);
 }
-/* 目录栏与知识库角色区：视觉短滑块。
-   min-height 无法让滑块短于内容比例高度；用上下透明 border + content-box 裁剪，
-   把颜色区压缩为中间短块，视觉上即短滑块。 */
+/* 目录栏与知识库角色区：滑块最小高度占总长 1/56 */
 .slim-scroll::-webkit-scrollbar-thumb {
-  background: #d9d9d9;
-  background-clip: content-box;
-  border-top: 36px solid transparent;
-  border-bottom: 36px solid transparent;
-  min-height: 108px;
+  min-height: calc(100% / 56);
 }
 ::-webkit-scrollbar-track { background: transparent; }
 
