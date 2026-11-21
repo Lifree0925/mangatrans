@@ -246,9 +246,13 @@ def list_all_tasks(db: Session = Depends(get_db), archived: bool = False) -> lis
     """任务中心：archived=false 返回活动任务；archived=true 返回历史记录。"""
     from app.models.project import Project
 
+    # 台词抽取/对齐已并入 Express 管线，历史独立任务不再展示（数据保留可审计）
     tasks = db.scalars(
         select(Task)
-        .where(Task.archived.is_(archived))
+        .where(
+            Task.archived.is_(archived),
+            Task.task_type.notin_(("dialogue", "dialogue_align")),
+        )
         .order_by(Task.created_at.desc())
         .limit(200)
     ).all()
