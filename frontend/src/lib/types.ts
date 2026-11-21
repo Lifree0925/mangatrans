@@ -143,6 +143,7 @@ export interface DialogueLineInfo {
   speaker_alias: string | null;
   line_no: number;
   source_text: string;
+  target_text: string | null;
   segment_translation: string | null;
 }
 

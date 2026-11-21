@@ -42,6 +42,25 @@ def extract_dialogue(
     return {"task_id": task.id}
 
 
+@router.post("/dialogue-lines/align")
+def align_dialogue(project_id: str, payload: dict, db: Session = Depends(get_db)) -> dict:
+    """创建台词译文逐句对齐任务（异步执行，需翻译已完成）。payload: {model?}"""
+    project = _project(db, project_id)
+    if project.active_source_document_id is None:
+        raise HTTPException(status_code=404, detail="尚未解析原文")
+    task = create_task(
+        db,
+        project_id,
+        "dialogue_align",
+        {
+            "source_document_id": project.active_source_document_id,
+            "model": payload.get("model") or default_model_name(db),
+        },
+    )
+    launch(task.id)
+    return {"task_id": task.id}
+
+
 @router.get("/dialogue-lines")
 def list_dialogue(project_id: str, db: Session = Depends(get_db)) -> dict:
     _project(db, project_id)

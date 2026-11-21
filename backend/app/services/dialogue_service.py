@@ -304,6 +304,7 @@ def list_dialogue_lines(db, project_id: str) -> list[dict]:
                 "speaker_alias": r.speaker_alias,
                 "line_no": r.line_no,
                 "source_text": r.source_text,
+                "target_text": r.target_text,
                 "segment_translation": t.target_text if (t and first_of_seg) else None,
             }
         )
@@ -477,14 +478,12 @@ async def align_dialogue_translations(
 
     tasks = [asyncio.create_task(one(j)) for j in jobs]
     done = 0
-    aligned = 0
     for fut in asyncio.as_completed(tasks):
         await fut
         done += 1
         if progress_cb:
             progress_cb({"done": done, "total": len(jobs) + single})
-        for ln in [x for j in jobs for x in j["lines"]]:
-            pass  # 计数在提交时统一算
+    aligned = 0
     with db_factory() as db:
         touched = 0
         for seg in seg_rows:

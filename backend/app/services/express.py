@@ -153,6 +153,20 @@ async def run_express(db_factory, project_id: str, source_document_id: str, mode
         report["steps"]["translation"] = {"done": done, "total": total, "phase": "polish"}
         _sync_progress(db_factory, task_id, report["steps"], "translation")
 
+    # 4b. 台词本逐句对齐：翻译完成后把每句台词从片段译文中摘录对应英文
+    if "dialogue_align" not in report["steps"]:
+        _sync_progress(db_factory, task_id, report["steps"], "dialogue_align")
+        from app.services import dialogue_service
+
+        def _al_cb(p: dict) -> None:
+            report["steps"]["dialogue_align"] = p
+            _sync_progress(db_factory, task_id, report["steps"], "dialogue_align")
+
+        report["steps"]["dialogue_align"] = await dialogue_service.align_dialogue_translations(
+            db_factory, project_id, source_document_id, provider, model, progress_cb=_al_cb
+        )
+    _sync_progress(db_factory, task_id, report["steps"], "qa")
+
     # 5. QA：确定性全量 + 风险窗口语义 QA
     with db_factory() as db:
         forced = {}

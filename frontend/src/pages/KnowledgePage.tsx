@@ -148,6 +148,17 @@ export default function KnowledgePage() {
     onError: (err) => toast.error(`保存失败：${String(err)}`),
   });
 
+  const alignDialogue = useMutation({
+    mutationFn: () => api(`/projects/${active}/dialogue-lines/align`, {
+      method: "POST",
+      body: JSON.stringify({}),
+    }),
+    onSuccess: () => {
+      toast.success("台词译文对齐任务已创建，完成前请勿重复提交");
+      qc.invalidateQueries({ queryKey: ["dialogue-lines", active] });
+    },
+    onError: (err) => toast.error(`对齐失败：${String(err)}`),
+  });
   const patchSegmentTranslation = useMutation({
     mutationFn: ({ segmentId, targetText }: { segmentId: string; targetText: string }) =>
       api(`/projects/${active}/segments/${segmentId}/translations`, {
@@ -271,6 +282,13 @@ export default function KnowledgePage() {
         </div>
         {tab === "dialogue" && active && (
           <div className="ml-auto flex items-center gap-2">
+            <button
+              onClick={() => alignDialogue.mutate()}
+              disabled={alignDialogue.isPending}
+              className="rounded-lg border border-(--color-border) px-3 py-1.5 text-sm hover:bg-(--color-panel2) disabled:opacity-50"
+            >
+              {alignDialogue.isPending ? "创建对齐任务中…" : "对齐译文"}
+            </button>
             <button
               onClick={() => extractDialogue.mutate()}
               disabled={extractDialogue.isPending}
@@ -562,9 +580,9 @@ export default function KnowledgePage() {
                             </span>
                             {ln.source_text}
                           </p>
-                          {/* 译文行（片段译文聚合） */}
+                          {/* 译文行：逐句对齐译文优先，无则回退片段译文 */}
                           <p className="mt-0.5 whitespace-pre-wrap pl-4 text-(--color-muted) transition-colors group-hover:text-(--color-accent)">
-                            {ln.segment_translation ?? "—"}
+                            {ln.target_text ?? ln.segment_translation ?? "—"}
                           </p>
                         </div>
                       ))}
