@@ -386,17 +386,15 @@ export default function KnowledgePage() {
                     <div className="mb-3 flex items-center gap-1.5">
                       <button
                         onClick={() => setCharGroup("major")}
-                        title="主要角色（常驻 / 重要）"
                         className={`rounded-lg px-3 py-1.5 text-sm ${charGroup === "major" ? "bg-(--color-panel2) font-medium" : "text-(--color-muted) hover:bg-(--color-panel)"}`}
                       >
-                        主要 · {major.length}
+                        主要角色（常驻 / 重要）· {major.length}
                       </button>
                       <button
                         onClick={() => setCharGroup("minor")}
-                        title="次要角色（出场少 / 无权重）"
                         className={`rounded-lg px-3 py-1.5 text-sm ${charGroup === "minor" ? "bg-(--color-panel2) font-medium" : "text-(--color-muted) hover:bg-(--color-panel)"}`}
                       >
-                        次要 · {minor.length}
+                        次要角色（出场少 / 无权重）· {minor.length}
                       </button>
                     </div>
                     {charGroup === "major" && (
@@ -428,7 +426,7 @@ export default function KnowledgePage() {
           <div className="flex h-full">
             {/* 章节目录（可收起） */}
             {!storyCollapsed && (
-              <div className="w-28 shrink-0 overflow-auto py-3">
+              <div className="w-56 shrink-0 overflow-auto py-3">
                 <p className="mb-1 px-3 text-xs font-medium text-(--color-muted)">章节目录</p>
                 {(storylines.data ?? []).map((s) => (
                   <button
@@ -550,7 +548,7 @@ export default function KnowledgePage() {
           <div className="flex h-full">
             {/* 章节目录（可收起） */}
             {!dialogueCollapsed && (
-              <div className="w-28 shrink-0 overflow-auto py-3">
+              <div className="w-56 shrink-0 overflow-auto border-r-0 py-3">
                 <p className="mb-1 px-3 text-xs font-medium text-(--color-muted)">章节目录</p>
                 {(dialogueLines.data?.chapters ?? []).map((ch: { chapter_id: string | null; chapter_no: number | null; chapter_title: string | null; scenes: { scene_id: string | null; scene_no: number | null; scene_heading: string | null; lines: DialogueLineInfo[] }[] }) => (
                   <button
