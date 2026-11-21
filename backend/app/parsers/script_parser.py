@@ -157,11 +157,13 @@ def parse_script(text: str) -> ParseResult:
     buf_start = 0
 
     def append_blank(pos_start: int, pos_end: int) -> None:
-        """空白行归属：并入最后一个 segment（延长 offset 与文本）。"""
-        nonlocal buf
-        if buf:
-            buf += text[pos_start:pos_end]
-        elif segments:
+        """空白行 = 自然段边界：先落当前叙述缓冲，空行并入上一段尾部（保持原文还原）。
+
+        这样每个自然段独立成片段，避免多个段落合并成一大段翻译、中英对照观感差。
+        """
+        nonlocal buf, buf_start
+        flush_narrative(pos_start)
+        if segments:
             last = segments[-1]
             last.end = pos_end
             last.text += text[pos_start:pos_end]
