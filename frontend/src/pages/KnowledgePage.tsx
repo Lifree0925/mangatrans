@@ -782,7 +782,7 @@ export default function KnowledgePage() {
               </h2>
               <button onClick={() => setEditingStory(null)} className="rounded-lg p-1.5 text-(--color-muted) hover:bg-(--color-panel2)"><X size={16} /></button>
             </div>
-            <div className="mb-2 mt-4 flex gap-1.5">
+            <div className="mb-2 mt-4 flex shrink-0 gap-1.5">
               {STORY_FIELDS.map((f) => (
                 <button
                   key={f.key}
@@ -796,11 +796,10 @@ export default function KnowledgePage() {
             <textarea
               value={storyFieldText}
               onChange={(e) => setStoryFieldText(e.target.value)}
-              rows={12}
               placeholder={storyActiveField === "summary" ? "本章内容摘要" : "每行一条"}
-              className="flex-1 w-full resize-y rounded-lg border border-(--color-border) bg-(--color-bg) px-3 py-2 text-sm leading-6 outline-none focus:border-(--color-accent)"
+              className="min-h-0 w-full flex-1 resize-none rounded-lg border border-(--color-border) bg-(--color-bg) px-3 py-2 text-sm leading-6 outline-none focus:border-(--color-accent)"
             />
-            <div className="mt-4 flex justify-end gap-2">
+            <div className="mt-4 flex shrink-0 justify-end gap-2">
               <button onClick={() => setEditingStory(null)} className="rounded-lg border border-(--color-border) bg-(--color-bg) px-4 py-1.5 text-sm hover:bg-(--color-panel2)">取消</button>
               <button onClick={saveStoryEdit} disabled={patchStoryline.isPending}
                 className="rounded-lg bg-(--color-accent) px-4 py-1.5 text-sm text-white hover:bg-(--color-accent-hover) disabled:opacity-50">
@@ -827,7 +826,7 @@ export default function KnowledgePage() {
             {editingLine.side === "source" ? (
               <>
                 <p className="mt-3 text-xs text-(--color-muted)">修改台词文本会同步回写片段原文，该段译文将标记为待重译。</p>
-                <div className="mt-3 space-y-3">
+                <div className="mt-3 min-h-0 flex-1 space-y-3 overflow-auto pr-1">
                   <label className="block text-xs text-(--color-muted)">
                     说话人
                     <input value={lineDraft.speaker_name} onChange={(e) => setLineDraft((d) => ({ ...d, speaker_name: e.target.value }))}
@@ -836,10 +835,10 @@ export default function KnowledgePage() {
                   <label className="block text-xs text-(--color-muted)">
                     台词文本
                     <textarea value={lineDraft.source_text} onChange={(e) => setLineDraft((d) => ({ ...d, source_text: e.target.value }))}
-                      className="mt-1 block h-[300px] w-full resize-none rounded-lg border border-(--color-border) bg-(--color-bg) px-3 py-1.5 text-sm outline-none focus:border-(--color-accent)" />
+                      className="mt-1 block min-h-[240px] w-full resize-none rounded-lg border border-(--color-border) bg-(--color-bg) px-3 py-1.5 text-sm outline-none focus:border-(--color-accent)" />
                   </label>
                 </div>
-                <div className="mt-4 flex justify-end gap-2">
+                <div className="mt-4 flex shrink-0 justify-end gap-2">
                   <button onClick={() => setEditingLine(null)} className="rounded-lg border border-(--color-border) px-4 py-1.5 text-sm hover:bg-(--color-panel2)">取消</button>
                   <button
                     onClick={() => patchDialogueLine.mutate({
@@ -861,8 +860,8 @@ export default function KnowledgePage() {
                   修改的是该行所属片段的整段译文，保存后作为新校对版本，不会被重译覆盖。
                 </p>
                 <textarea value={lineDraft.target_text} onChange={(e) => setLineDraft((d) => ({ ...d, target_text: e.target.value }))}
-                  className="mt-3 block h-[300px] w-full resize-none rounded-lg border border-(--color-border) bg-(--color-bg) px-3 py-1.5 font-mono text-[13px] leading-6 outline-none focus:border-(--color-accent)" />
-                <div className="mt-4 flex justify-end gap-2">
+                  className="mt-3 block min-h-0 w-full flex-1 resize-none rounded-lg border border-(--color-border) bg-(--color-bg) px-3 py-1.5 font-mono text-[13px] leading-6 outline-none focus:border-(--color-accent)" />
+                <div className="mt-4 flex shrink-0 justify-end gap-2">
                   <button onClick={() => setEditingLine(null)} className="rounded-lg border border-(--color-border) px-4 py-1.5 text-sm hover:bg-(--color-panel2)">取消</button>
                   <button
                     onClick={() => {

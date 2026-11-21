@@ -564,9 +564,9 @@ export default function ProjectPage() {
                 value={editDraft}
                 onChange={(e) => setEditDraft(e.target.value)}
                 autoFocus
-                className="mt-4 h-[320px] w-full flex-1 resize-none rounded-xl border border-(--color-border) bg-(--color-bg) px-3 py-2 font-mono text-[13px] leading-6 outline-none focus:border-(--color-text)"
+                className="mt-4 min-h-0 w-full flex-1 resize-none rounded-xl border border-(--color-border) bg-(--color-bg) px-3 py-2 font-mono text-[13px] leading-6 outline-none focus:border-(--color-text)"
               />
-              <div className="mt-3 flex shrink-0 justify-between">
+              <div className="mt-3 flex shrink-0 items-end justify-between">
                 <p className="font-sans text-xs leading-5 text-(--color-muted)">
                   {editing.side === "source"
                     ? "修改原文后，该段译文将标记为「待重译」，可一键重译。"
