@@ -70,3 +70,22 @@ def test_term_lock_writes_translation(client, wait_task) -> None:
                 assert data.get("translation") == "Luna"
             if k.canonical_key == "狼王":
                 assert data.get("translation") == "Wolf King"
+
+
+def test_validate_window_detects_duplicate_translations() -> None:
+    """窗口内两段译文完全相同（台词重复+丢失根因）必须报错。"""
+    segs = [
+        {"segment_id": "a", "source_text": "甲：冲啊！\n"},
+        {"segment_id": "b", "source_text": "乙：杀！\n"},
+    ]
+    dup_text = "A (roars): Warriors of Fenrir! The vampires have taken your Luna! Tonight, follow me!"
+    bad = validate_window(segs, [
+        {"segment_id": "a", "target_text": dup_text},
+        {"segment_id": "b", "target_text": dup_text},
+    ])
+    assert any("重复译文" in e for e in bad)
+    ok = validate_window(segs, [
+        {"segment_id": "a", "target_text": dup_text},
+        {"segment_id": "b", "target_text": "B (shouts): Kill them all!"},
+    ])
+    assert ok == []

@@ -391,10 +391,124 @@ async def run_express(db_factory, project_id: str, source_document_id: str, mode
         }
         _sync_progress(db_factory, task_id, report["steps"], "approve")
 
+    async def _fix_term_inconsistency():
+        """术语一致性：有译名术语在出现段中未使用译名时，自动重译修正（防混用）。"""
+        from app.services.context_builder import ContextResult
+
+        with db_factory() as db:
+            term_rows = list(
+                db.scalars(
+                    select(KnowledgeItem).where(
+                        KnowledgeItem.project_id == project_id,
+                        KnowledgeItem.item_type == "term",
+                        KnowledgeItem.status.in_(["approved", "auto_approved"]),
+                    )
+                )
+            )
+            forced = {}
+            for k in term_rows:
+                data = json.loads(k.data_json or "{}")
+                trans = (data.get("translation") or "").strip()
+                if trans and trans != k.canonical_key:
+                    forced[k.canonical_key] = trans
+            segs_all = list(
+                db.scalars(
+                    select(SourceSegment).where(
+                        SourceSegment.source_document_id == source_document_id
+                    )
+                )
+            )
+        if not forced or not segs_all:
+            return
+        # 段级命中检测：原文含术语但最新译文未使用译名
+        fixes: dict[str, str] = {}  # segment_id -> 译名要求说明
+        for key, trans in forced.items():
+            hit_segs = [s for s in segs_all if key in s.source_text]
+            if len(hit_segs) < 3:
+                continue  # 出现太少不强制
+            with db_factory() as db:
+                for s in hit_segs:
+                    t = db.scalar(
+                        select(Translation)
+                        .where(Translation.segment_id == s.id, Translation.stage == "polished")
+                        .order_by(Translation.version.desc())
+                        .limit(1)
+                    )
+                    if t is None or trans in (t.target_text or ""):
+                        continue
+                    fixes[s.id] = f"必须使用译名 {trans}（术语 {key}）"
+        if not fixes:
+            return
+        fixed_count = 0
+        with db_factory() as db:
+            for seg in segs_all:
+                if seg.id not in fixes:
+                    continue
+                draft_row = db.scalar(
+                    select(Translation)
+                    .where(Translation.segment_id == seg.id, Translation.stage == "draft")
+                    .order_by(Translation.version.desc())
+                    .limit(1)
+                )
+                draft_list = [
+                    {
+                        "segment_id": seg.id,
+                        "target_text": draft_row.target_text if draft_row else "",
+                        "notes": [],
+                        "ambiguity": [],
+                    }
+                ]
+                ctx = ContextResult(
+                    prompt_text=(
+                        f"SOURCE SEGMENTS (translate only these, one translation per segment_id):\n"
+                        f"[{seg.id}] {seg.source_text}"
+                    )
+                )
+                issues = [{"issue_type": "term", "explanation": fixes[seg.id], "suggested_fix": fixes[seg.id]}]
+                try:
+                    fixed, _carry_f = await repair_window(
+                        provider=provider, model=model, window_id=f"TERM-{seg.segment_no}",
+                        context=ctx, draft=draft_list, issues=issues,
+                    )
+                    if validate_window([{"segment_id": seg.id, "source_text": seg.source_text}], fixed):
+                        latest_v = (
+                            db.scalar(
+                                select(Translation.version)
+                                .where(Translation.segment_id == seg.id, Translation.stage == "polished")
+                                .order_by(Translation.version.desc())
+                                .limit(1)
+                            )
+                            or 0
+                        )
+                        db.add(
+                            Translation(
+                                segment_id=seg.id,
+                                version=latest_v + 1,
+                                stage="polished",
+                                target_text=fixed[0]["target_text"],
+                                review_status="unreviewed",
+                                freshness_status="current",
+                                notes_json="[]",
+                                ambiguity_json="[]",
+                                model_name=model,
+                                provider_id="default",
+                                prompt_version=PROMPT_VERSION,
+                                context_snapshot_json="{}",
+                                source_hash=sha256(seg.source_text),
+                            )
+                        )
+                        fixed_count += 1
+                except Exception:  # noqa: BLE001 单段修复失败不阻塞
+                    continue
+            db.commit()
+        report["steps"]["term_consistency"] = {"fixed": fixed_count, "found": len(fixes)}
+
     # QA 与台词对齐并行执行
     align_task = _aio.create_task(_run_align())
     await _run_qa()
     await align_task
+    # 术语一致性：有译名术语未命中段自动重译修正（防 wolf queen/Luna 式混用）
+    await _fix_term_inconsistency()
 
     # 6. 批量接受：gate=passed 的 polished → approved
     with db_factory() as db:

@@ -292,6 +292,14 @@ def validate_window(segments: list[dict], translations: list[dict]) -> list[str]
     for t in translations:
         if not t.get("target_text", "").strip():
             errors.append(f"空译文: {t.get('segment_id')}")
+    # 窗口内重复译文校验：相邻段译文完全相同是「台词重复+丢失」的根因
+    seen: dict[str, str] = {}
+    for t in translations:
+        text = t.get("target_text", "").strip()
+        if len(text) > 40 and text in seen:
+            errors.append(f"重复译文: {t.get('segment_id')} 与 {seen[text]} 相同")
+        else:
+            seen[text] = t.get("segment_id")
     # 多行段行数校验：译文缺行会让后续段整体错位（历史漏译/标签错位的根因）
     src_by_id = {s["segment_id"]: s for s in segments}
     for t in translations:
