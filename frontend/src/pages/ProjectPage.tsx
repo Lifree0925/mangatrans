@@ -6,7 +6,7 @@ import { ArrowLeft, Check, ChevronLeft, ChevronRight, Download, FileUp, Loader2,
 import { Link, useParams } from "react-router-dom";
 import { api } from "../lib/api";
 import { toast } from "../lib/feedback";
-import type { Chapter, DocInfo, ExportResult, LatestTranslation, Project, ProviderInfo, Scene, Segment, TaskInfo } from "../lib/types";
+import type { Chapter, ExportResult, LatestTranslation, Project, ProviderInfo, Scene, Segment, TaskInfo } from "../lib/types";
 
 
 export default function ProjectPage() {
@@ -82,12 +82,6 @@ export default function ProjectPage() {
   const hasActiveTask = (projectTasks.data ?? []).some(
     (t) => t.status === "running" || t.status === "queued"
   );
-  const documents = useQuery({
-    queryKey: ["documents", id],
-    queryFn: () => api<DocInfo[]>(`/projects/${id}/documents`),
-    refetchInterval: 15000,
-  });
-  const activeDoc = (documents.data ?? []).find((d) => d.status === "active") ?? documents.data?.[0];
   const chapters = useQuery({
     queryKey: ["chapters", id],
     queryFn: () => api<Chapter[]>(`/projects/${id}/chapters`),
@@ -299,9 +293,9 @@ export default function ProjectPage() {
           </Link>
         )}
         <div className="flex flex-1 items-center justify-center gap-2 overflow-hidden">
-          {activeDoc && (
-            <span className="truncate font-mono text-xs text-(--color-muted)" title={activeDoc.filename}>
-              {activeDoc.filename}
+          {project.data?.name && (
+            <span className="truncate text-sm font-medium" title={project.data.name}>
+              {project.data.name}
             </span>
           )}
         {(() => {
