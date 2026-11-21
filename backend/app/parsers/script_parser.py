@@ -27,6 +27,8 @@ _CHAPTER_RE = re.compile(
     rf"^#{{0,6}}\s*第\s*[\d{_CN_NUM}]+\s*[集章回幕].*$|^Chapter\s+\d+.*$", re.IGNORECASE
 )
 _SCENE_BRACKET_RE = re.compile(r"^[【〔\[](.{1,80})[】〕\]]$")
+# 场景标题特征：地名·时间（如 咖啡厅·日内）或场景关键词；【闪回】【音效】等不满足则归叙述
+_SCENE_HINT_RE = re.compile(r"[·・]|内景|外景|室内|室外|日内|夜内|日外|夜外|清晨|黄昏|深夜|午夜|白天|夜晚|场景|地点|摄影棚|外场")
 _SCENE_LOC_RE = re.compile(
     r"^(内景|外景|日内|夜内|日外|夜外|场景|镜头|第\d+场|第[\u4e00-\u9fa5]+场)[：:\s]"
 )
@@ -115,9 +117,11 @@ def _classify_line(line: str) -> tuple[str, str, str | None]:
         return "junk", "junk", None
     if _CHAPTER_RE.match(stripped):
         return "heading", RULE_CHAPTER, None
-    if _SCENE_BRACKET_RE.match(stripped):
-        # 方括号行区分：含冒号的是舞台指示（音效/特效/字幕等），归叙述而非场景标题
-        if "：" in stripped or ":" in stripped:
+    m_bracket = _SCENE_BRACKET_RE.match(stripped)
+    if m_bracket:
+        # 舞台指示（音效/特效/闪回/字幕等）归叙述；仅具场景特征的方括号行才作场景标题
+        inner = m_bracket.group(1)
+        if "：" in stripped or ":" in stripped or not _SCENE_HINT_RE.search(inner):
             return "narrative", RULE_PAREN, None
         return "heading", RULE_SCENE_BRACKET, None
     if _SCENE_LOC_RE.match(stripped) and len(stripped) <= 40:
@@ -216,6 +220,17 @@ def parse_script(text: str) -> ParseResult:
 
         if ltype == "heading" and rule == RULE_CHAPTER:
             flush_narrative(pos)
+            # 首个真实章节标题：若此前只有自动占位章（无标题且仅叙述），并入本章，避免目录多出“第一章”
+            if (
+                len(chapters) == 1
+                and chapters[0].rule_id == RULE_OTHER
+                and not chapters[0].title.strip()
+                and all(s.type == "narrative" for s in segments)
+            ):
+                chapters.pop()
+                for s in segments:
+                    s.chapter_no = 1
+                chapter_no = 0
             chapter_no += 1
             scene_no = 0
             chapters.append(

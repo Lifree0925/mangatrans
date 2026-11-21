@@ -131,8 +131,14 @@ export default function ProjectPage() {
     },
   });
 
-  const invalidate = () =>
-    qc.invalidateQueries({ queryKey: [["chapters", id], ["scenes", id], ["segments", id], ["project", id]] });
+  const invalidate = () => {
+    qc.invalidateQueries({ queryKey: ["chapters", id] });
+    qc.invalidateQueries({ queryKey: ["scenes", id] });
+    qc.invalidateQueries({ queryKey: ["segments", id] });
+    qc.invalidateQueries({ queryKey: ["project", id] });
+    qc.invalidateQueries({ queryKey: ["latest-translations", id] });
+    qc.invalidateQueries({ queryKey: ["project-tasks", id] });
+  };
 
   const upload = useMutation({
     mutationFn: async (file: File) => {
@@ -275,8 +281,13 @@ export default function ProjectPage() {
             (expressTask?.data ?? null);
           if (!anyTask) return null;
           const isRunning = anyTask.status === "running" || anyTask.status === "queued";
+          const isTranslate = anyTask.task_type === "translate" || anyTask.task_type === "express";
           const label = isRunning
-            ? "翻译中…"
+            ? isTranslate
+              ? "翻译中…"
+              : anyTask.task_type === "parse"
+                ? "解析中…"
+                : "处理中…"
             : anyTask.status === "failed"
               ? "任务失败"
               : "任务已完成";
