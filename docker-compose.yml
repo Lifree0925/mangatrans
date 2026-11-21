@@ -24,8 +24,8 @@ services:
     working_dir: /app
     environment:
       VITE_API_BASE: ""
-      VITE_AUTH_TOKEN: real-test-token
-      VITE_PROXY_TARGET: http://172.21.0.1:8873
+      VITE_AUTH_TOKEN: dev-token-local
+      VITE_PROXY_TARGET: http://backend:8765
       npm_config_registry: https://registry.npmmirror.com
     volumes:
       - ./frontend:/app
