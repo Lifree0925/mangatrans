@@ -32,9 +32,16 @@ body {
   /* 滑块默认高度：占总长 1/7 */
   min-height: calc(100% / 7);
 }
-/* 目录栏与知识库角色区：滑块最小高度占总长 1/56 */
+/* 知识库角色区：滑块最小高度占总长 1/56 */
 .slim-scroll::-webkit-scrollbar-thumb {
   min-height: calc(100% / 56);
+}
+/* 章节目录栏：完全隐藏滚动条，滚轮滚动即可 */
+.toc-hide-scroll {
+  scrollbar-width: none;
+}
+.toc-hide-scroll::-webkit-scrollbar {
+  display: none;
 }
 ::-webkit-scrollbar-track { background: transparent; }
 
