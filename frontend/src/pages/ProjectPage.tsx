@@ -1,6 +1,6 @@
 /** 项目工作台：导入、解析、章节树、片段列表、解析报告。 */
 
-import { useEffect, useRef, useState } from "react";
+import { startTransition, useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ArrowLeft, Check, ChevronLeft, ChevronRight, Download, FileUp, Loader2, Pencil, RotateCcw, X, Zap } from "lucide-react";
 import { Link, useParams } from "react-router-dom";
@@ -40,7 +40,7 @@ export default function ProjectPage() {
           break;
         }
       }
-      setActiveChapterId(current);
+      startTransition(() => setActiveChapterId(current));
     });
   };
   const [expressTaskId, setExpressTaskId] = useState<string | null>(null);
@@ -101,7 +101,7 @@ export default function ProjectPage() {
   const latestTranslations = useQuery({
     queryKey: ["latest-translations", id],
     queryFn: () => api<{ items: LatestTranslation[] }>(`/projects/${id}/translations/latest`),
-    refetchInterval: 2000,
+    refetchInterval: hasActiveTask ? 2000 : false,
   });
 
   const saveEdit = async () => {
@@ -252,6 +252,11 @@ export default function ProjectPage() {
   });
 
   const segs = segments.data ?? [];
+  const trMap = useMemo(() => {
+    const m = new Map<string, LatestTranslation>();
+    for (const i of latestTranslations.data?.items ?? []) m.set(i.segment_id, i);
+    return m;
+  }, [latestTranslations.data]);
   useEffect(() => {
     const c = bodyRef.current;
     if (!c) return;
@@ -468,7 +473,7 @@ export default function ProjectPage() {
         >
           <div className="mx-auto max-w-4xl">
             {segs.map((s) => {
-              const tr = latestTranslations.data?.items.find((i) => i.segment_id === s.id);
+              const tr = trMap.get(s.id);
               const startEdit = (side: "source" | "target") => {
                 setEditing({ segmentId: s.id, side });
                 setEditDraft(
@@ -482,7 +487,7 @@ export default function ProjectPage() {
                   key={s.id}
                   data-seg-no={s.segment_no}
                   data-chapter-id={s.chapter_id ?? ""}
-                  className="cv-auto group border-b border-(--color-border) py-2"
+                  className="group border-b border-(--color-border) py-2"
                   onMouseLeave={() => {
                     if (editMenuFor === s.id) {
                       setEditMenuFor(null);

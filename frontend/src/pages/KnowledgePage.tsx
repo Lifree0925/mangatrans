@@ -1,6 +1,6 @@
 /** 知识库：角色档案（性格/说话方式）与章节剧情卡（情节/伏笔）。修改均通过浮层完成。 */
 
-import { useEffect, useRef, useState } from "react";
+import { startTransition, useEffect, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Check, ChevronLeft, ChevronRight, Pencil, Plus, Trash2, X } from "lucide-react";
 import { api } from "../lib/api";
@@ -498,7 +498,7 @@ export default function KnowledgePage() {
                     break;
                   }
                 }
-                setStoryActiveChapter(current);
+                startTransition(() => setStoryActiveChapter(current));
               }}
               className="relative flex-1 overflow-auto p-4"
             >
@@ -624,7 +624,7 @@ export default function KnowledgePage() {
                     break;
                   }
                 }
-                setDialogueActiveChapter(current);
+                startTransition(() => setDialogueActiveChapter(current));
               }}
               className="relative flex-1 overflow-auto p-4 font-mono text-[13px] leading-6"
             >
