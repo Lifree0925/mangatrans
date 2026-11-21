@@ -11,6 +11,7 @@ from app.models.document import Chapter, SourceSegment
 from app.models.storyline import ChapterStoryline
 
 PROMPT = """你是剧本剧情分析专家。阅读下面这一章的原文，生成剧情卡，用于英文翻译时保持前后连续一致。
+直接输出 JSON（不要任何解释、不要推理过程）。
 
 1. summary：本章内容摘要（2-3 句）。
 2. key_events：本章重要情节（按发生顺序，5-10 条，每条一句话，含关键人物与因果）。
@@ -18,7 +19,7 @@ PROMPT = """你是剧本剧情分析专家。阅读下面这一章的原文，�
 4. prior_deps：本章依赖的前文事实（前情，翻译本章必须与之一致）。
 5. character_states：本章结束时主要人物的状态/立场变化（人物名：状态）。
 
-只依据原文；不确定的留空。只返回 JSON。
+只依据原文；不确定的留空。
 本章原文：
 {text}"""
 

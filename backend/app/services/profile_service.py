@@ -12,6 +12,7 @@ from app.models.document import SourceSegment
 from app.models.knowledge import KnowledgeItem
 
 PROMPT = """你是剧本角色分析专家。根据提供的角色名单与各角色的台词样本，为每个主要角色建立角色档案，用于英文翻译时保持说话风格一致。
+直接输出 JSON（不要任何解释、不要推理过程）。
 
 对每个角色输出：
 1. personality：性格特征（依据台词，不编造）。
@@ -20,7 +21,7 @@ PROMPT = """你是剧本角色分析专家。根据提供的角色名单与各�
 4. emotional_range：常见情绪区间。
 5. notes：翻译时应注意的其它事项（可空）。
 
-只依据提供的原文；不确定的留空。只返回 JSON。
+只依据提供的原文；不确定的留空。
 角色名单与台词样本：
 {text}"""
 
@@ -96,11 +97,15 @@ async def extract_profiles(
     by_name = {p.name.strip(): p for p in out.profiles if p.name.strip()}
     updated = 0
     with db_factory() as db:
+        # 注意：knowledge 来自已关闭的 session（detached），必须按 id 重新取才可写库
         for k in knowledge:
             if k.canonical_key not in by_name:
                 continue
+            live = db.get(KnowledgeItem, k.id)
+            if live is None:
+                continue
             prof = by_name[k.canonical_key]
-            merged = dict(json.loads(k.data_json or "{}"))
+            merged = dict(json.loads(live.data_json or "{}"))
             merged.update(
                 {
                     "personality": prof.personality,
@@ -110,8 +115,8 @@ async def extract_profiles(
                     "notes": prof.notes,
                 }
             )
-            k.data_json = json.dumps(merged, ensure_ascii=False)
-            k.version += 1
+            live.data_json = json.dumps(merged, ensure_ascii=False)
+            live.version += 1
             updated += 1
         db.commit()
     return {"profiles": updated, "characters": len(character_names)}

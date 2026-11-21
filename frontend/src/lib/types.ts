@@ -118,6 +118,7 @@ export interface KnowledgeEntry {
   status: string;
   source: string;
   version: number;
+  occurrence_count?: number | null;
 }
 
 export interface ChapterStoryline {

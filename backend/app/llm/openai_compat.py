@@ -119,6 +119,7 @@ class OpenAICompatProvider:
             headers["Authorization"] = f"Bearer {self.api_key}"
 
         # 确定性调用缓存：temperature<=0.3 时命中直接返回（重试/重跑零成本）
+        _truncation_retried = False
         cache_key = ""
         if temperature is None or temperature <= 0.3:
             cache_key = hashlib.sha256(
@@ -198,6 +199,34 @@ class OpenAICompatProvider:
                 f"响应不是有效 JSON: {exc}", retryable=True, code="bad_json"
             ) from exc
         choice = data.get("choices", [{}])[0]
+        # 输出截断防护：思考型模型可能耗尽输出预算返回空内容。
+        # 追加"简洁输出"指令重试一次（所有调用点受益，无需各服务自行处理）。
+        if choice.get("finish_reason") == "length" and not _truncation_retried:
+            _truncation_retried = True
+            retry_messages = list(messages) + [
+                {
+                    "role": "system",
+                    "content": (
+                        "Your previous output hit the length limit and was truncated. "
+                        "Output ONLY the required JSON now. Be extremely concise: skip all reasoning, explanation and commentary."
+                    ),
+                }
+            ]
+            try:
+                async with httpx.AsyncClient(timeout=timeout) as client:
+                    retry_body = dict(body)
+                    retry_body["messages"] = retry_messages
+                    r2 = await client.post(
+                        f"{self.base_url}/chat/completions",
+                        json=retry_body,
+                        headers=headers,
+                    )
+                if r2.status_code == 200:
+                    data2 = r2.json()
+                    choice = data2.get("choices", [{}])[0]
+                    data = data2
+            except Exception:  # noqa: BLE001 重试失败按原响应处理
+                pass
         message = choice.get("message", {})
         content = message.get("content") or ""
         if cache_key:

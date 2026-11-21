@@ -50,6 +50,10 @@ export default function KnowledgePage() {
   const [dialogueCollapsed, setDialogueCollapsed] = useState(false);
   const [dialogueActiveChapter, setDialogueActiveChapter] = useState<string | null>(null);
   const dialogueBodyRef = useRef<HTMLDivElement | null>(null);
+  // 章节剧情目录栏（与台词本同款）
+  const [storyCollapsed, setStoryCollapsed] = useState(false);
+  const [storyActiveChapter, setStoryActiveChapter] = useState<string | null>(null);
+  const storyBodyRef = useRef<HTMLDivElement | null>(null);
 
   const projects = useQuery({ queryKey: ["projects"], queryFn: () => api<Project[]>("/projects") });
   // 默认不展示内容：未选择项目时显示"请选择项目"
@@ -269,9 +273,9 @@ export default function KnowledgePage() {
         )}
       </div>
 
-      <div className={tab === "dialogue" && active ? "flex-1 overflow-hidden" : "flex-1 overflow-auto p-4"}>
+      <div className={(tab === "dialogue" || tab === "storylines") && active ? "flex-1 overflow-hidden" : "flex-1 overflow-auto p-4"}>
         {!active ? null : (
-        <div className={tab === "dialogue" ? "h-full" : "mx-auto max-w-5xl"}>
+        <div className={tab === "dialogue" || tab === "storylines" ? "h-full" : "mx-auto max-w-5xl"}>
           {tab === "profiles" && (
             <>
               {adding && (
@@ -295,44 +299,59 @@ export default function KnowledgePage() {
                   <button onClick={() => setAdding(false)} className="rounded-lg border border-(--color-border) px-2.5 py-1 text-xs hover:bg-(--color-panel2)">取消</button>
                 </div>
               )}
-              <table className="w-full border-collapse text-sm">
-                <thead>
-                  <tr className="border-b border-(--color-border) text-left text-xs text-(--color-muted)">
-                    <th className="px-3 py-2 font-medium">角色</th>
-                    <th className="px-3 py-2 font-medium">译名</th>
-                    <th className="px-3 py-2 font-medium">性格特征</th>
-                    <th className="px-3 py-2 font-medium">说话方式</th>
-                    <th className="w-24 px-3 py-2 font-medium">操作</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {(characters.data ?? []).filter((k) => k.item_type === "character").map((k) => {
-                    const data = (() => { try { return JSON.parse(k.data_json || "{}"); } catch { return {}; } })();
-                    return (
-                      <tr key={k.id} className="border-b border-(--color-border) hover:bg-(--color-panel)">
-                        <td className="px-3 py-1.5 font-medium">{k.canonical_key}</td>
-                        <td className="px-3 py-1.5">
-                          {data.translation ? <span className="font-mono text-xs text-(--color-accent)">{data.translation}</span> : <span className="text-(--color-muted)">—</span>}
-                        </td>
-                        <td className="max-w-64 truncate px-3 py-1.5">{data.personality || <span className="text-(--color-muted)">—</span>}</td>
-                        <td className="max-w-64 truncate px-3 py-1.5">{data.speech_style || <span className="text-(--color-muted)">—</span>}</td>
-                        <td className="px-3 py-1.5">
-                          <div className="flex items-center gap-1">
-                            <button onClick={() => openCharEdit(k)}
-                              className="rounded p-1.5 text-(--color-muted) hover:text-(--color-accent)" title="编辑角色档案">
-                              <Pencil size={14} />
-                            </button>
-                            <button onClick={() => confirmRemove(k.canonical_key, k.id)}
-                              className="rounded p-1.5 text-(--color-muted) hover:text-red-600" title="删除角色">
-                              <Trash2 size={14} />
-                            </button>
-                          </div>
-                        </td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
+              <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
+                {(characters.data ?? []).filter((k) => k.item_type === "character").map((k) => {
+                  const data = (() => { try { return JSON.parse(k.data_json || "{}"); } catch { return {}; } })();
+                  const occ = k.occurrence_count;
+                  return (
+                    <div key={k.id} className="rounded-xl border border-(--color-border) bg-(--color-panel) px-4 py-3">
+                      <div className="flex items-center gap-2">
+                        <span className="text-base font-semibold">{k.canonical_key}</span>
+                        {typeof occ === "number" && occ > 0 && (
+                          <span className="rounded-md bg-(--color-panel2) px-1.5 py-0.5 text-[11px] text-(--color-muted)">
+                            出现 {occ} 次
+                          </span>
+                        )}
+                        <div className="ml-auto flex items-center gap-1">
+                          <button onClick={() => openCharEdit(k)}
+                            className="rounded p-1.5 text-(--color-muted) hover:text-(--color-accent)" title="编辑角色档案">
+                            <Pencil size={14} />
+                          </button>
+                          <button onClick={() => confirmRemove(k.canonical_key, k.id)}
+                            className="rounded p-1.5 text-(--color-muted) hover:text-red-600" title="删除角色">
+                            <Trash2 size={14} />
+                          </button>
+                        </div>
+                      </div>
+                      <div className="mt-2 space-y-1.5 text-sm">
+                        {data.translation && (
+                          <p><span className="text-xs text-(--color-muted)">译名</span> <span className="font-mono text-xs text-(--color-accent)">{data.translation}</span></p>
+                        )}
+                        <p>
+                          <span className="text-xs text-(--color-muted)">性格</span>{" "}
+                          <span>{data.personality || "—"}</span>
+                        </p>
+                        <p>
+                          <span className="text-xs text-(--color-muted)">说话方式</span>{" "}
+                          <span>{data.speech_style || "—"}</span>
+                        </p>
+                        {Array.isArray(data.forms_of_address) && data.forms_of_address.length > 0 && (
+                          <p>
+                            <span className="text-xs text-(--color-muted)">称呼</span>{" "}
+                            <span>{data.forms_of_address.join(" / ")}</span>
+                          </p>
+                        )}
+                        {data.emotional_range && (
+                          <p>
+                            <span className="text-xs text-(--color-muted)">情绪区间</span>{" "}
+                            <span>{data.emotional_range}</span>
+                          </p>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
               {(characters.data ?? []).filter((k) => k.item_type === "character").length === 0 && (
                 <p className="py-8 text-center text-sm text-(--color-muted)">暂无角色档案（一键直出会自动提取，或手动添加角色）</p>
               )}
@@ -340,50 +359,116 @@ export default function KnowledgePage() {
           )}
 
           {tab === "storylines" && (
-            <div className="space-y-3">
-              {(storylines.data ?? []).map((s) => {
-                const card = parseStory(s.card_json);
-                return (
-                  <div key={s.id} className="rounded-xl border border-(--color-border) bg-(--color-panel) px-4 py-3">
-                    <div className="flex items-center gap-2">
-                      <span className="font-semibold">第 {s.chapter_no} 章</span>
-                      {s.chapter_title && <span className="text-sm text-(--color-muted)">{s.chapter_title}</span>}
-                      <button
-                        onClick={() => openStoryEdit(s)}
-                        className="ml-auto flex items-center gap-1 rounded-lg border border-(--color-border) px-2.5 py-1 text-xs hover:bg-(--color-panel2)"
-                      >
-                        <Pencil size={13} /> 编辑
-                      </button>
-                    </div>
-                    <div className="mt-2 grid grid-cols-2 gap-x-6 gap-y-2 text-sm">
-                      <p className="col-span-2 text-(--color-muted)">{card.summary || "（无摘要）"}</p>
-                      <div>
-                        <p className="text-xs font-medium text-(--color-muted)">重要情节</p>
-                        <ul className="mt-1 list-disc space-y-0.5 pl-4">
-                          {card.key_events.map((e, i) => <li key={i}>{e}</li>)}
-                          {card.key_events.length === 0 && <li className="text-(--color-muted)">—</li>}
-                        </ul>
-                      </div>
-                      <div>
-                        <p className="text-xs font-medium text-amber-600">伏笔（翻译时勿剧透）</p>
-                        <ul className="mt-1 list-disc space-y-0.5 pl-4">
-                          {card.foreshadowing.map((e, i) => <li key={i}>{e}</li>)}
-                          {card.foreshadowing.length === 0 && <li className="text-(--color-muted)">—</li>}
-                        </ul>
-                        <p className="mt-2 text-xs font-medium text-(--color-muted)">前情依赖</p>
-                        <ul className="mt-1 list-disc space-y-0.5 pl-4">
-                          {card.prior_deps.map((e, i) => <li key={i}>{e}</li>)}
-                          {card.prior_deps.length === 0 && <li className="text-(--color-muted)">—</li>}
-                        </ul>
-                      </div>
-                    </div>
-                  </div>
-                );
-              })}
-              {(storylines.data ?? []).length === 0 && (
-                <p className="py-8 text-center text-sm text-(--color-muted)">暂无剧情卡（一键直出会自动生成）</p>
-              )}
+          <div className="flex h-full">
+            {/* 章节目录（可收起） */}
+            {!storyCollapsed && (
+              <div className="w-56 shrink-0 overflow-auto py-3">
+                <p className="mb-1 px-3 text-xs font-medium text-(--color-muted)">章节目录</p>
+                {(storylines.data ?? []).map((s) => (
+                  <button
+                    key={s.id}
+                    onClick={() => {
+                      const el = storyBodyRef.current?.querySelector<HTMLElement>(`[data-story-chapter="${s.chapter_id}"]`);
+                      el?.scrollIntoView({ behavior: "smooth", block: "start" });
+                    }}
+                    className={`block w-full truncate rounded-lg px-3 py-1.5 text-left text-sm transition-colors hover:text-(--color-accent) ${
+                      storyActiveChapter === s.chapter_id
+                        ? "font-medium text-(--color-accent)"
+                        : "text-(--color-text)"
+                    }`}
+                    title={s.chapter_title ? String(s.chapter_title).replace(/^#\s*第\d+回\s*/, "") : `第 ${s.chapter_no} 章`}
+                  >
+                    第 {s.chapter_no ?? "?"} 章
+                    <span className="ml-1.5 text-xs text-(--color-muted)">
+                      {s.chapter_title ? String(s.chapter_title).replace(/^#\s*第\d+回\s*/, "").slice(0, 12) : ""}
+                    </span>
+                  </button>
+                ))}
+                {(storylines.data ?? []).length === 0 && (
+                  <p className="px-3 py-4 text-xs text-(--color-muted)">暂无剧情卡（一键直出会自动生成）</p>
+                )}
+              </div>
+            )}
+            <div
+              className={`relative w-4 shrink-0 cursor-pointer ${storyCollapsed ? "" : "border-r border-(--color-border)"}`}
+              onClick={() => setStoryCollapsed((v) => !v)}
+              title={storyCollapsed ? "展开章节目录" : "收起章节目录"}
+            >
+              <span
+                className={`absolute top-1/2 -translate-y-1/2 text-(--color-muted) hover:text-(--color-accent) ${
+                  storyCollapsed ? "left-0.5" : "right-0"
+                }`}
+              >
+                {storyCollapsed ? <ChevronRight size={15} /> : <ChevronLeft size={15} />}
+              </span>
             </div>
+            <div
+              ref={storyBodyRef}
+              onScroll={() => {
+                const container = storyBodyRef.current;
+                if (!container) return;
+                const top = container.getBoundingClientRect().top;
+                let current: string | null = null;
+                for (const el of container.querySelectorAll<HTMLElement>("[data-story-chapter]")) {
+                  if (el.getBoundingClientRect().top >= top - 4) {
+                    current = el.dataset.storyChapter ?? null;
+                    break;
+                  }
+                }
+                setStoryActiveChapter(current);
+              }}
+              className="flex-1 overflow-auto p-4"
+            >
+              <div className="mx-auto max-w-4xl space-y-3">
+                {(storylines.data ?? []).map((s) => {
+                  const card = parseStory(s.card_json);
+                  return (
+                    <div key={s.id} data-story-chapter={s.chapter_id} className="rounded-xl border border-(--color-border) bg-(--color-panel) px-4 py-3">
+                      <div className="flex items-center gap-2">
+                        <span className="font-semibold">第 {s.chapter_no} 章</span>
+                        {s.chapter_title && (
+                          <span className="text-sm text-(--color-muted)">
+                            {String(s.chapter_title).replace(/^#\s*第\d+回\s*/, "")}
+                          </span>
+                        )}
+                        <button
+                          onClick={() => openStoryEdit(s)}
+                          className="ml-auto flex items-center gap-1 rounded-lg border border-(--color-border) px-2.5 py-1 text-xs hover:bg-(--color-panel2)"
+                        >
+                          <Pencil size={13} /> 编辑
+                        </button>
+                      </div>
+                      <div className="mt-2 grid grid-cols-2 gap-x-6 gap-y-2 text-sm">
+                        <p className="col-span-2 text-(--color-muted)">{card.summary || "（无摘要）"}</p>
+                        <div>
+                          <p className="text-xs font-medium text-(--color-muted)">重要情节</p>
+                          <ul className="mt-1 list-disc space-y-0.5 pl-4">
+                            {card.key_events.map((e, i) => <li key={i}>{e}</li>)}
+                            {card.key_events.length === 0 && <li className="text-(--color-muted)">—</li>}
+                          </ul>
+                        </div>
+                        <div>
+                          <p className="text-xs font-medium text-amber-600">伏笔（翻译时勿剧透）</p>
+                          <ul className="mt-1 list-disc space-y-0.5 pl-4">
+                            {card.foreshadowing.map((e, i) => <li key={i}>{e}</li>)}
+                            {card.foreshadowing.length === 0 && <li className="text-(--color-muted)">—</li>}
+                          </ul>
+                          <p className="mt-2 text-xs font-medium text-(--color-muted)">前情依赖</p>
+                          <ul className="mt-1 list-disc space-y-0.5 pl-4">
+                            {card.prior_deps.map((e, i) => <li key={i}>{e}</li>)}
+                            {card.prior_deps.length === 0 && <li className="text-(--color-muted)">—</li>}
+                          </ul>
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })}
+                {(storylines.data ?? []).length === 0 && (
+                  <p className="py-8 text-center text-sm text-(--color-muted)">暂无剧情卡（一键直出会自动生成）</p>
+                )}
+              </div>
+            </div>
+          </div>
           )}
 
           {tab === "dialogue" && (
