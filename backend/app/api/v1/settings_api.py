@@ -251,7 +251,7 @@ def list_all_tasks(db: Session = Depends(get_db), archived: bool = False) -> lis
         select(Task)
         .where(
             Task.archived.is_(archived),
-            Task.task_type.notin_(("dialogue", "dialogue_align")),
+            Task.task_type.notin_(("dialogue", "dialogue_align", "parse")),
         )
         .order_by(Task.created_at.desc())
         .limit(200)
