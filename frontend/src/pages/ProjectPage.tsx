@@ -74,14 +74,17 @@ export default function ProjectPage() {
   const chapters = useQuery({
     queryKey: ["chapters", id],
     queryFn: () => api<Chapter[]>(`/projects/${id}/chapters`),
+    refetchInterval: 3000,
   });
   const scenes = useQuery({
     queryKey: ["scenes", id],
     queryFn: () => api<Scene[]>(`/projects/${id}/scenes`),
+    refetchInterval: 3000,
   });
   const segments = useQuery({
     queryKey: ["segments", id],
     queryFn: () => api<Segment[]>(`/projects/${id}/segments`),
+    refetchInterval: 3000,
   });
 
   const latestTranslations = useQuery({
