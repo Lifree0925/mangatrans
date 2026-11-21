@@ -22,19 +22,9 @@ from app.models.translation import Translation
 BATCH_SEGMENTS = 10
 CONCURRENCY = 4
 
-SYSTEM = """You are a script dialogue extraction assistant for a Chinese screenplay.
-Extract every spoken line from the supplied dialogue segments.
-
-Rules:
-- Split each segment into individual spoken lines (single utterance per line).
-- For each line output:
-  - "segment_id": the id of the segment the line belongs to
-  - "speaker_name": the canonical character name (normalize aliases like 玄德 -> 刘备 using the provided character list; if the speaker cannot be determined use "旁白" for narration-style quotes or "未知" when genuinely unidentifiable)
-  - "speaker_alias": the exact form of address used in the source text for this speaker (e.g. 玄德); null if same as canonical or unknown
-  - "text": the EXACT verbatim substring of the source text, without surrounding quote marks, colon prefixes or stage directions
-- Do NOT rewrite, paraphrase, merge or skip any spoken line.
-- Keep lines in source order.
-Return ONLY JSON: {"lines": [{"segment_id": "...", "speaker_name": "...", "speaker_alias": null, "text": "..."}]}"""
+SYSTEM = """Extract dialogue lines from Chinese screenplay segments. Output ONLY JSON, no commentary:
+{"lines":[{"segment_id":"...","speaker":"...","speaker_alias":null,"text":"exact substring"}]}
+speaker: canonical name (normalize aliases like 玄德->刘备); 旁白/未知 if unknown. speaker_alias: the original form used in text if different from canonical, else null. text: verbatim substring, no quotes."""
 
 
 def _norm(text: str) -> str:
@@ -92,20 +82,11 @@ def _characters(project_id: str, db) -> list[dict]:
 
 def _batch_prompt(segs: list[SourceSegment], characters: list[dict]) -> str:
     char_block = "\n".join(
-        f"- {c['canonical']}" + (f"（别名：{'、'.join(c['aliases'])}）" if c["aliases"] else "")
+        f"- {c['canonical']}" + (f"（{'、'.join(c['aliases'])}）" if c["aliases"] else "")
         for c in characters
     )
-    seg_block = "\n\n".join(
-        f"[{s.id}] (segment_no={s.segment_no}, scene={s.scene_id or '-'}, "
-        f"speaker_hint={s.speaker_name or '-'})\n{s.source_text}"
-        for s in segs
-    )
-    return (
-        "CHARACTERS (normalize speakers to these canonical names):\n"
-        + (char_block or "(none)")
-        + "\n\nSEGMENTS:\n"
-        + seg_block
-    )
+    seg_block = "\n\n".join(f"[{s.id}]\n{s.source_text}" for s in segs)
+    return "CHARACTERS:\n" + (char_block or "(none)") + "\n\nSEGMENTS:\n" + seg_block
 
 
 async def _extract_batch(provider: LLMProvider, model: str, segs, characters) -> list[dict]:
@@ -121,9 +102,10 @@ async def _extract_batch(provider: LLMProvider, model: str, segs, characters) ->
 
 
 async def extract_dialogue_lines(
-    db_factory, project_id: str, source_document_id: str, provider: LLMProvider, model: str
+    db_factory, project_id: str, source_document_id: str, provider: LLMProvider,
+    model: str, progress_cb=None,
 ) -> dict:
-    """全量抽取并落库（幂等：先删旧行）。返回统计。"""
+    """全量抽取并落库（幂等：先删旧行）。progress_cb 每批回调用于实时进度。"""
     with db_factory() as db:
         segs = list(
             db.scalars(
@@ -137,24 +119,43 @@ async def extract_dialogue_lines(
         )
         characters = _characters(project_id, db)
     if not segs:
-        return {"extracted": 0, "discarded": 0, "batches": 0}
+        return {"extracted": 0, "discarded": 0, "batches": 0, "failed_batches": 0}
 
     batches = [segs[i : i + BATCH_SEGMENTS] for i in range(0, len(segs), BATCH_SEGMENTS)]
+    seg_by_id = {s.id: s for s in segs}
     sem = asyncio.Semaphore(CONCURRENCY)
 
-    async def one(batch):
-        async with sem:
-            try:
-                return await _extract_batch(provider, model, batch, characters)
-            except Exception:  # noqa: BLE001 单批失败不阻断整本
-                return []
+    async def one(batch, hold_sem: bool = True):
+        """单批抽取：限流退避重试；仍失败则拆半递归（长思考耗爆预算的批次变小后可成功）。"""
+        async def call():
+            for attempt in range(3):
+                try:
+                    return await _extract_batch(provider, model, batch, characters)
+                except Exception:  # noqa: BLE001
+                    if attempt == 2:
+                        if len(batch) <= 2:
+                            return []
+                        mid = len(batch) // 2
+                        left = await one(batch[:mid], hold_sem=False)
+                        right = await one(batch[mid:], hold_sem=False)
+                        return left + right
+                    await asyncio.sleep(4 * (attempt + 1))
 
-    results = await asyncio.gather(*[one(b) for b in batches])
-    seg_by_id = {s.id: s for s in segs}
+        if hold_sem:
+            async with sem:
+                return await call()
+        return await call()
 
+    tasks = [asyncio.create_task(one(b)) for b in batches]
     lines: list[dict] = []
     discarded = 0
-    for batch_lines in results:
+    failed_batches = 0
+    done = 0
+    for fut in asyncio.as_completed(tasks):
+        batch_lines = await fut
+        done += 1
+        if not batch_lines:
+            failed_batches += 1
         for item in batch_lines:
             sid = item.get("segment_id")
             seg = seg_by_id.get(sid)
@@ -177,6 +178,16 @@ async def extract_dialogue_lines(
                     "speaker_name": speaker,
                     "speaker_alias": (item.get("speaker_alias") or None),
                     "text": text,
+                }
+            )
+        if progress_cb:
+            progress_cb(
+                {
+                    "done_batches": done,
+                    "total_batches": len(batches),
+                    "lines": len(lines),
+                    "discarded": discarded,
+                    "failed_batches": failed_batches,
                 }
             )
 
@@ -208,7 +219,7 @@ async def extract_dialogue_lines(
         "extracted": len(lines),
         "discarded": discarded,
         "batches": len(batches),
-        "failed_batches": sum(1 for r in results if not r),
+        "failed_batches": failed_batches,
     }
 
 

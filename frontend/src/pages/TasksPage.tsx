@@ -231,7 +231,7 @@ export default function TasksPage() {
       <div className="flex-1 overflow-auto p-6">
         <div className="w-full space-y-3">
           {tasks.data?.map((t) => {
-            const prog = t.progress as { done?: number; total?: number };
+            const prog = t.progress as { done?: number; total?: number; lines?: number; discarded?: number; failed_batches?: number };
             const pct = prog.total ? Math.min(100, Math.round(((prog.done ?? 0) / prog.total) * 100)) : null;
             return (
               <div key={t.id} className="rounded-xl border border-(--color-border) bg-(--color-panel) px-4 py-3">
@@ -311,8 +311,19 @@ export default function TasksPage() {
                 {t.task_type !== "express" && prog.total != null && (
                   <div className="mt-2 flex items-center gap-2 text-xs text-(--color-muted)">
                     {t.status === "running" && <Loader2 size={13} className="animate-spin text-(--color-accent)" />}
-                    已处理 {prog.done ?? 0} / {prog.total} 个窗口
-                    （{prog.total ? Math.round(((prog.done ?? 0) / prog.total) * 100) : 0}%）
+                    {t.task_type === "dialogue" ? (
+                      <span>
+                        批次 {prog.done ?? 0} / {prog.total}
+                        {typeof prog.lines === "number" && ` · 已抽出台词 ${prog.lines} 条`}
+                        {prog.discarded ? ` · 丢弃 ${prog.discarded}` : ""}
+                        {prog.failed_batches ? ` · 失败批次 ${prog.failed_batches}` : ""}
+                      </span>
+                    ) : (
+                      <span>
+                        已处理 {prog.done ?? 0} / {prog.total} 个窗口
+                        （{prog.total ? Math.round(((prog.done ?? 0) / prog.total) * 100) : 0}%）
+                      </span>
+                    )}
                   </div>
                 )}
 

@@ -82,8 +82,18 @@ async def run_express(db_factory, project_id: str, source_document_id: str, mode
     if "dialogue" not in report["steps"]:
         from app.services import dialogue_service
 
+        def _dl_cb(p: dict) -> None:
+            report["steps"]["dialogue"] = {
+                "done_batches": p["done_batches"],
+                "total_batches": p["total_batches"],
+                "lines": p["lines"],
+                "discarded": p["discarded"],
+                "failed_batches": p["failed_batches"],
+            }
+            _sync_progress(db_factory, task_id, report["steps"], "dialogue")
+
         report["steps"]["dialogue"] = await dialogue_service.extract_dialogue_lines(
-            db_factory, project_id, source_document_id, provider, model
+            db_factory, project_id, source_document_id, provider, model, progress_cb=_dl_cb
         )
     _sync_progress(db_factory, task_id, report["steps"], "scene_cards")
     # 2. 场景卡
