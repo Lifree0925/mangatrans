@@ -38,8 +38,10 @@ class FakeProvider:
         temperature: float | None = None,
         timeout: float = 120,
         request_id: str | None = None,
+        thinking: str | None = "disabled",
+        reasoning_effort: str | None = None,
     ) -> LLMResponse:
-        self.calls.append({"messages": messages, "schema": response_schema})
+        self.calls.append({"messages": messages, "schema": response_schema, "thinking": thinking})
         result = None
         for h in self.handlers:
             r = h(messages)

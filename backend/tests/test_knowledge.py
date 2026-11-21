@@ -103,28 +103,3 @@ def test_extract_knowledge_express_auto_approved(client: TestClient, wait_task) 
     assert lin["status"] == "auto_approved"  # Express + explicit 证据
 
 
-def test_scene_cards_generated(client: TestClient, wait_task) -> None:
-    set_provider(_fake_provider())
-    pid = _setup_project(client, wait_task)
-
-    r = client.post(f"/api/v1/projects/{pid}/scene-cards/generate", json={})
-    assert r.status_code == 200
-    task_id = r.json()["task_id"]
-
-    import time
-
-    t0 = time.time()
-    from app.core.database import SessionLocal
-    from app.models.task import Task
-
-    while time.time() - t0 < 10:
-        with SessionLocal() as db:
-            task = db.get(Task, task_id)
-            if task.status in ("completed", "failed"):
-                break
-        time.sleep(0.1)
-
-    cards = client.get(f"/api/v1/projects/{pid}/scene-cards").json()
-    assert cards
-    card = json.loads(cards[0]["card_json"])
-    assert card["location"] == "咖啡厅"

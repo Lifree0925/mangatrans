@@ -45,6 +45,8 @@ class LLMProvider(Protocol):
         temperature: float | None = None,
         timeout: float = 120,
         request_id: str | None = None,
+        thinking: str | None = "disabled",
+        reasoning_effort: str | None = None,
     ) -> LLMResponse: ...
 
     async def test_connection(self) -> ProviderTestResult: ...

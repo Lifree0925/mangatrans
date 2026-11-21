@@ -151,7 +151,7 @@ async def extract_knowledge_for_document(
             added = merge_candidates(db, project_id, out, mode)
         return len(added), False
 
-    sem = asyncio.Semaphore(4)  # 批次并发（无依赖）
+    sem = asyncio.Semaphore(8)  # 批次并发（无依赖）
 
     async def limited(batch: str) -> tuple[int, bool]:
         async with sem:

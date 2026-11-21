@@ -21,6 +21,11 @@ Rules:
 - Do not invent, infer, explain, or add facts.
 - If a reference is genuinely ambiguous, preserve the ambiguity and note it in the ambiguity field.
 - Preserve all stage directions and emotional details.
+- End with a "carry_over" summary of the story state at the END of this window:
+  forms_of_address (how characters currently address each other), ongoing_state (one
+  sentence describing the current situation), open_threads (unresolved threads started
+  in or before this window), active_expressions (recurring phrasings/mannerisms in use).
+  This state is handed to the next window so the whole script stays continuous.
 - Return ONLY the required JSON. No commentary."""
 
 POLISH_SYSTEM = """You are a professional Chinese-to-English screenplay translator.
@@ -41,16 +46,18 @@ class TranslationEntry(BaseModel):
     ambiguity: list[str] = Field(default_factory=list)
 
 
-class DraftOutput(BaseModel):
-    window_id: str
-    translations: list[TranslationEntry]
-
-
 class CarryOver(BaseModel):
     forms_of_address: list[str] = Field(default_factory=list)
     ongoing_state: str = ""
     open_threads: list[str] = Field(default_factory=list)
     active_expressions: list[str] = Field(default_factory=list)
+
+
+class DraftOutput(BaseModel):
+    window_id: str
+    translations: list[TranslationEntry]
+    # Draft 阶段顺带输出窗口末剧情状态（carry-over 前置：Polish 并发的前提）
+    carry_over: CarryOver | None = None
 
 
 class PolishOutput(BaseModel):
@@ -59,7 +66,27 @@ class PolishOutput(BaseModel):
     carry_over: CarryOver = Field(default_factory=CarryOver)
 
 
-async def _chat_json(provider: LLMProvider, model: str, system: str, user: str, schema: dict):
+async def _chat_json_validate(
+    provider: LLMProvider, model: str, system: str, user: str, schema: dict,
+    out_model: type, thinking: str | None = "disabled",
+):
+    """调用 + 解析 + Pydantic 校验；校验失败带修复提示重试一次（思考模式输出易带瑕疵）。"""
+    data = await _chat_json(provider, model, system, user, schema, thinking=thinking)
+    try:
+        return out_model.model_validate(data)
+    except ValidationError:
+        user_fixed = user + (
+            "\n\n[FIX] Your last reply had schema errors (missing fields or wrong types). "
+            "Return ONLY the complete JSON matching the required schema. No reasoning, no commentary."
+        )
+        data = await _chat_json(provider, model, system, user_fixed, schema, thinking=thinking)
+        return out_model.model_validate(data)
+
+
+async def _chat_json(
+    provider: LLMProvider, model: str, system: str, user: str, schema: dict,
+    thinking: str | None = "disabled",
+):
     """调用并解析 JSON；输出格式瑕疵时重试一次（带修复提示）。"""
     messages = [{"role": "system", "content": system}, {"role": "user", "content": user}]
     resp = await provider.chat(
@@ -67,6 +94,7 @@ async def _chat_json(provider: LLMProvider, model: str, system: str, user: str, 
         messages=messages,
         response_schema=schema,
         temperature=0.3,
+        thinking=thinking,
     )
     if resp.finish_reason == "length":
         # 输出预算耗尽被截断：重试大概率同样截断，直接抛出明确错误
@@ -85,6 +113,7 @@ async def _chat_json(provider: LLMProvider, model: str, system: str, user: str, 
             messages=messages,
             response_schema=schema,
             temperature=0.2,
+            thinking=thinking,
         )
         if resp.finish_reason == "length":
             raise LLMError("模型输出被截断（finish_reason=length）", retryable=False, code="output_truncated")
@@ -98,10 +127,18 @@ async def translate_window_draft(
     window_id: str,
     context: ContextResult,
 ) -> list[dict]:
-    """Draft 阶段：只锁事实，不依赖 carry-over，可安全并发。"""
-    data = await _chat_json(provider, model, DRAFT_SYSTEM, context.prompt_text, DraftOutput.model_json_schema())
-    draft = DraftOutput.model_validate(data)
-    return [t.model_dump() for t in draft.translations]
+    """Draft 阶段：只锁事实，不依赖 carry-over，可安全并发；顺带输出 carry-over。
+
+    carry-over 由 Draft 生成（而非 Polish）后，Polish 即可窗口级并发：
+    各窗口 Polish 消费的是前一窗口 Draft 已锁定的事实状态，不依赖前一窗口 Polish。
+    """
+    draft = await _chat_json_validate(
+        provider, model, DRAFT_SYSTEM, context.prompt_text,
+        DraftOutput.model_json_schema(), DraftOutput, thinking="disabled",
+    )
+    return [t.model_dump() for t in draft.translations], (
+        draft.carry_over.model_dump() if draft.carry_over else None
+    )
 
 
 async def translate_window_polish(
@@ -116,14 +153,10 @@ async def translate_window_polish(
 ) -> tuple[list[dict], dict]:
     """Polish 阶段：情境自然化 + carry-over 生成；单窗口内串行。"""
     draft_block = "\n\n[FAITHFUL DRAFT]\n" + json.dumps(draft, ensure_ascii=False, indent=2)
-    data = await _chat_json(
-        provider,
-        model,
-        POLISH_SYSTEM,
-        context.prompt_text + draft_block,
-        PolishOutput.model_json_schema(),
+    polish = await _chat_json_validate(
+        provider, model, POLISH_SYSTEM, context.prompt_text + draft_block,
+        PolishOutput.model_json_schema(), PolishOutput, thinking="enabled",
     )
-    polish = PolishOutput.model_validate(data)
     polish_list = [t.model_dump() for t in polish.translations]
     # 完整性复查：译文显著短于原文的段判定为漏译（截断），单段重译一次
     seg_map = {s["segment_id"]: s for s in (segments or [])}
@@ -154,7 +187,7 @@ async def translate_window(
     segments: list[dict] | None = None,
 ) -> tuple[list[dict], dict]:
     """兼容入口：串行完成 Draft+Polish（测试与独立调用用）。"""
-    draft = await translate_window_draft(
+    draft, _draft_carry = await translate_window_draft(
         provider=provider, model=model, window_id=window_id, context=context
     )
     polish, carry = await translate_window_polish(
@@ -209,14 +242,10 @@ async def repair_window(
         + "\nRewrite the translations to fix EVERY issue above. Keep all correct parts. Return ONLY the required JSON."
     )
     draft_block = "\n\n[FAITHFUL DRAFT]\n" + json.dumps(draft, ensure_ascii=False, indent=2)
-    data = await _chat_json(
-        provider,
-        model,
-        fix_system,
-        context.prompt_text + draft_block,
-        PolishOutput.model_json_schema(),
+    polish = await _chat_json_validate(
+        provider, model, fix_system, context.prompt_text + draft_block,
+        PolishOutput.model_json_schema(), PolishOutput, thinking="enabled",
     )
-    polish = PolishOutput.model_validate(data)
     return [t.model_dump() for t in polish.translations], polish.carry_over.model_dump()
 
 

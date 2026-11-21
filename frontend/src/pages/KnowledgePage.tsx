@@ -4,6 +4,7 @@ import { startTransition, useEffect, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Check, ChevronLeft, ChevronRight, Pencil, Plus, Trash2, X } from "lucide-react";
 import { api } from "../lib/api";
+import { chapterLabel, characterDisplayName } from "../lib/format";
 import { confirmAction, toast } from "../lib/feedback";
 import type { ChapterStoryline, DialogueLineInfo, DialogueLinesResponse, KnowledgeEntry, Project } from "../lib/types";
 
@@ -305,7 +306,7 @@ export default function KnowledgePage() {
         )}
       </div>
 
-      <div className={(tab === "dialogue" || tab === "storylines") && active ? "flex-1 overflow-hidden" : "slim-scroll flex-1 overflow-auto p-4"}>
+      <div className={(tab === "dialogue" || tab === "storylines") && active ? "flex-1 overflow-hidden" : "toc-hide-scroll flex-1 overflow-auto p-4"}>
         {!active ? null : (
         <div className={tab === "dialogue" || tab === "storylines" ? "h-full" : "mx-auto max-w-5xl"}>
           {tab === "profiles" && (
@@ -348,7 +349,7 @@ export default function KnowledgePage() {
                   return (
                     <div className="rounded-xl border border-(--color-border) bg-(--color-panel) px-4 py-3">
                       <div className="flex items-center gap-2">
-                        <span className="text-base font-semibold">{k.canonical_key}</span>
+                        <span className="text-base font-semibold">{characterDisplayName(k.canonical_key)}</span>
                         {typeof occ === "number" && occ > 0 && (
                           <span className="rounded-md bg-(--color-panel2) px-1.5 py-0.5 text-[11px] text-(--color-muted)">
                             出现 {occ} 次
@@ -366,7 +367,7 @@ export default function KnowledgePage() {
                             className="rounded p-1.5 text-(--color-muted) hover:text-(--color-accent)" title="编辑角色档案">
                             <Pencil size={14} />
                           </button>
-                          <button onClick={() => confirmRemove(k.canonical_key, k.id)}
+                          <button onClick={() => confirmRemove(characterDisplayName(k.canonical_key), k.id)}
                             className="rounded p-1.5 text-(--color-muted) hover:text-red-600" title="删除角色">
                             <Trash2 size={14} />
                           </button>
@@ -459,12 +460,9 @@ export default function KnowledgePage() {
                         ? "font-medium text-(--color-accent)"
                         : "text-(--color-text)"
                     }`}
-                    title={s.chapter_title ? String(s.chapter_title).replace(/^#\s*第\d+回\s*/, "") : `第 ${s.chapter_no} 章`}
+                    title={chapterLabel(s.chapter_no, s.chapter_title)}
                   >
-                    第 {s.chapter_no ?? "?"} 章
-                    <span className="ml-1.5 text-xs text-(--color-muted)">
-                      {s.chapter_title ? String(s.chapter_title).replace(/^#\s*第\d+回\s*/, "").slice(0, 12) : ""}
-                    </span>
+                    {chapterLabel(s.chapter_no, s.chapter_title)}
                   </button>
                 ))}
                 {(storylines.data ?? []).length === 0 && (
@@ -508,12 +506,7 @@ export default function KnowledgePage() {
                   return (
                     <div key={s.id} data-story-chapter={s.chapter_id} className="rounded-xl border border-(--color-border) bg-(--color-panel) px-4 py-3">
                       <div className="flex items-center gap-2">
-                        <span className="font-semibold">第 {s.chapter_no} 章</span>
-                        {s.chapter_title && (
-                          <span className="text-sm text-(--color-muted)">
-                            {String(s.chapter_title).replace(/^#\s*第\d+回\s*/, "")}
-                          </span>
-                        )}
+                        <span className="font-semibold">{chapterLabel(s.chapter_no, s.chapter_title)}</span>
                         <button
                           onClick={() => openStoryEdit(s)}
                           className="ml-auto flex items-center gap-1 rounded-lg border border-(--color-border) px-2.5 py-1 text-xs hover:bg-(--color-panel2)"
@@ -542,13 +535,17 @@ export default function KnowledgePage() {
                           ) : (
                             <p className="mt-1 text-(--color-muted)">暂无</p>
                           )}
-                          <p className="mt-2 text-xs font-medium text-(--color-muted)">前情依赖</p>
-                          {card.prior_deps.length > 0 ? (
-                            <ul className="mt-1 list-disc space-y-0.5 pl-4">
-                              {card.prior_deps.map((e, i) => <li key={i}>{e}</li>)}
-                            </ul>
-                          ) : (
-                            <p className="mt-1 text-(--color-muted)">暂无</p>
+                          {s.chapter_no !== 1 && (
+                            <>
+                              <p className="mt-2 text-xs font-medium text-(--color-muted)">前情依赖</p>
+                              {card.prior_deps.length > 0 ? (
+                                <ul className="mt-1 list-disc space-y-0.5 pl-4">
+                                  {card.prior_deps.map((e, i) => <li key={i}>{e}</li>)}
+                                </ul>
+                              ) : (
+                                <p className="mt-1 text-(--color-muted)">暂无</p>
+                              )}
+                            </>
                           )}
                         </div>
                       </div>
@@ -581,12 +578,9 @@ export default function KnowledgePage() {
                         ? "font-medium text-(--color-accent)"
                         : "text-(--color-text)"
                     }`}
-                    title={ch.chapter_title ? String(ch.chapter_title).replace(/^#\s*第\d+回\s*/, "") : `第 ${ch.chapter_no ?? "?"} 章`}
+                    title={chapterLabel(ch.chapter_no, ch.chapter_title)}
                   >
-                    第 {ch.chapter_no ?? "?"} 章
-                    <span className="ml-1.5 text-xs text-(--color-muted)">
-                      {ch.chapter_title ? String(ch.chapter_title).replace(/^#\s*第\d+回\s*/, "").slice(0, 12) : ""}
-                    </span>
+                    {chapterLabel(ch.chapter_no, ch.chapter_title)}
                   </button>
                 ))}
                 {(dialogueLines.data?.chapters ?? []).length === 0 && (
@@ -631,12 +625,7 @@ export default function KnowledgePage() {
               {(dialogueLines.data?.chapters ?? []).map((ch: { chapter_id: string | null; chapter_no: number | null; chapter_title: string | null; scenes: { scene_id: string | null; scene_no: number | null; scene_heading: string | null; lines: DialogueLineInfo[] }[] }) => (
                 <div key={ch.chapter_id} data-dlg-chapter={ch.chapter_id} className="mx-auto max-w-4xl">
                   <h3 className="mb-1 mt-2 text-base font-bold">
-                    第 {ch.chapter_no ?? "?"} 章
-                    {ch.chapter_title && (
-                      <span className="ml-2 text-sm font-normal text-(--color-muted)">
-                        {String(ch.chapter_title).replace(/^#\s*第\d+回\s*/, "")}
-                      </span>
-                    )}
+                    {chapterLabel(ch.chapter_no, ch.chapter_title)}
                   </h3>
                   {ch.scenes.map((sc: { scene_id: string | null; scene_no: number | null; scene_heading: string | null; lines: DialogueLineInfo[] }) => (
                     <div key={sc.scene_id} className="mb-3">
@@ -745,7 +734,7 @@ export default function KnowledgePage() {
         <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/30 p-6" onClick={() => setEditingChar(null)}>
           <div className="flex h-[520px] w-full max-w-xl flex-col rounded-2xl bg-(--color-bg) p-5 shadow-2xl" onClick={(e) => e.stopPropagation()}>
             <div className="flex shrink-0 items-center justify-between">
-              <h2 className="text-base font-semibold">编辑角色档案 · {editingChar.canonical_key}</h2>
+              <h2 className="text-base font-semibold">编辑角色档案 · {characterDisplayName(editingChar.canonical_key)}</h2>
               <button onClick={() => setEditingChar(null)} className="rounded-lg p-1.5 text-(--color-muted) hover:bg-(--color-panel2)"><X size={16} /></button>
             </div>
             <div className="mt-4 flex-1 space-y-3 overflow-auto pr-1">
@@ -797,7 +786,7 @@ export default function KnowledgePage() {
           <div className="flex h-[520px] w-full max-w-xl flex-col rounded-2xl bg-(--color-bg) p-5 shadow-2xl" onClick={(e) => e.stopPropagation()}>
             <div className="flex items-center justify-between">
               <h2 className="text-base font-semibold">
-                编辑剧情卡 · 第 {editingStory.chapter_no} 章 {editingStory.chapter_title ? String(editingStory.chapter_title).replace(/^#\s*第\d+回\s*/, "") : ""}
+                编辑剧情卡 · {chapterLabel(editingStory.chapter_no, editingStory.chapter_title)}
               </h2>
               <button onClick={() => setEditingStory(null)} className="rounded-lg p-1.5 text-(--color-muted) hover:bg-(--color-panel2)"><X size={16} /></button>
             </div>

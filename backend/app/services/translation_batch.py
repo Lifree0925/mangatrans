@@ -7,7 +7,7 @@ from sqlalchemy.orm import Session
 
 from app.llm.registry import get_provider
 from app.models.document import SourceDocument, SourceSegment
-from app.models.knowledge import KnowledgeItem, SceneContextCard
+from app.models.knowledge import KnowledgeItem
 from app.models.task import Task, TaskItem
 from app.models.translation import StyleGuide, Translation
 from app.services.context_builder import ContextResult, build_context
@@ -54,14 +54,9 @@ def _load_window_context(db: Session, project_id: str, window: list[SourceSegmen
     from app.models.storyline import ChapterStoryline
 
     first = window[0]
-    card_row = db.scalar(
-        select(SceneContextCard)
-        .where(SceneContextCard.scene_id == first.scene_id)
-        .order_by(SceneContextCard.version.desc())
-    ) if first.scene_id else None
-    card = json.loads(card_row.card_json) if card_row else None
-    if card is not None:
-        card["id"] = card_row.id
+    # 场景卡已从管线剔除（实测无法识别场景、无实质作用）；
+    # 情境信息由知识库（角色/术语）、章节剧情卡与 carry-over 承担。
+    card = None
 
     # 当前章节剧情卡
     story_row = db.scalar(
@@ -234,7 +229,7 @@ async def _window_material(
 ) -> tuple[list[dict], ContextResult, dict | None, dict | None]:
     """窗口公共材料：segment dicts、style guide、场景卡/知识/剧情卡、context。"""
     with db_factory() as db:
-        card, knowledge, storyline = _load_window_context(db, project_id, window)
+        _card, knowledge, storyline = _load_window_context(db, project_id, window)
         sg = db.scalar(
             select(StyleGuide)
             .where(StyleGuide.project_id == project_id)
@@ -254,24 +249,24 @@ async def _window_material(
     ]
     context = build_context(
         segments=seg_dicts,
-        scene_card=card,
+        scene_card=_card,
         knowledge=knowledge,
         style_guide=style_guide,
         carry_over=carry_over,
         storyline=storyline,
     )
-    return seg_dicts, context, style_guide, card
+    return seg_dicts, context, style_guide, _card
 
 
 async def translate_window_draft_direct(
     db_factory, project_id: str, window: list[SourceSegment], model: str
 ) -> tuple[list[dict], ContextResult]:
-    """Draft 阶段（可并发）：不依赖 carry-over。返回 (draft, context)。"""
+    """Draft 阶段（可并发）：不依赖 carry-over。返回 (draft, draft_carry, context)。"""
     seg_dicts, context, _sg, _card = await _window_material(db_factory, project_id, window, None)
-    draft = await translate_window_draft(
+    draft, carry = await translate_window_draft(
         provider=get_provider(), model=model, window_id="DRAFT", context=context
     )
-    return draft, context
+    return draft, carry, context
 
 
 async def translate_window_polish_direct(
@@ -301,7 +296,7 @@ async def process_window_draft_item(db_factory, task_id: str, item_id: str, mode
         window.sort(key=lambda s: seg_ids.index(s.id))
         project_id = task.project_id
 
-    draft, context = await translate_window_draft_direct(db_factory, project_id, window, model)
+    draft, carry, context = await translate_window_draft_direct(db_factory, project_id, window, model)
     with db_factory() as db:
         _persist_stage(db, window, draft, "draft", context, model)
         item = db.get(TaskItem, item_id)
@@ -309,7 +304,7 @@ async def process_window_draft_item(db_factory, task_id: str, item_id: str, mode
         item.status = "pending"
         item.finished_at = func.now()
         db.commit()
-    return {"done": 1}
+    return {"done": 1, "window_id": item.window_id, "draft_carry": carry}
 
 
 async def process_window_polish_item(db_factory, task_id: str, item_id: str, model: str) -> dict:
@@ -323,8 +318,16 @@ async def process_window_polish_item(db_factory, task_id: str, item_id: str, mod
         window = list(db.scalars(select(SourceSegment).where(SourceSegment.id.in_(seg_ids))))
         window.sort(key=lambda s: seg_ids.index(s.id))
         progress = json.loads(task.progress_json or "{}")
-        carry_over = progress.get("carry_over")
         project_id = task.project_id
+        # carry-over 前置：取前一窗口 Draft 生成的 carry（Polish 并发的前提）；
+        # 旧任务无 draft carry 时回退 polish 输出链（串行兼容）。
+        win_idx = int(item.window_id.split("_")[1])
+        prev_win_id = f"WIN_{win_idx - 1:04d}" if win_idx > 0 else None
+        draft_carry_map = progress.get("draft_carry") or {}
+        carry_over = draft_carry_map.get(prev_win_id) if prev_win_id else None
+        if carry_over is None and prev_win_id:
+            carry_over = progress.get("carry_over")
+        window_id = item.window_id
         # Draft 已入库：读本窗口最新 draft
         draft_rows = list(
             db.scalars(
@@ -381,24 +384,18 @@ async def process_window_polish_item(db_factory, task_id: str, item_id: str, mod
 
     with db_factory() as db:
         _persist_stage(db, window, polished, "polished", context, model)
-        task = db.get(Task, task_id)
-        progress = json.loads(task.progress_json or "{}")
-        progress["carry_over"] = carry
-        progress["qa_issues"] = int(progress.get("qa_issues", 0)) + len(qa_issues)
-        done = int(progress.get("done", 0)) + 1
-        progress["done"] = done
-        total = int(progress.get("total", 0)) or db.scalar(
-            select(func.count()).select_from(TaskItem).where(TaskItem.task_id == task_id)
-        ) or done
-        progress["total"] = total
-        task.progress_json = json.dumps(progress, ensure_ascii=False)
-        task.last_checkpoint = item.window_id
         item = db.get(TaskItem, item_id)
         item.status = "succeeded"
         item.result_id = item.id
         item.finished_at = func.now()
         db.commit()
-    return {"done": done}
+    # 任务级 progress 由调度层顺序写（并发 Polish 下避免读改写竞争）
+    return {
+        "done": 1,
+        "window_id": window_id,
+        "polish_carry": carry,
+        "qa_issues": len(qa_issues),
+    }
 
 
 def mark_stale_for_knowledge(db: Session, knowledge_id: str) -> int:

@@ -111,15 +111,24 @@ def test_auth_error_never_retries():
         assert state.calls == 1
 
 
-def test_bad_request_no_response_format_no_retry():
-    """400（无降级空间）不可重试。"""
-    state = _State([(400, {}), (200, _ok())])
+def test_bad_request_downgrades_thinking_then_succeeds():
+    """400 且带 thinking：降级去掉 thinking 重试一次后成功（本地模型兼容）。"""
+    state = _State([(400, {}), (200, _ok("after"))])
+    resp = _run(state)
+    assert state.calls == 2
+    assert resp.content == "after"
+
+
+def test_bad_request_after_downgrade_no_retry():
+    """降级后仍 400（无降级空间）：不可重试。"""
+    state = _State([(400, {}), (400, {}), (200, _ok())])
     try:
         _run(state)
         assert False, "应抛出 LLMError"
     except LLMError as exc:
         assert not exc.retryable
-        assert state.calls == 1
+        assert exc.code == "bad_request"
+        assert state.calls == 2
 
 
 def test_max_retries_zero_means_no_retry():

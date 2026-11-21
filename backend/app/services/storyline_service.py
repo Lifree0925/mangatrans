@@ -79,6 +79,9 @@ async def generate_for_document(
             card = await generate_storyline(provider, model, text)
         except Exception:  # noqa: BLE001 单章失败不阻塞
             return False, True
+        # 第一集/第一章不存在前情：强制清空，避免模型虚构「上一集依赖」
+        if ch.chapter_no == 1:
+            card.prior_deps = []
         with db_factory() as db:
             base = (
                 db.scalar(
@@ -101,7 +104,7 @@ async def generate_for_document(
             db.commit()
         return True, False
 
-    sem = asyncio.Semaphore(3)  # 章节并发
+    sem = asyncio.Semaphore(6)  # 章节并发
 
     async def limited(ch: Chapter):
         async with sem:

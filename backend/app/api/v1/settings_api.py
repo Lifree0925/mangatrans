@@ -16,6 +16,16 @@ from app.services.provider_service import set_default_from_db, test_provider
 router = APIRouter(tags=["settings"])
 
 
+def _iso_utc(dt) -> str | None:
+    """时间戳序列化：SQLite 存时间时丢失时区标记（库内值为 UTC naive），
+    补 Z 后缀供前端按 UTC 正确解析（否则本地时区会多算 8 小时）。"""
+    if dt is None:
+        return None
+    if getattr(dt, "tzinfo", None) is None:
+        return dt.isoformat() + "Z"
+    return dt.isoformat()
+
+
 @router.get("/settings/providers")
 def list_providers(db: Session = Depends(get_db)) -> list[dict]:
     rows = db.scalars(select(ProviderConfig).order_by(ProviderConfig.created_at))
@@ -41,7 +51,7 @@ def list_providers(db: Session = Depends(get_db)) -> list[dict]:
                 "masked_key": _mask(secret),
                 "is_default": r.is_default,
                 "is_verified": r.is_verified,
-                "last_tested_at": r.last_tested_at.isoformat() if r.last_tested_at else None,
+                "last_tested_at": _iso_utc(r.last_tested_at),
                 "last_test_error": r.last_test_error,
                 "config_version": r.config_version,
             }
@@ -140,7 +150,7 @@ def get_task(task_id: str, db: Session = Depends(get_db)) -> dict:
         "status": task.status,
         "progress": json.loads(task.progress_json or "{}"),
         "error_message": task.error_message,
-        "created_at": task.created_at.isoformat() if task.created_at else None,
+        "created_at": _iso_utc(task.created_at),
         "model": json.loads(task.config_snapshot_json or "{}").get("model", ""),
     }
 
@@ -267,7 +277,7 @@ def list_all_tasks(db: Session = Depends(get_db), archived: bool = False) -> lis
             "status": t.status,
             "progress": json.loads(t.progress_json or "{}"),
             "error_message": t.error_message,
-            "created_at": t.created_at.isoformat() if t.created_at else None,
+            "created_at": _iso_utc(t.created_at),
             "project_id": t.project_id,
             "project_name": names.get(t.project_id, "已删除项目"),
             "model": json.loads(t.config_snapshot_json or "{}").get("model", ""),
@@ -291,7 +301,7 @@ def list_project_tasks(project_id: str, db: Session = Depends(get_db)) -> list[d
             "status": t.status,
             "progress": json.loads(t.progress_json or "{}"),
             "error_message": t.error_message,
-            "created_at": t.created_at.isoformat() if t.created_at else None,
+            "created_at": _iso_utc(t.created_at),
             "project_name": db.get(Project, t.project_id).name if db.get(Project, t.project_id) else "已删除项目",
             "model": json.loads(t.config_snapshot_json or "{}").get("model", ""),
         }

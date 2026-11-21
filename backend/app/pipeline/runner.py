@@ -12,7 +12,7 @@ from sqlalchemy import select
 import app.core.database as dbmod
 from app.llm.registry import get_provider
 from app.models.task import Task
-from app.services import express, knowledge_service, scene_card_service, style_guide_service
+from app.services import express, knowledge_service, style_guide_service
 
 
 def _sess_factory():
@@ -61,14 +61,6 @@ async def _run(task_id: str) -> None:
                 provider=get_provider(),
                 model=payload.get("model", "fake-model"),
                 mode=payload.get("mode", "guided"),
-            )
-        elif task.task_type == "scene_cards":
-            result = await scene_card_service.generate_cards_for_document(
-                _sess_factory,
-                project_id=task.project_id,
-                source_document_id=payload["source_document_id"],
-                provider=get_provider(),
-                model=payload.get("model", "fake-model"),
             )
         elif task.task_type == "express":
             result = await express.run_express(

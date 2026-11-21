@@ -6,7 +6,7 @@ AI 漫剧剧本翻译系统（Windows 桌面版）：本地优先工作台，将
 
 ## 设计原则
 
-- 核心设计已固化于代码与本文档：机械切分解析、两段式翻译（Draft→Polish）、场景卡、carry-over 连续性、Express/Guided 双工作流、SQLite 持久任务。
+- 核心设计已固化于代码与本文档：机械切分解析、两段式翻译（Draft→Polish）、carry-over 连续性、Express/Guided 双工作流、SQLite 持久任务。
 - 修改核心设计（数据模型、翻译管线、任务机制）前先评估对现有模块的影响，并同步更新本文档。
 
 ## 架构速览
@@ -32,8 +32,9 @@ AI 漫剧剧本翻译系统（Windows 桌面版）：本地优先工作台，将
 1. 解析只做机械切分（heading / dialogue / narrative / other），**不做语义分类**；复杂度 O(n log n) 以内，8 万字解析 < 2 秒；解析结果不阻塞翻译，覆盖率必须 100%。
 2. 翻译必须两段式：Draft 锁事实（允许生硬）→ Polish 情境自然化（不得改变 Draft 事实）；两轮都入库，polished 为对外默认版本。
 3. Express 与 Guided 共用同一管线，差异只在确认节点是否自动通过；`auto_approved` 仅限人名/高频术语且必须带 explicit 证据。
-4. 场景卡自动生成、默认生效，不逐场人工审核；未来信息只能进 `spoiler_guard`。
-5. 窗口串行执行并传递 carry-over，默认并发 1；开启并发必须禁用 carry-over。
+4. 场景卡已剔除（生成率低、无实质作用）；情境准确翻译由知识库、章节剧情卡与 carry-over 承担。
+5. carry-over 由 Draft 阶段前置生成并随任务进度持久化；Draft 与 Polish 均窗口级并发（默认 10），Polish 消费前一窗口 Draft 的 carry 保持连续性；任务级进度由调度层单协程顺序写（防并发读改写竞争）。
+6. 思考模式分层：仅 Polish（润色）与语义 QA（质检）传 `thinking: enabled`，其余环节协议默认 `disabled`；本地模型不支持 thinking 时自动降级。
 6. 所有 LLM 输出必须 Pydantic 校验；LLM 不允许直接写数据库或控制系统流程。
 7. 任务必须可持久化、可暂停、可恢复；不引入租约/心跳/worker_id（用 started_at 超时回收）。
 8. 知识、译文、Prompt、上下文快照必须可追溯；原文不可覆盖，译文修改必须新版本。

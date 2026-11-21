@@ -20,7 +20,7 @@ from app.models.knowledge import KnowledgeItem
 from app.models.translation import Translation
 
 BATCH_SEGMENTS = 10
-CONCURRENCY = 4
+CONCURRENCY = 8
 
 SYSTEM = """Extract dialogue lines from Chinese screenplay segments. Output ONLY JSON, no commentary:
 {"lines":[{"segment_id":"...","speaker":"...","speaker_alias":null,"text":"exact substring"}]}
@@ -191,16 +191,19 @@ async def extract_dialogue_lines(
                 }
             )
 
+    # 开始前清空旧行（幂等）；随后每批增量入库，中断时已有批次不丢失
     with db_factory() as db:
         db.query(DialogueLine).filter(
             DialogueLine.source_document_id == source_document_id
         ).delete()
-        line_no_by_scene: dict[str, int] = {}
-        for ln in lines:
-            seg = seg_by_id[ln["segment_id"]]
-            scene_key = seg.scene_id or seg.chapter_id or "-"
-            line_no = line_no_by_scene.get(scene_key, 0) + 1
-            line_no_by_scene[scene_key] = line_no
+        db.commit()
+    line_no_by_scene: dict[str, int] = {}
+    for ln in lines:
+        seg = seg_by_id[ln["segment_id"]]
+        scene_key = seg.scene_id or seg.chapter_id or "-"
+        line_no = line_no_by_scene.get(scene_key, 0) + 1
+        line_no_by_scene[scene_key] = line_no
+        with db_factory() as db:
             db.add(
                 DialogueLine(
                     project_id=project_id,
@@ -214,7 +217,7 @@ async def extract_dialogue_lines(
                     source_text=ln["text"],
                 )
             )
-        db.commit()
+            db.commit()
     return {
         "extracted": len(lines),
         "discarded": discarded,
@@ -448,7 +451,7 @@ async def align_dialogue_translations(
             }
         )
 
-    sem = asyncio.Semaphore(6)
+    sem = asyncio.Semaphore(10)
 
     async def one(job):
         async with sem:

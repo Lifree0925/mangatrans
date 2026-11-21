@@ -6,11 +6,11 @@ from sqlalchemy.orm import Session
 
 from app.core.database import get_db
 from app.models.document import Chapter, SourceDocument
-from app.models.knowledge import KnowledgeItem, SceneContextCard
+from app.models.knowledge import KnowledgeItem
 from app.models.project import Project
 from app.services.provider_service import default_model_name
 from app.pipeline.runner import create_task, launch
-from app.schemas.knowledge import KnowledgeOut, SceneCardOut
+from app.schemas.knowledge import KnowledgeOut
 
 router = APIRouter(prefix="/projects/{project_id}", tags=["knowledge"])
 
@@ -49,20 +49,6 @@ def extract_knowledge(
             "mode": payload.get("mode", "guided"),
             "model": payload.get("model") or default_model_name(db),
         },
-    )
-    launch(task.id)
-    return {"task_id": task.id}
-
-
-@router.post("/scene-cards/generate")
-def generate_scene_cards(project_id: str, payload: dict, db: Session = Depends(get_db)) -> dict:
-    project = _project(db, project_id)
-    doc = _active_doc(db, project)
-    task = create_task(
-        db,
-        project_id,
-        "scene_cards",
-        {"source_document_id": doc.id, "model": payload.get("model") or default_model_name(db)},
     )
     launch(task.id)
     return {"task_id": task.id}
@@ -270,14 +256,3 @@ def patch_storyline(project_id: str, storyline_id: str, payload: dict, db: Sessi
         row.version += 1
     db.commit()
     return {"id": row.id, "status": row.status, "version": row.version}
-
-
-@router.get("/scene-cards", response_model=list[SceneCardOut])
-def list_scene_cards(project_id: str, db: Session = Depends(get_db)) -> list[SceneContextCard]:
-    return list(
-        db.scalars(
-            select(SceneContextCard)
-            .where(SceneContextCard.project_id == project_id)
-            .order_by(SceneContextCard.updated_at.desc())
-        )
-    )

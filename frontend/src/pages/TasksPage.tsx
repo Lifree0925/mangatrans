@@ -42,9 +42,9 @@ const EXPRESS_STEPS = [
   { key: "profiles", label: "角色档案" },
   { key: "storylines", label: "章节剧情卡" },
   { key: "dialogue", label: "台词本抽取" },
-  { key: "scene_cards", label: "场景卡生成" },
   { key: "trial", label: "试译与风格基线" },
   { key: "translation", label: "全文翻译" },
+  { key: "dialogue_align", label: "台词对齐" },
   { key: "qa", label: "质量检查" },
   { key: "approve", label: "批准定稿" },
 ];
@@ -69,20 +69,48 @@ function stepDetail(key: string, step: Record<string, unknown> | undefined): str
       if (s.elapsed_s) parts.push(`耗时 ${fmtSecs(s.elapsed_s)}`);
       return parts.join(" · ");
     }
-    case "scene_cards": {
-      const s = step as { generated?: number; failed?: number; note?: string };
-      if (s.note) return `已生成 ${s.generated ?? 0} 场 · ${s.note}`;
-      return s.generated != null ? `已生成 ${s.generated} 场${s.failed ? `（失败 ${s.failed} 场）` : ""}` : "";
+    case "profiles": {
+      const s = step as { profiles?: number; characters?: number; error?: string };
+      if (s.error) return `生成失败：${s.error}`;
+      if (s.profiles == null) return "";
+      return `已生成 ${s.profiles} 份角色档案（覆盖 ${s.characters ?? 0} 个角色）`;
+    }
+    case "storylines": {
+      const s = step as { generated?: number; failed?: number };
+      if (s.generated == null) return "";
+      return `已生成 ${s.generated} 章剧情卡${s.failed ? `（失败 ${s.failed} 章，不阻塞）` : ""}`;
+    }
+    case "dialogue": {
+      const s = step as { done_batches?: number; total_batches?: number; lines?: number; discarded?: number; failed_batches?: number; extracted?: number };
+      if (s.extracted != null) {
+        return `已抽取 ${s.extracted} 行台词${s.discarded ? `（弃用 ${s.discarded} 行）` : ""}`;
+      }
+      const parts = [
+        s.total_batches != null ? `进度 ${s.done_batches ?? 0} / ${s.total_batches} 批` : "",
+        s.lines != null ? `已识别 ${s.lines} 行` : "",
+        s.failed_batches ? `失败 ${s.failed_batches} 批（自动拆半重试）` : "",
+      ].filter(Boolean);
+      return parts.join(" · ");
+    }
+    case "dialogue_align": {
+      const s = step as { done?: number; total?: number; aligned?: number; total_lines?: number };
+      if (s.aligned != null) return `已对齐 ${s.aligned} / ${s.total_lines ?? 0} 句台词`;
+      if (s.total != null) return `对齐中 ${s.done ?? 0} / ${s.total} 段`;
+      return "";
     }
     case "trial": {
       const s = step as { windows?: number; style_guide_id?: string };
       return s.windows != null ? `已试译 ${s.windows} 个窗口${s.style_guide_id ? " · 风格基线已建立" : ""}` : "";
     }
     case "translation": {
-      const s = step as { done?: number; total?: number };
+      const s = step as { done?: number; total?: number; phase?: string; draft_done?: number };
       if (s.total == null) return "";
+      if (s.phase === "draft") {
+        const pct = s.total ? Math.round(((s.draft_done ?? 0) / s.total) * 100) : 0;
+        return `草稿锁事实 ${s.draft_done ?? 0} / ${s.total} 个窗口（${pct}%）`;
+      }
       const pct = s.total ? Math.round(((s.done ?? 0) / s.total) * 100) : 0;
-      return `已翻译 ${s.done ?? 0} / ${s.total} 个窗口（${pct}%）`;
+      return `润色情境化 ${s.done ?? 0} / ${s.total} 个窗口（${pct}%）`;
     }
     case "qa": {
       const s = step as { done?: number; total?: number; issues?: number; needs_review?: number; blocked?: number; severity_counts?: Record<string, number> };
@@ -110,6 +138,45 @@ function stepDetail(key: string, step: Record<string, unknown> | undefined): str
   return "";
 }
 
+type StepNode = {
+  key: string;
+  label: string;
+  complete: boolean;
+  active: boolean;
+  error?: boolean;
+  detail: string;
+};
+
+/** 统一任务卡节点渲染（一键直出与全文翻译共用同款样式）。 */
+function StepNodes({ nodes }: { nodes: StepNode[] }) {
+  return (
+    <div className="mt-3 space-y-1.5">
+      {nodes.map((n) => (
+        <div key={n.key} className="flex items-start gap-2 text-xs">
+          <span className="mt-0.5 shrink-0">
+            {n.error ? (
+              <XCircle size={13} className="text-red-600" />
+            ) : n.active ? (
+              <Loader2 size={13} className="animate-spin text-emerald-600" />
+            ) : n.complete ? (
+              <CheckCircle2 size={13} className="text-emerald-600" />
+            ) : (
+              <Circle size={13} className="text-(--color-border)" />
+            )}
+          </span>
+          <div className="min-w-0">
+            <span className={n.error ? "font-medium text-red-600" : n.complete ? "text-(--color-text)" : "text-(--color-muted)"}>
+              {n.label}
+            </span>
+            <span className={`ml-2 ${n.error ? "text-red-600" : "text-(--color-muted)"}`}>{n.detail}</span>
+            {n.active && <span className="ml-2 font-medium text-(--color-accent)">执行中…</span>}
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 function ExpressSteps({ task }: { task: TaskInfo }) {
   const progress = task.progress as {
     steps?: Record<string, Record<string, unknown>>;
@@ -130,46 +197,82 @@ function ExpressSteps({ task }: { task: TaskInfo }) {
   const currentIndex = EXPRESS_STEPS.findIndex((s) => s.key === current);
   // 进行中步骤：运行状态下第一个未完成步骤
   const firstPending = EXPRESS_STEPS.findIndex((s) => !stepDone(s.key));
-  return (
-    <div className="mt-3 space-y-1.5">
-      {EXPRESS_STEPS.map((s, i) => {
-        const step = steps[s.key];
-        const done = stepDone(s.key) || task.status === "completed";
-        const running =
-          task.status === "running" &&
-          !done &&
-          (currentIndex >= 0 ? i === currentIndex : i === (firstPending >= 0 ? firstPending : i));
-        const failedHere =
-          task.status === "failed" &&
-          !done &&
-          i === (firstPending >= 0 ? firstPending : currentIndex >= 0 ? currentIndex : 0);
-        return (
-          <div key={s.key} className="flex items-start gap-2 text-xs">
-            <span className="mt-0.5 shrink-0">
-              {failedHere ? (
-                <XCircle size={13} className="text-red-600" />
-              ) : done ? (
-                <CheckCircle2 size={13} className="text-emerald-600" />
-              ) : running ? (
-                <Loader2 size={13} className="animate-spin text-emerald-600" />
-              ) : (
-                <Circle size={13} className="text-(--color-border)" />
-              )}
-            </span>
-            <div className="min-w-0">
-              <span className={done ? "text-(--color-text)" : failedHere ? "font-medium text-red-600" : "text-(--color-muted)"}>
-                {s.label}
-              </span>
-              <span className="ml-2 text-(--color-muted)">{stepDetail(s.key, step)}</span>
-              {running && (
-                <span className="ml-2 font-medium text-(--color-accent)">执行中…</span>
-              )}
-            </div>
-          </div>
-        );
-      })}
-    </div>
-  );
+  // 并行阶段（Draft 与准备步骤并行、对齐与 QA 并行）：有部分进度的未完成步骤同时显示执行中
+  const stepRunning = (key: string): boolean => {
+    if (task.status !== "running") return false;
+    if (stepDone(key)) return false;
+    const step = steps[key];
+    if (step !== undefined) return true; // 已写入进度数据的未完成步骤 = 正在执行
+    return current === key;
+  };
+  const nodes: StepNode[] = EXPRESS_STEPS.map((s, i) => {
+    const step = steps[s.key];
+    const done = stepDone(s.key) || task.status === "completed";
+    const running = stepRunning(s.key);
+    const failedHere =
+      task.status === "failed" &&
+      !done &&
+      i === (firstPending >= 0 ? firstPending : currentIndex >= 0 ? currentIndex : 0);
+    return {
+      key: s.key,
+      label: s.label,
+      complete: done,
+      active: running,
+      error: failedHere,
+      detail: stepDetail(s.key, step),
+    };
+  });
+  return <StepNodes nodes={nodes} />;
+}
+
+/** 全文翻译（重新翻译/章节重译）任务节点：从进度字段推导各阶段。 */
+function TranslateSteps({ task }: { task: TaskInfo }) {
+  const p = task.progress as {
+    done?: number; total?: number; draft_carry?: Record<string, unknown>;
+    qa_issues?: number; failed?: number; phase?: string;
+  };
+  const total = p.total ?? 0;
+  const draftDone = p.draft_carry ? Object.keys(p.draft_carry).length : 0;
+  const done = p.done ?? 0;
+  const running = task.status === "running" || task.status === "queued";
+  const nodes = [
+    {
+      key: "draft",
+      label: "草稿（锁事实）",
+      complete: total > 0 && draftDone >= total,
+      active: running && draftDone < total,
+      detail:
+        total > 0
+          ? `已完成 ${draftDone} / ${total} 个窗口草稿（${total ? Math.round((draftDone / total) * 100) : 0}%）`
+          : "等待开始",
+    },
+    {
+      key: "polish",
+      label: "润色（情境化 · 思考模式）",
+      complete: total > 0 && done >= total,
+      active: running && draftDone > 0 && done < total,
+      detail:
+        total > 0
+          ? `已润色 ${done} / ${total} 个窗口（${total ? Math.round((done / total) * 100) : 0}%）`
+          : "等待草稿完成",
+    },
+    {
+      key: "qa",
+      label: "质检打回修复",
+      complete: false,
+      active: false,
+      detail: `已修复 ${p.qa_issues ?? 0} 处`,
+    },
+    {
+      key: "failed",
+      label: "失败窗口",
+      complete: !(p.failed ?? 0),
+      active: false,
+      detail: p.failed ? `失败 ${p.failed} 个窗口（自动重试 3 次后放弃，可按章节重译）` : "无失败窗口",
+      danger: !!p.failed,
+    },
+  ];
+  return <StepNodes nodes={nodes.map((n) => ({ ...n, error: n.danger }))} />;
 }
 
 export default function TasksPage() {
@@ -246,10 +349,16 @@ export default function TasksPage() {
         </button>
       </div>
       <div className="flex-1 overflow-auto p-6">
-        <div className="w-full space-y-3">
+        <div className="mx-auto max-w-4xl space-y-3">
           {tasks.data?.map((t) => {
-            const prog = t.progress as { done?: number; total?: number; lines?: number; discarded?: number; failed_batches?: number };
-            const pct = prog.total ? Math.min(100, Math.round(((prog.done ?? 0) / prog.total) * 100)) : null;
+            const prog = t.progress as {
+              done?: number; total?: number; lines?: number; discarded?: number; failed_batches?: number;
+              steps?: Record<string, { done?: number; total?: number }>;
+            };
+            const trStep = prog.steps?.translation;
+            const doneN = trStep?.total != null ? trStep.done ?? 0 : prog.done ?? 0;
+            const totalN = trStep?.total != null ? trStep.total : prog.total ?? 0;
+            const pct = totalN ? Math.min(100, Math.round((doneN / totalN) * 100)) : null;
             return (
               <div key={t.id} className="rounded-xl border border-(--color-border) bg-(--color-panel) px-4 py-3">
                 <div className="flex items-center gap-3">
@@ -269,9 +378,18 @@ export default function TasksPage() {
                       <span className="text-sm font-medium text-(--color-text)">{t.project_name}</span>
                     )
                   )}
-                  {t.status !== "running" && t.status !== "queued" && (
+                  {(t.status === "running" || t.status === "queued") ? (
+                    <span className="flex items-center gap-1 text-sm font-medium text-emerald-600">
+                      <Loader2 size={13} className="animate-spin" /> 执行中
+                    </span>
+                  ) : (
                     <span className={`text-sm font-medium ${statusColor[t.status] ?? ""}`}>
                       {statusLabel[t.status] ?? t.status}
+                    </span>
+                  )}
+                  {t.created_at && (t.status === "running" || t.status === "queued") && (
+                    <span className="text-xs text-(--color-muted)">
+                      已运行 {fmtSecs(Math.max(0, (Date.now() - new Date(t.created_at).getTime()) / 1000))}
                     </span>
                   )}
                   {t.model && (
@@ -345,6 +463,12 @@ export default function TasksPage() {
                 )}
 
                 {t.task_type === "express" && <ExpressSteps task={t} />}
+                {t.task_type === "translate" && <TranslateSteps task={t} />}
+                {t.error_message && (
+                  <p className="mt-2 break-all rounded-lg bg-red-50 px-3 py-2 text-xs leading-5 text-red-600">
+                    失败原因：{t.error_message}
+                  </p>
+                )}
                 {t.task_type === "parse" && (() => {
                   const p = t.progress as {
                     coverage_ok?: boolean; total_chars?: number; covered_chars?: number;

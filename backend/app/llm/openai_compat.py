@@ -89,6 +89,8 @@ class OpenAICompatProvider:
         temperature: float | None = None,
         timeout: float = 120,
         request_id: str | None = None,
+        thinking: str | None = "disabled",
+        reasoning_effort: str | None = None,
     ) -> LLMResponse:
         model = model or self.model
         body: dict = {
@@ -98,6 +100,11 @@ class OpenAICompatProvider:
             # 显式限制输出预算：依赖供应商默认值曾导致长段翻译被静默截断（漏译后半情节）
             "max_tokens": max(1, int(self.capabilities.max_output_tokens)),
         }
+        # 思考模式显式控制：默认关闭（只有润色/质检环节显式开启），避免依赖服务商默认行为
+        if thinking is not None:
+            body["thinking"] = {"type": thinking}
+        if reasoning_effort is not None:
+            body["reasoning_effort"] = reasoning_effort
         if response_schema is not None:
             if self.capabilities.supports_json_schema:
                 body["response_format"] = {
@@ -124,7 +131,7 @@ class OpenAICompatProvider:
         if temperature is None or temperature <= 0.3:
             cache_key = hashlib.sha256(
                 json.dumps(
-                    [self.base_url, model, messages, body.get("response_format")],
+                    [self.base_url, model, messages, body.get("response_format"), thinking, reasoning_effort],
                     ensure_ascii=False,
                     sort_keys=True,
                 ).encode()
@@ -152,6 +159,20 @@ class OpenAICompatProvider:
                     r = await client.post(
                         f"{self.base_url}/chat/completions", json=body, headers=headers
                     )
+                    # 本地模型（Ollama/vLLM 等）可能不支持 thinking / response_format：
+                    # 逐级降级后在同一连接内重试一次（不能移出 with 块，client 已关闭）
+                    if r.status_code == 400:
+                        if "thinking" in body:
+                            body.pop("thinking", None)
+                            body.pop("reasoning_effort", None)
+                            r = await client.post(
+                                f"{self.base_url}/chat/completions", json=body, headers=headers
+                            )
+                        elif "response_format" in body:
+                            body.pop("response_format", None)
+                            r = await client.post(
+                                f"{self.base_url}/chat/completions", json=body, headers=headers
+                            )
             except httpx.TimeoutException as exc:
                 last_err = LLMError("请求超时", retryable=True, code="timeout")
             except httpx.HTTPError as exc:
@@ -162,13 +183,6 @@ class OpenAICompatProvider:
                     raise last_err
                 await asyncio.sleep(2 * (2**attempt))
                 continue
-
-            # 本地模型可能不支持 response_format：降级为纯 Prompt 约束后重试一次
-            if r.status_code == 400 and "response_format" in body:
-                body.pop("response_format", None)
-                r = await client.post(
-                    f"{self.base_url}/chat/completions", json=body, headers=headers
-                )
 
             if r.status_code in (401, 403):
                 raise LLMError("认证失败", retryable=False, code="auth")

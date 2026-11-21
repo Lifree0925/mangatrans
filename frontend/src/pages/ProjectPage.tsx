@@ -2,9 +2,10 @@
 
 import { startTransition, useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { ArrowLeft, Check, ChevronLeft, ChevronRight, Download, FileUp, Loader2, Pencil, RotateCcw, X, Zap } from "lucide-react";
+import { ArrowLeft, Check, ChevronLeft, ChevronRight, Download, FileUp, Loader2, Pencil, X, Zap } from "lucide-react";
 import { Link, useParams } from "react-router-dom";
 import { api } from "../lib/api";
+import { chapterLabel } from "../lib/format";
 import { toast } from "../lib/feedback";
 import type { Chapter, ExportResult, LatestTranslation, Project, ProviderInfo, Scene, Segment, TaskInfo } from "../lib/types";
 
@@ -292,46 +293,12 @@ export default function ProjectPage() {
             未配置模型 → 去设置
           </Link>
         )}
-        <div className="flex flex-1 items-center justify-center gap-2 overflow-hidden">
+        <div className="flex flex-1 items-center justify-center overflow-hidden">
           {project.data?.name && (
             <span className="truncate text-sm font-medium" title={project.data.name}>
               {project.data.name}
             </span>
           )}
-        {(() => {
-          const list = projectTasks.data ?? [];
-          const running = list.find(
-            (t) => t.status === "running" || t.status === "queued"
-          );
-          const anyTask =
-            (expressTaskId ? list.find((t) => t.id === expressTaskId) : undefined) ??
-            running ??
-            (expressTask?.data ?? null);
-          if (!anyTask) return null;
-          const isRunning = anyTask.status === "running" || anyTask.status === "queued";
-          const isTranslate = anyTask.task_type === "translate" || anyTask.task_type === "express";
-          const label = isRunning
-            ? isTranslate
-              ? "翻译中…"
-              : anyTask.task_type === "parse"
-                ? "解析中…"
-                : "处理中…"
-            : anyTask.status === "failed"
-              ? "任务失败"
-              : "任务已完成";
-          return (
-            <span className={`flex items-center gap-1.5 rounded-lg px-2 py-1 text-xs ${
-              isRunning
-                ? "bg-(--color-panel) font-medium text-(--color-accent)"
-                : anyTask.status === "failed"
-                  ? "bg-red-50 text-red-600"
-                  : "bg-emerald-50 text-emerald-700"
-            }`}>
-              {isRunning && <Loader2 size={12} className="animate-spin" />}
-              {label}
-            </span>
-          );
-        })()}
         </div>
         <div className="flex items-center gap-2">
           {/* 1. 数据准备 */}
@@ -441,7 +408,7 @@ export default function ProjectPage() {
                 }`}
                 title={firstSegNo ? "点击跳转到正文" : undefined}
               >
-                {ch.title || `第 ${ch.chapter_no} 章`}
+                {chapterLabel(ch.chapter_no, ch.title)}
               </button>
               {scenes.data
                 ?.filter((sc) => sc.chapter_id === ch.id)
@@ -480,6 +447,43 @@ export default function ProjectPage() {
           className="relative flex-1 overflow-auto p-4 font-mono text-[13px] leading-6"
         >
           <div className="mx-auto max-w-4xl">
+            {(() => {
+              const list = projectTasks.data ?? [];
+              const running = list.find(
+                (t) => t.status === "running" || t.status === "queued"
+              );
+              const anyTask =
+                (expressTaskId ? list.find((t) => t.id === expressTaskId) : undefined) ??
+                running ??
+                (expressTask?.data ?? null);
+              if (!anyTask) return null;
+              const isRunning = anyTask.status === "running" || anyTask.status === "queued";
+              if (anyTask.status === "completed") return null; // 完成后不残留状态
+              const isTranslate = anyTask.task_type === "translate" || anyTask.task_type === "express";
+              const label = isRunning
+                ? isTranslate
+                  ? "翻译中…"
+                  : anyTask.task_type === "parse"
+                    ? "解析中…"
+                    : "处理中…"
+                : anyTask.status === "failed"
+                  ? "任务失败"
+                  : "已暂停";
+              return (
+                <span
+                  className={`mb-2 inline-flex items-center gap-1.5 rounded-lg px-2 py-1 text-xs ${
+                    isRunning
+                      ? "bg-(--color-panel) font-medium text-(--color-accent)"
+                      : anyTask.status === "failed"
+                        ? "bg-red-50 text-red-600"
+                        : "bg-amber-50 text-amber-600"
+                  }`}
+                >
+                  {isRunning && <Loader2 size={12} className="animate-spin" />}
+                  {label}
+                </span>
+              );
+            })()}
             {segs.map((s) => {
               const tr = trMap.get(s.id);
               const startEdit = (side: "source" | "target") => {
@@ -659,15 +663,18 @@ export default function ProjectPage() {
               </div>
 
               <button
-                onClick={() => retranslate.mutate(null)}
-                disabled={retranslate.isPending}
+                onClick={() => {
+                  setRetranslateOpen(false);
+                  express.mutate();
+                }}
+                disabled={express.isPending}
                 className="mt-4 flex items-center gap-2 rounded-xl border border-(--color-border) bg-(--color-panel) px-4 py-3 text-left text-sm hover:bg-(--color-panel2) disabled:opacity-50"
               >
-                <RotateCcw size={16} className="text-(--color-accent)" />
+                <Zap size={16} className="text-(--color-accent)" />
                 <span>
-                  全部重翻
+                  全部重翻（完整流程）
                   <span className="mt-0.5 block text-xs font-normal text-(--color-muted)">
-                    覆盖现有全部译文，重新生成
+                    重新抽取知识库、角色档案、章节剧情卡、台词本，再全本翻译（已编辑知识不会被覆盖）
                   </span>
                 </span>
               </button>
@@ -702,10 +709,7 @@ export default function ProjectPage() {
                       }}
                       className="accent-(--color-accent)"
                     />
-                    第 {c.chapter_no ?? "?"} 章
-                    <span className="truncate text-xs text-(--color-muted)">
-                      {String(c.title ?? "").replace(/^#\s*第\d+回\s*/, "")}
-                    </span>
+                    {chapterLabel(c.chapter_no, c.title)}
                   </label>
                 ))}
               </div>

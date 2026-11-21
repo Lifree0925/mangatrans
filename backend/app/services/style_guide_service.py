@@ -10,7 +10,7 @@ from sqlalchemy.orm import Session
 
 from app.llm.protocol import LLMProvider
 from app.models.document import Scene, SourceSegment
-from app.models.knowledge import KnowledgeItem, SceneContextCard
+from app.models.knowledge import KnowledgeItem
 from app.models.translation import StyleGuide, Translation
 from app.services.context_builder import build_context
 from app.services.importer import sha256
@@ -138,11 +138,7 @@ async def run_trial(
     """试译全流程：挑场景 → 两段式翻译 → 入库（复用正式译文）→ 归纳 Style Guide 冻结。"""
     with db_factory() as db:
         windows = pick_trial_windows(db, source_document_id)
-        # 场景卡与知识
-        cards = {
-            c.scene_id: json.loads(c.card_json)
-            for c in db.scalars(select(SceneContextCard).where(SceneContextCard.project_id == project_id))
-        }
+        # 知识（场景卡已从管线剔除）
         items = [
             {
                 "id": k.id,
@@ -163,13 +159,9 @@ async def run_trial(
     carry: dict | None = None
 
     for wi, window in enumerate(windows):
-        seg_ids = [s["segment_id"] for s in window]
-        with db_factory() as db:
-            scene_id = db.get(SourceSegment, seg_ids[0]).scene_id if seg_ids else None
-        card = cards.get(scene_id)
         context = build_context(
             segments=window,
-            scene_card=card,
+            scene_card=None,
             knowledge=items,
             style_guide=None,
             carry_over=carry,
