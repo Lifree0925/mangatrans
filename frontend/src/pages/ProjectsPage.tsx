@@ -1,6 +1,6 @@
 /** 项目列表：首屏立即渲染，连接状态静默处理（ChatGPT 风格）。 */
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Check, Folder, FolderOpen, Pencil, Plus, Search, Trash2, X } from "lucide-react";
 import { Link } from "react-router-dom";
@@ -21,6 +21,8 @@ export default function ProjectsPage() {
   const projects = useQuery({
     queryKey: ["projects"],
     queryFn: () => api<Project[]>("/projects"),
+    // 本地服务未就绪时每 3 秒自动重试：sidecar 启动/恢复后页面自动回到可用状态
+    refetchInterval: (q) => (q.state.error ? 3000 : false),
   });
 
   const create = useMutation({
@@ -84,6 +86,28 @@ export default function ProjectsPage() {
   // 首次请求仍在进行（未发生过失败）时显示骨架；连接被拒后立即回到正常空状态
   const showSkeleton = projects.isLoading && projects.failureCount === 0;
   const connecting = !projects.data && projects.isFetching;
+
+  // 后端诊断：连接失败时向 Rust 侧查询 sidecar 存活状态与日志（定位根因）
+  const [diag, setDiag] = useState<{ alive: boolean; log_tail: string } | null>(null);
+  useEffect(() => {
+    if (!projects.error || !(window as unknown as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__) {
+      setDiag(null);
+      return;
+    }
+    let cancelled = false;
+    (async () => {
+      try {
+        const { invoke } = await import("@tauri-apps/api/core");
+        const st = await invoke<{ alive: boolean; log_tail: string }>("get_backend_status");
+        if (!cancelled) setDiag(st);
+      } catch {
+        if (!cancelled) setDiag(null);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [projects.error]);
 
   return (
     <div className="flex h-full flex-col">
@@ -217,14 +241,32 @@ export default function ProjectsPage() {
             </p>
           )}
           {projects.error && !connecting && (
-            <div className="mt-4 flex items-center gap-2 rounded-xl border border-(--color-border) bg-(--color-panel) px-4 py-2 text-xs text-(--color-muted)">
-              本地服务未就绪
-              <button
-                onClick={() => projects.refetch()}
-                className="ml-auto rounded-lg border border-(--color-border) bg-(--color-bg) px-2 py-1 hover:bg-(--color-panel2)"
-              >
-                重试
-              </button>
+            <div className="mt-4 rounded-xl border border-(--color-border) bg-(--color-panel) px-4 py-3 text-xs text-(--color-muted)">
+              <div className="flex items-center gap-2">
+                <span>本地服务未就绪（正在自动重试…）</span>
+                <button
+                  onClick={() => projects.refetch()}
+                  className="ml-auto rounded-lg border border-(--color-border) bg-(--color-bg) px-2 py-1 hover:bg-(--color-panel2)"
+                >
+                  立即重试
+                </button>
+              </div>
+              {diag && (
+                <div className="mt-2">
+                  {diag.alive ? (
+                    <p className="text-emerald-600">后端进程运行中，等待服务就绪…</p>
+                  ) : (
+                    <>
+                      <p className="font-medium text-red-600">
+                        本地服务进程已退出（启动失败）。请复制以下日志反馈排查：
+                      </p>
+                      <pre className="mt-1 max-h-40 overflow-auto whitespace-pre-wrap break-all rounded-lg bg-(--color-bg) p-2 font-mono text-[11px] leading-4">
+                        {diag.log_tail || "（日志为空）"}
+                      </pre>
+                    </>
+                  )}
+                </div>
+              )}
             </div>
           )}
         </div>

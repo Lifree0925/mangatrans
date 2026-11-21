@@ -6,7 +6,8 @@
 use std::io::Write;
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use rand::distributions::Alphanumeric;
@@ -22,11 +23,43 @@ struct BackendState {
     token: String,
     data_dir: String,
     child: Mutex<Option<CommandChild>>,
+    /// sidecar 进程是否已退出（Terminated 事件置位）
+    child_exited: Arc<AtomicBool>,
 }
 
 #[tauri::command]
 fn get_backend_config(state: State<'_, BackendState>) -> (u16, String) {
     (state.port, state.token.clone())
+}
+
+/// 后端诊断状态：进程存活、端口、sidecar 日志尾部（前端连接失败时展示，便于用户/技术人员定位）。
+#[derive(Serialize)]
+pub struct BackendStatus {
+    alive: bool,
+    port: u16,
+    log_tail: String,
+}
+
+fn read_log_tail(path: &Path, max_bytes: usize) -> String {
+    let Ok(data) = std::fs::read(path) else {
+        return String::new();
+    };
+    let start = data.len().saturating_sub(max_bytes);
+    String::from_utf8_lossy(&data[start..]).to_string()
+}
+
+#[tauri::command]
+fn get_backend_status(state: State<'_, BackendState>) -> BackendStatus {
+    let alive = !state.child_exited.load(Ordering::SeqCst);
+    let log_tail = read_log_tail(
+        &Path::new(&state.data_dir).join("logs").join("sidecar.log"),
+        4096,
+    );
+    BackendStatus {
+        alive,
+        port: state.port,
+        log_tail,
+    }
 }
 
 #[tauri::command]
@@ -220,6 +253,9 @@ pub fn run() {
             let data_dir = resolve_data_dir(app.handle());
             let log_path = sidecar_log_path(&data_dir);
 
+            let child_exited = Arc::new(AtomicBool::new(false));
+            let exit_flag = child_exited.clone();
+
             let sidecar = app
                 .shell()
                 .sidecar("mangatrans-backend")
@@ -247,10 +283,13 @@ pub fn run() {
                                 CommandEvent::Error(err) => {
                                     append_log(&event_log, &format!("[error] {err}"))
                                 }
-                                CommandEvent::Terminated(payload) => append_log(
-                                    &event_log,
-                                    &format!("[terminated] code={:?}", payload.code),
-                                ),
+                                CommandEvent::Terminated(payload) => {
+                                    exit_flag.store(true, Ordering::SeqCst);
+                                    append_log(
+                                        &event_log,
+                                        &format!("[terminated] code={:?}", payload.code),
+                                    );
+                                }
                                 _ => {}
                             }
                         }
@@ -274,11 +313,13 @@ pub fn run() {
                 token,
                 data_dir: data_dir.to_string_lossy().to_string(),
                 child: Mutex::new(child),
+                child_exited,
             });
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
             get_backend_config,
+            get_backend_status,
             get_storage_info,
             choose_data_dir,
             pick_directory,
