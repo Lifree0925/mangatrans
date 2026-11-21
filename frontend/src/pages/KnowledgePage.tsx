@@ -1,8 +1,8 @@
 /** 知识库：角色档案（性格/说话方式）与章节剧情卡（情节/伏笔）。修改均通过浮层完成。 */
 
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Check, Pencil, Plus, Trash2, X } from "lucide-react";
+import { Check, ChevronLeft, ChevronRight, Pencil, Plus, Trash2, X } from "lucide-react";
 import { api } from "../lib/api";
 import { confirmAction, toast } from "../lib/feedback";
 import type { ChapterStoryline, KnowledgeEntry, Project } from "../lib/types";
@@ -41,10 +41,15 @@ export default function KnowledgePage() {
   const [storyActiveField, setStoryActiveField] = useState<(typeof STORY_FIELDS)[number]["key"]>("summary");
   const [storyFieldText, setStoryFieldText] = useState("");
 
-  // 台词编辑浮层
-  const [editingLine, setEditingLine] = useState<DialogueLineInfo | null>(null);
-  const [lineDraft, setLineDraft] = useState({ speaker_name: "", source_text: "" });
-  const [showLineTranslation, setShowLineTranslation] = useState(false);
+  // 台词编辑：复用项目页编辑模式（铅笔 → 原文/译文 → 浮层）
+  const [editingLine, setEditingLine] = useState<{ line: DialogueLineInfo; side: "source" | "target" } | null>(null);
+  const [lineDraft, setLineDraft] = useState({ speaker_name: "", source_text: "", target_text: "" });
+  const [lineMenuFor, setLineMenuFor] = useState<string | null>(null);
+  const [lineMenuPos, setLineMenuPos] = useState<{ x: number; y: number } | null>(null);
+  // 台词本目录栏（可收起）与滚动高亮
+  const [dialogueCollapsed, setDialogueCollapsed] = useState(false);
+  const [dialogueActiveChapter, setDialogueActiveChapter] = useState<string | null>(null);
+  const dialogueBodyRef = useRef<HTMLDivElement | null>(null);
 
   const projects = useQuery({ queryKey: ["projects"], queryFn: () => api<Project[]>("/projects") });
   // 默认不展示内容：未选择项目时显示"请选择项目"
@@ -141,6 +146,22 @@ export default function KnowledgePage() {
       else toast.success("已保存");
     },
     onError: (err) => toast.error(`保存失败：${String(err)}`),
+  });
+
+  const patchSegmentTranslation = useMutation({
+    mutationFn: ({ segmentId, targetText }: { segmentId: string; targetText: string }) =>
+      api(`/projects/${active}/segments/${segmentId}/translations`, {
+        method: "POST",
+        body: JSON.stringify({ target_text: targetText }),
+      }),
+    onSuccess: () => {
+      toast.success("译文已保存（新增校对版本）");
+      qc.invalidateQueries({ queryKey: ["dialogue-lines", active] });
+      qc.invalidateQueries({ queryKey: ["segments", active] });
+      qc.invalidateQueries({ queryKey: ["latest-translations", active] });
+      setEditingLine(null);
+    },
+    onError: (err) => toast.error(`译文保存失败：${String(err)}`),
   });
 
   const parseStory = (json: string): StoryCard => {
@@ -250,15 +271,6 @@ export default function KnowledgePage() {
         </div>
         {tab === "dialogue" && active && (
           <div className="ml-auto flex items-center gap-2">
-            <label className="flex items-center gap-1 text-xs text-(--color-muted)">
-              <input
-                type="checkbox"
-                checked={showLineTranslation}
-                onChange={(e) => setShowLineTranslation(e.target.checked)}
-                className="accent-(--color-accent)"
-              />
-              显示译文
-            </label>
             <button
               onClick={() => extractDialogue.mutate()}
               disabled={extractDialogue.isPending}
@@ -278,9 +290,9 @@ export default function KnowledgePage() {
         )}
       </div>
 
-      <div className="flex-1 overflow-auto p-4">
+      <div className={tab === "dialogue" && active ? "flex-1 overflow-hidden" : "flex-1 overflow-auto p-4"}>
         {!active ? null : (
-        <div className="mx-auto max-w-5xl">
+        <div className={tab === "dialogue" ? "h-full" : "mx-auto max-w-5xl"}>
           {tab === "profiles" && (
             <>
               {adding && (
@@ -396,43 +408,166 @@ export default function KnowledgePage() {
           )}
 
           {tab === "dialogue" && (
-            <div className="space-y-4">
-              {(dialogueLines.data?.chapters ?? []).map((ch) => (
-                <div key={ch.chapter_id} className="rounded-xl border border-(--color-border) bg-(--color-panel) px-4 py-3">
-                  <p className="text-sm font-semibold">
-                    {ch.chapter_id && ch.chapter_id !== "-" ? `第 ${ch.chapter_id} 章` : "未分章"}
+          <div className="flex h-full">
+            {/* 章节目录（可收起） */}
+            {!dialogueCollapsed && (
+              <div className="w-56 shrink-0 overflow-auto border-r-0 py-3">
+                <p className="mb-1 px-3 text-xs font-medium text-(--color-muted)">章节目录</p>
+                {(dialogueLines.data?.chapters ?? []).map((ch) => (
+                  <button
+                    key={ch.chapter_id}
+                    onClick={() => {
+                      const el = dialogueBodyRef.current?.querySelector<HTMLElement>(`[data-dlg-chapter="${ch.chapter_id}"]`);
+                      el?.scrollIntoView({ behavior: "smooth", block: "start" });
+                    }}
+                    className={`block w-full truncate rounded-lg px-3 py-1.5 text-left text-sm transition-colors hover:text-(--color-accent) ${
+                      dialogueActiveChapter === ch.chapter_id
+                        ? "font-medium text-(--color-accent)"
+                        : "text-(--color-text)"
+                    }`}
+                    title={ch.chapter_title ? String(ch.chapter_title).replace(/^#\s*第\d+回\s*/, "") : `第 ${ch.chapter_no ?? "?"} 章`}
+                  >
+                    第 {ch.chapter_no ?? "?"} 章
+                    <span className="ml-1.5 text-xs text-(--color-muted)">
+                      {ch.chapter_title ? String(ch.chapter_title).replace(/^#\s*第\d+回\s*/, "").slice(0, 12) : ""}
+                    </span>
+                  </button>
+                ))}
+                {(dialogueLines.data?.chapters ?? []).length === 0 && (
+                  <p className="px-3 py-4 text-xs text-(--color-muted)">
+                    暂无台词本。点击右上角「抽取台词本」，系统会按章节 → 场景 → 角色抽出纯对白流水。
                   </p>
+                )}
+              </div>
+            )}
+            {/* 收展箭头：贴线、无圆框 */}
+            <div
+              className={`relative w-4 shrink-0 cursor-pointer ${dialogueCollapsed ? "" : "border-r border-(--color-border)"}`}
+              onClick={() => setDialogueCollapsed((v) => !v)}
+              title={dialogueCollapsed ? "展开章节目录" : "收起章节目录"}
+            >
+              <span
+                className={`absolute top-1/2 -translate-y-1/2 text-(--color-muted) hover:text-(--color-accent) ${
+                  dialogueCollapsed ? "left-0.5" : "right-0"
+                }`}
+              >
+                {dialogueCollapsed ? <ChevronRight size={15} /> : <ChevronLeft size={15} />}
+              </span>
+            </div>
+            {/* 内容区：章节 → 场景 → 角色纯对白（上下中英对照，编辑复用项目页模式） */}
+            <div
+              ref={dialogueBodyRef}
+              onScroll={() => {
+                const container = dialogueBodyRef.current;
+                if (!container) return;
+                const top = container.getBoundingClientRect().top;
+                let current: string | null = null;
+                for (const el of container.querySelectorAll<HTMLElement>("[data-dlg-chapter]")) {
+                  if (el.getBoundingClientRect().top >= top - 4) {
+                    current = el.dataset.dlgChapter ?? null;
+                    break;
+                  }
+                }
+                setDialogueActiveChapter(current);
+              }}
+              className="flex-1 overflow-auto p-4 font-mono text-[13px] leading-6"
+            >
+              {(dialogueLines.data?.chapters ?? []).map((ch) => (
+                <div key={ch.chapter_id} data-dlg-chapter={ch.chapter_id} className="mx-auto max-w-4xl">
+                  <h3 className="mb-1 mt-2 text-base font-bold">
+                    第 {ch.chapter_no ?? "?"} 章
+                    {ch.chapter_title && (
+                      <span className="ml-2 text-sm font-normal text-(--color-muted)">
+                        {String(ch.chapter_title).replace(/^#\s*第\d+回\s*/, "")}
+                      </span>
+                    )}
+                  </h3>
                   {ch.scenes.map((sc) => (
-                    <div key={sc.scene_id} className="mt-2">
-                      {sc.scene_id && sc.scene_id !== "-" && (
-                        <p className="mb-1 text-xs text-(--color-muted)">场景 {sc.scene_id}</p>
+                    <div key={sc.scene_id} className="mb-3">
+                      {sc.scene_heading && (
+                        <p className="mb-1 mt-3 text-xs text-(--color-muted)">
+                          {String(sc.scene_heading).replace(/^#\s*/, "")}
+                        </p>
                       )}
-                      <div className="space-y-1">
-                        {sc.lines.map((ln) => (
-                          <div key={ln.id} className="group flex items-start gap-2 rounded px-1.5 py-0.5 hover:bg-(--color-panel2)">
-                            <span className="w-24 shrink-0 truncate text-right font-medium text-(--color-accent)">
+                      {sc.lines.map((ln) => (
+                        <div
+                          key={ln.id}
+                          className="group relative border-b border-(--color-border) py-2 pr-8"
+                          onMouseLeave={() => {
+                            if (lineMenuFor === ln.id) {
+                              setLineMenuFor(null);
+                              setLineMenuPos(null);
+                            }
+                          }}
+                        >
+                          <button
+                            onClick={(e) => {
+                              if (lineMenuFor === ln.id) {
+                                setLineMenuFor(null);
+                                setLineMenuPos(null);
+                              } else {
+                                const rect = (e.currentTarget as HTMLButtonElement).getBoundingClientRect();
+                                const menuW = 50;
+                                const menuH = 76;
+                                const x = rect.right + 6 + menuW > window.innerWidth
+                                  ? rect.left - menuW - 6
+                                  : rect.right + 6;
+                                const y = rect.top + menuH > window.innerHeight
+                                  ? Math.max(8, rect.bottom - menuH)
+                                  : rect.top;
+                                setLineMenuFor(ln.id);
+                                setLineMenuPos({ x: Math.max(8, x), y });
+                              }
+                            }}
+                            title="编辑本行"
+                            className="absolute right-1 top-0.5 hidden p-0.5 text-(--color-muted) hover:text-(--color-accent) group-hover:block"
+                          >
+                            <Pencil size={14} />
+                          </button>
+                          {lineMenuFor === ln.id && lineMenuPos && (
+                            <div
+                              className="fixed z-[80] flex flex-col overflow-hidden rounded-lg border border-(--color-border) bg-(--color-bg) py-1 shadow-xl"
+                              style={{ left: lineMenuPos.x, top: lineMenuPos.y }}
+                            >
+                              <button
+                                onClick={() => {
+                                  setLineMenuFor(null);
+                                  setEditingLine({ line: ln, side: "source" });
+                                  setLineDraft({ speaker_name: ln.speaker_name, source_text: ln.source_text, target_text: "" });
+                                }}
+                                className="whitespace-nowrap px-3 py-1.5 text-left text-xs hover:bg-(--color-panel)"
+                              >
+                                原文
+                              </button>
+                              <button
+                                onClick={() => {
+                                  setLineMenuFor(null);
+                                  setEditingLine({ line: ln, side: "target" });
+                                  setLineDraft({ speaker_name: ln.speaker_name, source_text: ln.source_text, target_text: ln.segment_translation ?? "" });
+                                }}
+                                className="whitespace-nowrap px-3 py-1.5 text-left text-xs hover:bg-(--color-panel)"
+                              >
+                                译文
+                              </button>
+                            </div>
+                          )}
+                          {/* 原文行 */}
+                          <p className="whitespace-pre-wrap transition-colors group-hover:text-(--color-accent)">
+                            <span className="mr-2 font-medium text-(--color-accent)">
                               {ln.speaker_name}
                               {ln.speaker_alias && ln.speaker_alias !== ln.speaker_name && (
-                                <span className="ml-1 text-[11px] text-(--color-muted)">({ln.speaker_alias})</span>
+                                <span className="ml-1 font-normal text-(--color-muted)">({ln.speaker_alias})</span>
                               )}
+                              ：
                             </span>
-                            <span className="flex-1 text-sm leading-6">{ln.source_text}</span>
-                            {showLineTranslation && ln.segment_translation && (
-                              <span className="max-w-[45%] whitespace-pre-wrap text-xs leading-5 text-(--color-muted)">{ln.segment_translation}</span>
-                            )}
-                            <button
-                              onClick={() => {
-                                setEditingLine(ln);
-                                setLineDraft({ speaker_name: ln.speaker_name, source_text: ln.source_text });
-                              }}
-                              className="hidden shrink-0 rounded p-1 text-(--color-muted) hover:text-(--color-accent) group-hover:block"
-                              title="编辑台词"
-                            >
-                              <Pencil size={13} />
-                            </button>
-                          </div>
-                        ))}
-                      </div>
+                            {ln.source_text}
+                          </p>
+                          {/* 译文行（片段译文聚合） */}
+                          <p className="mt-0.5 whitespace-pre-wrap pl-4 text-(--color-muted) transition-colors group-hover:text-(--color-accent)">
+                            {ln.segment_translation ?? "—"}
+                          </p>
+                        </div>
+                      ))}
                     </div>
                   ))}
                 </div>
@@ -443,6 +578,7 @@ export default function KnowledgePage() {
                 </p>
               )}
             </div>
+          </div>
           )}
         </div>
         )}
@@ -538,40 +674,73 @@ export default function KnowledgePage() {
         </div>
       )}
 
-      {/* 台词编辑浮层 */}
+      {/* 台词编辑浮层（复用项目页模式：原文 / 译文） */}
       {editingLine && (
         <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/30 p-6" onClick={() => setEditingLine(null)}>
-          <div className="w-full max-w-lg rounded-2xl bg-(--color-bg) p-5 shadow-2xl" onClick={(e) => e.stopPropagation()}>
+          <div className="w-full max-w-2xl rounded-2xl bg-(--color-bg) p-5 shadow-2xl" onClick={(e) => e.stopPropagation()}>
             <div className="flex items-center justify-between">
-              <h2 className="text-base font-semibold">编辑台词</h2>
+              <h2 className="text-base font-semibold">
+                编辑{editingLine.side === "source" ? "原文" : "译文"}
+                <span className="ml-2 font-sans text-xs font-normal text-(--color-muted)">
+                  {editingLine.line.speaker_name} · 第 {editingLine.line.chapter_no ?? "?"} 章
+                </span>
+              </h2>
               <button onClick={() => setEditingLine(null)} className="rounded-lg p-1.5 text-(--color-muted) hover:bg-(--color-panel2)"><X size={16} /></button>
             </div>
-            <p className="mt-3 text-xs text-(--color-muted)">修改台词文本会同步回写片段原文，该段译文将标记为待重译。</p>
-            <div className="mt-3 space-y-3">
-              <label className="block text-xs text-(--color-muted)">
-                说话人
-                <input value={lineDraft.speaker_name} onChange={(e) => setLineDraft((d) => ({ ...d, speaker_name: e.target.value }))}
-                  className="mt-1 block w-full rounded-lg border border-(--color-border) bg-(--color-bg) px-3 py-1.5 text-sm outline-none focus:border-(--color-accent)" />
-              </label>
-              <label className="block text-xs text-(--color-muted)">
-                台词文本
-                <textarea value={lineDraft.source_text} onChange={(e) => setLineDraft((d) => ({ ...d, source_text: e.target.value }))} rows={4}
-                  className="mt-1 block w-full resize-y rounded-lg border border-(--color-border) bg-(--color-bg) px-3 py-1.5 text-sm outline-none focus:border-(--color-accent)" />
-              </label>
-            </div>
-            <div className="mt-4 flex justify-end gap-2">
-              <button onClick={() => setEditingLine(null)} className="rounded-lg border border-(--color-border) px-4 py-1.5 text-sm hover:bg-(--color-panel2)">取消</button>
-              <button
-                onClick={() => patchDialogueLine.mutate({
-                  id: editingLine.id,
-                  body: { speaker_name: lineDraft.speaker_name, source_text: lineDraft.source_text },
-                })}
-                disabled={patchDialogueLine.isPending}
-                className="rounded-lg bg-(--color-accent) px-4 py-1.5 text-sm text-white hover:bg-(--color-accent-hover) disabled:opacity-50"
-              >
-                {patchDialogueLine.isPending ? "保存中…" : "保存"}
-              </button>
-            </div>
+            {editingLine.side === "source" ? (
+              <>
+                <p className="mt-3 text-xs text-(--color-muted)">修改台词文本会同步回写片段原文，该段译文将标记为待重译。</p>
+                <div className="mt-3 space-y-3">
+                  <label className="block text-xs text-(--color-muted)">
+                    说话人
+                    <input value={lineDraft.speaker_name} onChange={(e) => setLineDraft((d) => ({ ...d, speaker_name: e.target.value }))}
+                      className="mt-1 block w-full rounded-lg border border-(--color-border) bg-(--color-bg) px-3 py-1.5 text-sm outline-none focus:border-(--color-accent)" />
+                  </label>
+                  <label className="block text-xs text-(--color-muted)">
+                    台词文本
+                    <textarea value={lineDraft.source_text} onChange={(e) => setLineDraft((d) => ({ ...d, source_text: e.target.value }))} rows={4}
+                      className="mt-1 block w-full resize-y rounded-lg border border-(--color-border) bg-(--color-bg) px-3 py-1.5 text-sm outline-none focus:border-(--color-accent)" />
+                  </label>
+                </div>
+                <div className="mt-4 flex justify-end gap-2">
+                  <button onClick={() => setEditingLine(null)} className="rounded-lg border border-(--color-border) px-4 py-1.5 text-sm hover:bg-(--color-panel2)">取消</button>
+                  <button
+                    onClick={() => patchDialogueLine.mutate({
+                      id: editingLine.line.id,
+                      body: { speaker_name: lineDraft.speaker_name, source_text: lineDraft.source_text },
+                    })}
+                    disabled={patchDialogueLine.isPending}
+                    className="rounded-lg bg-(--color-accent) px-4 py-1.5 text-sm text-white hover:bg-(--color-accent-hover) disabled:opacity-50"
+                  >
+                    {patchDialogueLine.isPending ? "保存中…" : "保存"}
+                  </button>
+                </div>
+              </>
+            ) : (
+              <>
+                <p className="mt-3 text-xs text-(--color-muted)">
+                  本行原文：{editingLine.line.source_text}
+                  <br />
+                  修改的是该行所属片段的整段译文，保存后作为新校对版本，不会被重译覆盖。
+                </p>
+                <textarea value={lineDraft.target_text} onChange={(e) => setLineDraft((d) => ({ ...d, target_text: e.target.value }))} rows={8}
+                  className="mt-3 block w-full resize-y rounded-lg border border-(--color-border) bg-(--color-bg) px-3 py-1.5 font-mono text-[13px] leading-6 outline-none focus:border-(--color-accent)" />
+                <div className="mt-4 flex justify-end gap-2">
+                  <button onClick={() => setEditingLine(null)} className="rounded-lg border border-(--color-border) px-4 py-1.5 text-sm hover:bg-(--color-panel2)">取消</button>
+                  <button
+                    onClick={() => {
+                      if (editingLine.line.segment_id) {
+                        patchSegmentTranslation.mutate({ segmentId: editingLine.line.segment_id, targetText: lineDraft.target_text });
+                      }
+                    }}
+                    disabled={patchSegmentTranslation.isPending || !editingLine.line.segment_id}
+                    className="rounded-lg bg-(--color-accent) px-4 py-1.5 text-sm text-white hover:bg-(--color-accent-hover) disabled:opacity-50"
+                  >
+                    {patchSegmentTranslation.isPending ? "保存中…" : "保存"}
+                  </button>
+                </div>
+              </>
+            )}
           </div>
         </div>
       )}

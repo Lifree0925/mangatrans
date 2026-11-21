@@ -166,7 +166,7 @@ async def extract_dialogue_lines(
             if not _is_verbatim(seg.source_text, text):
                 discarded += 1
                 continue
-            speaker = (item.get("speaker_name") or "").strip()[:64] or "未知"
+            speaker = (item.get("speaker_name") or item.get("speaker") or "").strip()[:64] or "未知"
             # 归一化检查：speaker 若恰是知识库别名，替换为 canonical
             for c in characters:
                 if speaker in c["aliases"]:
@@ -225,6 +225,8 @@ async def extract_dialogue_lines(
 
 def list_dialogue_lines(db, project_id: str) -> list[dict]:
     """按章节→场景→行号排序返回台词行（含所属片段当前译文，供聚合展示）。"""
+    from app.models.document import Chapter, Scene
+
     rows = list(
         db.scalars(
             select(DialogueLine)
@@ -234,6 +236,25 @@ def list_dialogue_lines(db, project_id: str) -> list[dict]:
             )
         )
     )
+    chapter_meta: dict[str, tuple[int | None, str | None]] = {}
+    scene_meta: dict[str, tuple[int | None, str | None]] = {}
+    if rows:
+        ch_rows = list(
+            db.scalars(
+                select(Chapter).where(
+                    Chapter.id.in_([r.chapter_id for r in rows if r.chapter_id])
+                )
+            )
+        )
+        chapter_meta = {c.id: (c.chapter_no, c.title) for c in ch_rows}
+        sc_rows = list(
+            db.scalars(
+                select(Scene).where(
+                    Scene.id.in_([r.scene_id for r in rows if r.scene_id])
+                )
+            )
+        )
+        scene_meta = {s.id: (s.scene_no, s.heading) for s in sc_rows}
     if not rows:
         return []
     seg_ids = [r.segment_id for r in rows if r.segment_id]
@@ -252,19 +273,31 @@ def list_dialogue_lines(db, project_id: str) -> list[dict]:
     for t in trans_rows:
         latest.setdefault(t.segment_id, t)
     out = []
+    # 同片段拆出的多句台词：整段译文只在片段首行展示，避免重复噪音
+    shown_seg: set[str] = set()
     for r in rows:
         t = latest.get(r.segment_id)
+        ch_no, ch_title = chapter_meta.get(r.chapter_id, (None, None))
+        sc_no, sc_heading = scene_meta.get(r.scene_id, (None, None))
+        t = latest.get(r.segment_id)
+        first_of_seg = r.segment_id and r.segment_id not in shown_seg
+        if first_of_seg:
+            shown_seg.add(r.segment_id)
         out.append(
             {
                 "id": r.id,
                 "chapter_id": r.chapter_id,
+                "chapter_no": ch_no,
+                "chapter_title": ch_title,
                 "scene_id": r.scene_id,
+                "scene_no": sc_no,
+                "scene_heading": sc_heading,
                 "segment_id": r.segment_id,
                 "speaker_name": r.speaker_name,
                 "speaker_alias": r.speaker_alias,
                 "line_no": r.line_no,
                 "source_text": r.source_text,
-                "segment_translation": t.target_text if t else None,
+                "segment_translation": t.target_text if (t and first_of_seg) else None,
             }
         )
     return out

@@ -49,15 +49,36 @@ def list_dialogue(project_id: str, db: Session = Depends(get_db)) -> dict:
     # 聚合结构：章节 → 场景 → 行
     chapters: dict[str, dict] = {}
     for ln in lines:
-        ch = chapters.setdefault(ln["chapter_id"] or "-", {"chapter_id": ln["chapter_id"], "scenes": {}})
+        ch = chapters.setdefault(
+            ln["chapter_id"] or "-",
+            {
+                "chapter_id": ln["chapter_id"],
+                "chapter_no": ln.get("chapter_no"),
+                "chapter_title": ln.get("chapter_title"),
+                "scenes": {},
+            },
+        )
         sc = ch["scenes"].setdefault(
             ln["scene_id"] or "-",
-            {"scene_id": ln["scene_id"], "lines": []},
+            {
+                "scene_id": ln["scene_id"],
+                "scene_no": ln.get("scene_no"),
+                "scene_heading": ln.get("scene_heading"),
+                "lines": [],
+            },
         )
         sc["lines"].append(ln)
     return {
         "count": len(lines),
-        "chapters": [{"chapter_id": k, "scenes": list(v["scenes"].values())} for k, v in chapters.items()],
+        "chapters": [
+            {
+                "chapter_id": v["chapter_id"],
+                "chapter_no": v.get("chapter_no"),
+                "chapter_title": v.get("chapter_title"),
+                "scenes": list(v["scenes"].values()),
+            }
+            for k, v in chapters.items()
+        ],
     }
 
 
