@@ -26,7 +26,12 @@ body {
 
 /* 细滚动条，接近 ChatGPT */
 ::-webkit-scrollbar { width: 8px; height: 8px; }
-::-webkit-scrollbar-thumb { background: #d9d9d9; border-radius: 8px; }
+::-webkit-scrollbar-thumb {
+  background: #d9d9d9;
+  border-radius: 8px;
+  /* 滑块大小统一：占总长的 1/7，便于发现与拖动 */
+  min-height: calc(100% / 7);
+}
 ::-webkit-scrollbar-track { background: transparent; }
 
 /* 译文流式渐显：新完成的窗口淡入，翻译中光标闪烁 */
