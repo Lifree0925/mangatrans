@@ -83,8 +83,6 @@ export default function ProjectsPage() {
     if (ok) remove.mutate(p.id);
   };
 
-  // 首次请求仍在进行（未发生过失败）时显示骨架；连接被拒后立即回到正常空状态
-  const showSkeleton = projects.isLoading && projects.failureCount === 0;
   const connecting = !projects.data && projects.isFetching;
 
   // 后端诊断：连接失败时向 Rust 侧查询 sidecar 存活状态与日志（定位根因）
@@ -143,22 +141,18 @@ export default function ProjectsPage() {
 
       <div className="flex-1 overflow-auto p-6">
         <div className="mx-auto max-w-3xl">
-          {showSkeleton && (
-            <div className="space-y-2">
-              {[0, 1, 2].map((i) => (
-                <div key={i} className="h-16 animate-pulse rounded-xl bg-(--color-panel)" />
-              ))}
-            </div>
-          )}
-
           <div className="space-y-2">
             {(() => {
               const q = search.trim().toLowerCase();
               const filtered = q
                 ? (projects.data ?? []).filter((p) => p.name.toLowerCase().includes(q))
                 : projects.data;
-              if (filtered && filtered.length === 0) {
-                return <p className="py-8 text-center text-sm text-(--color-muted)">未找到匹配的项目</p>;
+              if (!filtered || filtered.length === 0) {
+                return (
+                  <p className="py-8 text-center text-sm text-(--color-muted)">
+                    {q ? "未找到匹配的项目" : "暂无文件"}
+                  </p>
+                );
               }
               return filtered?.map((p) => (
               <div
