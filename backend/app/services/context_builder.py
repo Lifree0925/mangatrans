@@ -113,15 +113,30 @@ def build_context(
             for c in chars
         ]
         blocks.append(_json_block("APPROVED CHARACTERS", char_rows))
-        # 别名强制统一：原文出现别名时也必须译成正式名
-        alias_rules = [
-            f"\"{alias}\" must be translated as \"{c['canonical_key']}\" (i.e. \"{c.get('data', {}).get('translation', '') or c['canonical_key']}\")"
+        # 称呼对应表：原文用哪个称呼就译哪个英文形式，保持人物指代正确（不强改称呼）
+        alias_map = [
+            {
+                "character": c["canonical_key"],
+                "formal_name": c.get("data", {}).get("translation", "") or c["canonical_key"],
+                "other_forms": [
+                    {
+                        "source_form": alias,
+                        "note": "音译/意译此称呼即可，需与该人物其它称呼保持指代一致",
+                    }
+                    for alias in c.get("aliases", []) or []
+                    if alias
+                ],
+            }
             for c in chars
-            for alias in c.get("aliases", []) or []
-            if alias
+            if (c.get("aliases") or []) or c.get("data", {}).get("translation")
         ]
-        if alias_rules:
-            blocks.append(_json_block("ALIAS RULES (enforce consistent names)", alias_rules))
+        if alias_map:
+            blocks.append(
+                _json_block(
+                    "NAME-FORM MAP (translate each form as used in the source; keep the same person's forms referentially consistent)",
+                    alias_map,
+                )
+            )
         report["matched_characters"] = [c["canonical_key"] for c in chars]
         snapshot["knowledge_ids"] += [c["id"] for c in chars]
         profiles = [
