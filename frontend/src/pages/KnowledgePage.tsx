@@ -724,12 +724,12 @@ export default function KnowledgePage() {
       {/* 角色档案编辑浮层 */}
       {editingChar && (
         <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/30 p-6" onClick={() => setEditingChar(null)}>
-          <div className="w-full max-w-lg rounded-2xl bg-(--color-bg) p-5 shadow-2xl" onClick={(e) => e.stopPropagation()}>
-            <div className="flex items-center justify-between">
+          <div className="flex h-[520px] w-full max-w-xl flex-col rounded-2xl bg-(--color-bg) p-5 shadow-2xl" onClick={(e) => e.stopPropagation()}>
+            <div className="flex shrink-0 items-center justify-between">
               <h2 className="text-base font-semibold">编辑角色档案 · {editingChar.canonical_key}</h2>
               <button onClick={() => setEditingChar(null)} className="rounded-lg p-1.5 text-(--color-muted) hover:bg-(--color-panel2)"><X size={16} /></button>
             </div>
-            <div className="mt-4 space-y-3">
+            <div className="mt-4 flex-1 space-y-3 overflow-auto pr-1">
               <label className="block text-xs text-(--color-muted)">
                 译名
                 <input value={charDraft.translation} onChange={(e) => setCharDraft((d) => ({ ...d, translation: e.target.value }))}
@@ -761,7 +761,7 @@ export default function KnowledgePage() {
                   className="mt-1 block w-full rounded-lg border border-(--color-border) bg-(--color-bg) px-3 py-1.5 text-sm outline-none focus:border-(--color-accent)" />
               </label>
             </div>
-            <div className="mt-5 flex justify-end gap-2">
+            <div className="mt-4 flex shrink-0 justify-end gap-2">
               <button onClick={() => setEditingChar(null)} className="rounded-lg border border-(--color-border) bg-(--color-bg) px-4 py-1.5 text-sm hover:bg-(--color-panel2)">取消</button>
               <button onClick={saveCharEdit} disabled={patchCharacter.isPending}
                 className="rounded-lg bg-(--color-accent) px-4 py-1.5 text-sm text-white hover:bg-(--color-accent-hover) disabled:opacity-50">
@@ -775,7 +775,7 @@ export default function KnowledgePage() {
       {/* 章节剧情卡编辑浮层 */}
       {editingStory && (
         <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/30 p-6" onClick={() => setEditingStory(null)}>
-          <div className="flex max-h-[85vh] w-full max-w-2xl flex-col rounded-2xl bg-(--color-bg) p-5 shadow-2xl" onClick={(e) => e.stopPropagation()}>
+          <div className="flex h-[520px] w-full max-w-xl flex-col rounded-2xl bg-(--color-bg) p-5 shadow-2xl" onClick={(e) => e.stopPropagation()}>
             <div className="flex items-center justify-between">
               <h2 className="text-base font-semibold">
                 编辑剧情卡 · 第 {editingStory.chapter_no} 章 {editingStory.chapter_title ? String(editingStory.chapter_title).replace(/^#\s*第\d+回\s*/, "") : ""}
@@ -796,7 +796,7 @@ export default function KnowledgePage() {
             <textarea
               value={storyFieldText}
               onChange={(e) => setStoryFieldText(e.target.value)}
-              rows={storyActiveField === "summary" ? 4 : 10}
+              rows={12}
               placeholder={storyActiveField === "summary" ? "本章内容摘要" : "每行一条"}
               className="flex-1 w-full resize-y rounded-lg border border-(--color-border) bg-(--color-bg) px-3 py-2 text-sm leading-6 outline-none focus:border-(--color-accent)"
             />
@@ -814,7 +814,7 @@ export default function KnowledgePage() {
       {/* 台词编辑浮层（复用项目页模式：原文 / 译文） */}
       {editingLine && (
         <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/30 p-6" onClick={() => setEditingLine(null)}>
-          <div className="w-full max-w-2xl rounded-2xl bg-(--color-bg) p-5 shadow-2xl" onClick={(e) => e.stopPropagation()}>
+          <div className="flex h-[520px] w-full max-w-xl flex-col rounded-2xl bg-(--color-bg) p-5 shadow-2xl" onClick={(e) => e.stopPropagation()}>
             <div className="flex items-center justify-between">
               <h2 className="text-base font-semibold">
                 编辑{editingLine.side === "source" ? "原文" : "译文"}
@@ -835,8 +835,8 @@ export default function KnowledgePage() {
                   </label>
                   <label className="block text-xs text-(--color-muted)">
                     台词文本
-                    <textarea value={lineDraft.source_text} onChange={(e) => setLineDraft((d) => ({ ...d, source_text: e.target.value }))} rows={4}
-                      className="mt-1 block w-full resize-y rounded-lg border border-(--color-border) bg-(--color-bg) px-3 py-1.5 text-sm outline-none focus:border-(--color-accent)" />
+                    <textarea value={lineDraft.source_text} onChange={(e) => setLineDraft((d) => ({ ...d, source_text: e.target.value }))}
+                      className="mt-1 block h-[300px] w-full resize-none rounded-lg border border-(--color-border) bg-(--color-bg) px-3 py-1.5 text-sm outline-none focus:border-(--color-accent)" />
                   </label>
                 </div>
                 <div className="mt-4 flex justify-end gap-2">
@@ -860,8 +860,8 @@ export default function KnowledgePage() {
                   <br />
                   修改的是该行所属片段的整段译文，保存后作为新校对版本，不会被重译覆盖。
                 </p>
-                <textarea value={lineDraft.target_text} onChange={(e) => setLineDraft((d) => ({ ...d, target_text: e.target.value }))} rows={8}
-                  className="mt-3 block w-full resize-y rounded-lg border border-(--color-border) bg-(--color-bg) px-3 py-1.5 font-mono text-[13px] leading-6 outline-none focus:border-(--color-accent)" />
+                <textarea value={lineDraft.target_text} onChange={(e) => setLineDraft((d) => ({ ...d, target_text: e.target.value }))}
+                  className="mt-3 block h-[300px] w-full resize-none rounded-lg border border-(--color-border) bg-(--color-bg) px-3 py-1.5 font-mono text-[13px] leading-6 outline-none focus:border-(--color-accent)" />
                 <div className="mt-4 flex justify-end gap-2">
                   <button onClick={() => setEditingLine(null)} className="rounded-lg border border-(--color-border) px-4 py-1.5 text-sm hover:bg-(--color-panel2)">取消</button>
                   <button
