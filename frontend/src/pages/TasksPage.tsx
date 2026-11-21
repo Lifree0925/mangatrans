@@ -21,6 +21,7 @@ const taskTypeLabel: Record<string, string> = {
   translate: "全文翻译",
   trial: "试译",
   knowledge: "知识提取",
+  dialogue: "台词本抽取",
   scene_cards: "场景卡",
   qa: "质量检查",
   analyze: "分析",
@@ -37,6 +38,9 @@ const statusLabel: Record<string, string> = {
 /** Express 流水线固定步骤（顺序展示）。 */
 const EXPRESS_STEPS = [
   { key: "knowledge", label: "知识提取（人物/术语）" },
+  { key: "profiles", label: "角色档案" },
+  { key: "storylines", label: "章节剧情卡" },
+  { key: "dialogue", label: "台词本抽取" },
   { key: "scene_cards", label: "场景卡生成" },
   { key: "trial", label: "试译与风格基线" },
   { key: "translation", label: "全文翻译" },
