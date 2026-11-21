@@ -18,7 +18,7 @@ from app.services import (
     style_guide_service,
 )
 from app.services.importer import sha256
-from app.services.translation import PROMPT_VERSION
+from app.services.translation import PROMPT_VERSION, repair_window, validate_window
 from app.services.translation_batch import (
     _persist_window_translations,
     translate_window_draft_direct,
@@ -165,12 +165,26 @@ async def run_express(db_factory, project_id: str, source_document_id: str, mode
         report["steps"]["translation"]["draft_carry"] = draft_carry_map
         return results
 
+    async def _lock_terms_once():
+        """Draft 全量完成后为无译名术语统一定名，Polish 强制使用（跨窗口一致性）。"""
+        if report["steps"].get("terms_locked"):
+            return
+        from app.services.term_lock import lock_untranslated_terms
+
+        result = await lock_untranslated_terms(
+            db_factory, project_id, source_document_id, provider, model
+        )
+        report["steps"]["terms_locked"] = {"locked": result.get("locked", 0)}
+        _sync_progress(db_factory, task_id, report["steps"], "translation")
+
     # Draft 立即启动，与四个准备步骤并行（关键路径 = 知识 → Draft → Polish）
     draft_task = _aio.create_task(_run_draft())
     await _aio.gather(
         _prep_profiles(), _prep_storylines(), _prep_dialogue(), _prep_trial()
     )
     draft_results = await draft_task
+    # 术语锁定：Draft 全部完成 → 统一无译名术语的标准译名 → Polish 强制使用
+    await _lock_terms_once()
 
     # 阶段 2：Polish 并发（carry-over 取前一窗口 Draft 的 carry）
     report["steps"]["translation"] = {
@@ -200,12 +214,39 @@ async def run_express(db_factory, project_id: str, source_document_id: str, mode
     )
 
     # 顺序持久化与进度上报（单协程写，无竞争）
+    failed_windows = 0
     for idx, (window, dr, pr) in enumerate(zip(todo, draft_results, polished_results)):
         if pr is None:
             break  # 暂停：保留进度，resume 续跑
         draft, context = dr[0], dr[2]
+        polished = pr[0]
+        # 段完整性校验：缺行/错位是历史漏译与标签错位的根因，拒绝静默落库
+        seg_dicts = [
+            {"segment_id": s.id, "source_text": s.source_text} for s in window
+        ]
+        errors = validate_window(seg_dicts, polished)
+        if errors:
+            issues = [
+                {"issue_type": "line_shift", "explanation": e, "suggested_fix": "补齐缺失行，逐行对应原文"}
+                for e in errors
+            ]
+            try:
+                fixed, _carry_fixed = await repair_window(
+                    provider=provider, model=model, window_id=f"FIX-{window[0].segment_no}",
+                    context=context, draft=draft, issues=issues,
+                )
+                if not validate_window(seg_dicts, fixed):
+                    polished = fixed
+                    errors = []
+            except Exception:  # noqa: BLE001 修复失败保持原错误，走失败计数
+                pass
+        if errors:
+            failed_windows += 1
+            report["steps"]["translation"]["failed_windows"] = failed_windows
+            _sync_progress(db_factory, task_id, report["steps"], "translation")
+            continue  # 不落库错误窗口；任务完成前可重试或按章节重译
         with db_factory() as db:
-            _persist_window_translations(db, window, draft, pr[0], context, model)
+            _persist_window_translations(db, window, draft, polished, context, model)
             db.commit()
         done += 1
         report["steps"]["translation"] = {

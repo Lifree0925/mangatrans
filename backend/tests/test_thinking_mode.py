@@ -17,9 +17,9 @@ def _setup(client, wait_task):
                               model_name="m", credential_ref="r", is_default=True, is_verified=True))
         db.commit()
     pid = client.post("/api/v1/projects", json={"name": "thinking 测试"}).json()["id"]
-    body = "\n".join(
+    body = "\n\n".join(
         [f"林风：第{i}句话，我们要坚持到底。" for i in range(40)]
-        + ["夜色深沉。"] * 20
+        + [f"夜色深沉（{i}）。" for i in range(20)]
     )
     client.post(f"/api/v1/projects/{pid}/documents/import",
                 files={"file": ("s.txt", body.encode(), "text/plain")})

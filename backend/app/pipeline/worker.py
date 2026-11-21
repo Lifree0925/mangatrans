@@ -184,6 +184,55 @@ def _apply_polish_progress(factory, task_id: str, res: dict) -> None:
         db.commit()
 
 
+async def _maybe_lock_terms(factory) -> int:
+    """batch 流程术语锁定：Draft 清零且 Polish 待执行时，为无译名术语统一定名。"""
+    from app.llm.registry import get_provider
+    from app.services.term_lock import lock_untranslated_terms
+
+    with factory() as db:
+        tid = db.scalar(
+            select(TaskItem.task_id)
+            .where(TaskItem.phase == "polish", TaskItem.status == "pending")
+            .limit(1)
+        )
+        if tid is None:
+            return 0
+        task = db.get(Task, tid)
+        if task is None:
+            return 0
+        progress = json.loads(task.progress_json or "{}")
+        if progress.get("terms_locked"):
+            return 0
+        draft_left = db.scalar(
+            select(func.count())
+            .select_from(TaskItem)
+            .where(
+                TaskItem.task_id == tid,
+                TaskItem.phase == "draft",
+                TaskItem.status.in_(["pending", "running"]),
+            )
+        )
+        if draft_left:
+            return 0
+        payload = json.loads(task.config_snapshot_json or "{}")
+        source_document_id = payload.get("source_document_id")
+        project_id = task.project_id
+        model = payload.get("model", "fake-model")
+    if not source_document_id:
+        return 0
+    result = await lock_untranslated_terms(
+        factory, project_id, source_document_id, get_provider(), model
+    )
+    with factory() as db:
+        task = db.get(Task, tid)
+        if task is not None:
+            p = json.loads(task.progress_json or "{}")
+            p["terms_locked"] = {"locked": result.get("locked", 0)}
+            task.progress_json = json.dumps(p, ensure_ascii=False)
+            db.commit()
+    return int(result.get("locked", 0))
+
+
 def _mark_task_completed(factory, task_id: str) -> None:
     """全部窗口 polished 成功且无 draft 遗留 → 任务 completed。"""
     with factory() as db:
@@ -229,6 +278,8 @@ async def run_once(db_factory=None) -> int:
             _apply_draft_carry(factory, tid, results)
         return len(drafts)
 
+    # Draft 全量完成后、Polish 领取前锁定术语（一次性，terms_locked 标记防重复）
+    await _maybe_lock_terms(factory)
     with factory() as db:
         items = claim_polish_batch(db)
         jobs = [(it.task_id, it.id, _model_of(db, it.task_id)) for it in items]

@@ -21,6 +21,10 @@ Rules:
 - Do not invent, infer, explain, or add facts.
 - If a reference is genuinely ambiguous, preserve the ambiguity and note it in the ambiguity field.
 - Preserve all stage directions and emotional details.
+- STRICT LINE COVERAGE: every non-empty line of each source segment (stage directions,
+  sound-effect lines, scene labels, action lines) MUST appear in your translation —
+  one line for one line. Never merge or omit a line; omitting one line shifts all
+  following segments and corrupts the whole script.
 - End with a "carry_over" summary of the story state at the END of this window:
   forms_of_address (how characters currently address each other), ongoing_state (one
   sentence describing the current situation), open_threads (unresolved threads started
@@ -36,6 +40,9 @@ Hard constraints:
 - Use the scene context card and carry-over state to make lines fit the situation accurately.
 - Use approved character names and terminology as given.
 - If the draft flagged ambiguity, keep the ambiguity.
+- STRICT LINE COVERAGE: your output must keep EVERY non-empty line of the source segment
+  (stage directions, sound-effect lines, scene labels, action lines) — never drop or
+  merge a line from the draft.
 - Return ONLY the required JSON. No commentary."""
 
 
@@ -285,6 +292,18 @@ def validate_window(segments: list[dict], translations: list[dict]) -> list[str]
     for t in translations:
         if not t.get("target_text", "").strip():
             errors.append(f"空译文: {t.get('segment_id')}")
+    # 多行段行数校验：译文缺行会让后续段整体错位（历史漏译/标签错位的根因）
+    src_by_id = {s["segment_id"]: s for s in segments}
+    for t in translations:
+        src = src_by_id.get(t.get("segment_id"))
+        if src is None:
+            continue
+        src_lines = [x for x in src.get("source_text", "").strip().split("\n") if x.strip()]
+        tgt_lines = [x for x in t.get("target_text", "").strip().split("\n") if x.strip()]
+        if len(src_lines) > 1 and len(tgt_lines) < len(src_lines):
+            errors.append(
+                f"段内缺行: {t.get('segment_id')} 原文 {len(src_lines)} 行 / 译文 {len(tgt_lines)} 行"
+            )
     return errors
 
 
