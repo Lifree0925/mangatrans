@@ -426,7 +426,7 @@ export default function KnowledgePage() {
           <div className="flex h-full">
             {/* 章节目录（可收起） */}
             {!storyCollapsed && (
-              <div className="w-56 shrink-0 overflow-auto py-3">
+              <div className="w-[179px] shrink-0 overflow-auto py-3">
                 <p className="mb-1 px-3 text-xs font-medium text-(--color-muted)">章节目录</p>
                 {(storylines.data ?? []).map((s) => (
                   <button
@@ -548,7 +548,7 @@ export default function KnowledgePage() {
           <div className="flex h-full">
             {/* 章节目录（可收起） */}
             {!dialogueCollapsed && (
-              <div className="w-56 shrink-0 overflow-auto border-r-0 py-3">
+              <div className="w-[179px] shrink-0 overflow-auto py-3">
                 <p className="mb-1 px-3 text-xs font-medium text-(--color-muted)">章节目录</p>
                 {(dialogueLines.data?.chapters ?? []).map((ch: { chapter_id: string | null; chapter_no: number | null; chapter_title: string | null; scenes: { scene_id: string | null; scene_no: number | null; scene_heading: string | null; lines: DialogueLineInfo[] }[] }) => (
                   <button

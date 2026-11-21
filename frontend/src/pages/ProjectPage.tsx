@@ -398,7 +398,7 @@ export default function ProjectPage() {
 
       <div className="flex flex-1 overflow-hidden">
         {!chaptersCollapsed && (
-        <aside className="w-56 shrink-0 overflow-auto p-3 text-sm">
+        <aside className="w-[179px] shrink-0 overflow-auto p-3 text-sm">
           {chapters.data?.map((ch) => {
             const firstSegNo = segs.find((seg) => seg.chapter_id === ch.id)?.segment_no;
             return (
