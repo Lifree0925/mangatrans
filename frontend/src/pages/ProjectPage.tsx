@@ -452,18 +452,19 @@ export default function ProjectPage() {
         </aside>
         )}
         <div
-          className={`relative w-4 shrink-0 cursor-pointer ${
+          className={`relative w-4 shrink-0 ${
             chaptersCollapsed ? "" : "border-r border-(--color-border)"
           }`}
-          onClick={() => setChaptersCollapsed((v) => !v)}
         >
-          <span
-            className={`absolute top-1/2 -translate-y-1/2 text-(--color-muted) hover:text-(--color-accent) ${
+          <button
+            onClick={() => setChaptersCollapsed((v) => !v)}
+            title={chaptersCollapsed ? "展开章节目录" : "收起章节目录"}
+            className={`absolute top-1/2 -translate-y-1/2 cursor-pointer text-(--color-muted) hover:text-(--color-accent) ${
               chaptersCollapsed ? "left-0.5" : "right-0"
             }`}
           >
             {chaptersCollapsed ? <ChevronRight size={15} /> : <ChevronLeft size={15} />}
-          </span>
+          </button>
         </div>
 
         <div

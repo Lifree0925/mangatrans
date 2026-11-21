@@ -473,17 +473,17 @@ export default function KnowledgePage() {
               </div>
             )}
             <div
-              className={`relative w-4 shrink-0 cursor-pointer ${storyCollapsed ? "" : "border-r border-(--color-border)"}`}
-              onClick={() => setStoryCollapsed((v) => !v)}
-              title={storyCollapsed ? "展开章节目录" : "收起章节目录"}
+              className={`relative w-4 shrink-0 ${storyCollapsed ? "" : "border-r border-(--color-border)"}`}
             >
-              <span
-                className={`absolute top-1/2 -translate-y-1/2 text-(--color-muted) hover:text-(--color-accent) ${
+              <button
+                onClick={() => setStoryCollapsed((v) => !v)}
+                title={storyCollapsed ? "展开章节目录" : "收起章节目录"}
+                className={`absolute top-1/2 -translate-y-1/2 cursor-pointer text-(--color-muted) hover:text-(--color-accent) ${
                   storyCollapsed ? "left-0.5" : "right-0"
                 }`}
               >
                 {storyCollapsed ? <ChevronRight size={15} /> : <ChevronLeft size={15} />}
-              </span>
+              </button>
             </div>
             <div
               ref={storyBodyRef}
@@ -598,17 +598,17 @@ export default function KnowledgePage() {
             )}
             {/* 收展箭头：贴线、无圆框 */}
             <div
-              className={`relative w-4 shrink-0 cursor-pointer ${dialogueCollapsed ? "" : "border-r border-(--color-border)"}`}
-              onClick={() => setDialogueCollapsed((v) => !v)}
-              title={dialogueCollapsed ? "展开章节目录" : "收起章节目录"}
+              className={`relative w-4 shrink-0 ${dialogueCollapsed ? "" : "border-r border-(--color-border)"}`}
             >
-              <span
-                className={`absolute top-1/2 -translate-y-1/2 text-(--color-muted) hover:text-(--color-accent) ${
+              <button
+                onClick={() => setDialogueCollapsed((v) => !v)}
+                title={dialogueCollapsed ? "展开章节目录" : "收起章节目录"}
+                className={`absolute top-1/2 -translate-y-1/2 cursor-pointer text-(--color-muted) hover:text-(--color-accent) ${
                   dialogueCollapsed ? "left-0.5" : "right-0"
                 }`}
               >
                 {dialogueCollapsed ? <ChevronRight size={15} /> : <ChevronLeft size={15} />}
-              </span>
+              </button>
             </div>
             {/* 内容区：章节 → 场景 → 角色纯对白（上下中英对照，编辑复用项目页模式） */}
             <div
