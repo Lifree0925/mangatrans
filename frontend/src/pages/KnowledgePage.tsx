@@ -50,6 +50,7 @@ export default function KnowledgePage() {
   const [dialogueCollapsed, setDialogueCollapsed] = useState(false);
   const [dialogueActiveChapter, setDialogueActiveChapter] = useState<string | null>(null);
   const dialogueBodyRef = useRef<HTMLDivElement | null>(null);
+  const [minorCollapsed, setMinorCollapsed] = useState(true);
   // 章节剧情目录栏（与台词本同款）
   const [storyCollapsed, setStoryCollapsed] = useState(false);
   const [storyActiveChapter, setStoryActiveChapter] = useState<string | null>(null);
@@ -299,12 +300,16 @@ export default function KnowledgePage() {
                   <button onClick={() => setAdding(false)} className="rounded-lg border border-(--color-border) px-2.5 py-1 text-xs hover:bg-(--color-panel2)">取消</button>
                 </div>
               )}
-              <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
-                {(characters.data ?? []).filter((k) => k.item_type === "character").map((k) => {
+              {(() => {
+                const chars = (characters.data ?? []).filter((k) => k.item_type === "character");
+                // 按出场数分类：出现 >= 5 句为主要（常驻/重要），其余为次要（出场少/无权重）
+                const major = chars.filter((k) => (k.occurrence_count ?? 0) >= 5);
+                const minor = chars.filter((k) => (k.occurrence_count ?? 0) < 5);
+                const Card = ({ k }: { k: KnowledgeEntry }) => {
                   const data = (() => { try { return JSON.parse(k.data_json || "{}"); } catch { return {}; } })();
                   const occ = k.occurrence_count;
                   return (
-                    <div key={k.id} className="rounded-xl border border-(--color-border) bg-(--color-panel) px-4 py-3">
+                    <div className="rounded-xl border border-(--color-border) bg-(--color-panel) px-4 py-3">
                       <div className="flex items-center gap-2">
                         <span className="text-base font-semibold">{k.canonical_key}</span>
                         {typeof occ === "number" && occ > 0 && (
@@ -350,8 +355,37 @@ export default function KnowledgePage() {
                       </div>
                     </div>
                   );
-                })}
-              </div>
+                };
+                return (
+                  <>
+                    <div className="mb-2 flex items-center gap-2">
+                      <h3 className="text-sm font-semibold">主要角色（常驻 / 重要）</h3>
+                      <span className="text-xs text-(--color-muted)">{major.length} 人</span>
+                    </div>
+                    <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
+                      {major.map((k) => <Card key={k.id} k={k} />)}
+                      {major.length === 0 && (
+                        <p className="col-span-2 text-sm text-(--color-muted)">暂无（一键直出会自动提取）</p>
+                      )}
+                    </div>
+                    <div className="mb-2 mt-5 flex items-center gap-2">
+                      <h3 className="text-sm font-semibold">次要角色（出场少 / 无权重）</h3>
+                      <span className="text-xs text-(--color-muted)">{minor.length} 人</span>
+                      <button
+                        onClick={() => setMinorCollapsed((v) => !v)}
+                        className="ml-1 rounded px-1 py-0.5 text-xs text-(--color-muted) hover:bg-(--color-panel) hover:text-(--color-accent)"
+                      >
+                        {minorCollapsed ? "展开" : "收起"}
+                      </button>
+                    </div>
+                    {!minorCollapsed && (
+                      <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
+                        {minor.map((k) => <Card key={k.id} k={k} />)}
+                      </div>
+                    )}
+                  </>
+                );
+              })()}
               {(characters.data ?? []).filter((k) => k.item_type === "character").length === 0 && (
                 <p className="py-8 text-center text-sm text-(--color-muted)">暂无角色档案（一键直出会自动提取，或手动添加角色）</p>
               )}
