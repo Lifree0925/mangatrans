@@ -258,11 +258,7 @@ export default function KnowledgePage() {
             台词本
           </button>
         </div>
-        {tab === "dialogue" && active && (
-          <div className="ml-auto flex items-center gap-2 text-xs text-(--color-muted)">
-            台词本由系统在翻译时自动抽取与对齐，此处仅供审查和编辑
-          </div>
-        )}
+
         {tab === "profiles" && (
           <button
             onClick={() => setAdding((v) => !v)}
