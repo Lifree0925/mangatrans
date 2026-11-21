@@ -235,11 +235,7 @@ export default function ProjectsPage() {
             })()}
           </div>
 
-          {connecting && (
-            <p className="mt-4 text-center text-xs text-(--color-muted)">
-              正在连接本地服务…（首次启动需几秒）
-            </p>
-          )}
+          {connecting && <div className="mt-4" /> /* 静默等待：窗口在后端就绪后才显示，此处不出现等待字样 */}
           {projects.error && !connecting && (
             <div className="mt-4 rounded-xl border border-(--color-border) bg-(--color-panel) px-4 py-3 text-xs text-(--color-muted)">
               <div className="flex items-center gap-2">

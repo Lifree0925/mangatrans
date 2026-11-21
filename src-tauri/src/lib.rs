@@ -226,10 +226,10 @@ fn append_log(path: &Path, line: &str) {
     }
 }
 
-/// 后台等待后端健康检查就绪（最多 60 秒，one-file sidecar 首次启动需解压）。
+/// 后台等待后端健康检查就绪（最多 8 秒；sidecar 正常 2-3 秒就绪）。
 fn wait_until_healthy(port: u16, log_path: &Path) {
     let url = format!("http://127.0.0.1:{port}/health");
-    for _ in 0..600 {
+    for _ in 0..80 {
         if reqwest::blocking::get(&url)
             .map(|r| r.status().is_success())
             .unwrap_or(false)
@@ -239,7 +239,7 @@ fn wait_until_healthy(port: u16, log_path: &Path) {
         }
         std::thread::sleep(Duration::from_millis(100));
     }
-    append_log(log_path, "[health] timeout after 60s");
+    append_log(log_path, "[health] timeout after 8s");
 }
 
 pub fn run() {
@@ -309,10 +309,17 @@ pub fn run() {
                 }
             };
 
-            // 健康检查后台执行：窗口先显示，前端带重试等待后端就绪
+            // 健康检查后台执行：就绪（或 8 秒超时）后再显示窗口，
+            // 用户打开软件即见主界面，不经过「正在连接」等待画面
             let health_log = log_path.clone();
+            let main_window = app
+                .get_webview_window("main")
+                .expect("main window missing");
             tauri::async_runtime::spawn_blocking(move || {
                 wait_until_healthy(port, &health_log);
+                // 就绪或超时都显示窗口：超时时由前端诊断 UI 给出原因
+                let _ = main_window.show();
+                let _ = main_window.set_focus();
             });
 
             app.manage(BackendState {
