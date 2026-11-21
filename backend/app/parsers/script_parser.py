@@ -116,6 +116,9 @@ def _classify_line(line: str) -> tuple[str, str, str | None]:
     if _CHAPTER_RE.match(stripped):
         return "heading", RULE_CHAPTER, None
     if _SCENE_BRACKET_RE.match(stripped):
+        # 方括号行区分：含冒号的是舞台指示（音效/特效/字幕等），归叙述而非场景标题
+        if "：" in stripped or ":" in stripped:
+            return "narrative", RULE_PAREN, None
         return "heading", RULE_SCENE_BRACKET, None
     if _SCENE_LOC_RE.match(stripped) and len(stripped) <= 40:
         return "heading", RULE_SCENE_LOC, None
