@@ -96,6 +96,10 @@ class ParseResult:
 
 
 _PUNCT_ONLY_RE = re.compile(r"^[。．.！!？?…]{1,4}$")
+# 杂质行：维基语言链接 / 网址 / 纯页码等（并入上一片段，不独立翻译）
+_JUNK_RE = re.compile(
+    r"^vi:[\s\S]*$|^[a-z]{2,3}:[^\s:]{2,}.*$|^https?://|^\d{1,5}$"
+)
 
 
 def _classify_line(line: str) -> tuple[str, str, str | None]:
@@ -106,6 +110,9 @@ def _classify_line(line: str) -> tuple[str, str, str | None]:
     if _PUNCT_ONLY_RE.match(stripped):
         # 孤立标点行（常见于标题/段落排版）：并入上一片段，不独立成段
         return "punct_only", "punct_only", None
+    if _JUNK_RE.match(stripped):
+        # 杂质行（链接/语言标记等）：并入上一片段
+        return "junk", "junk", None
     if _CHAPTER_RE.match(stripped):
         return "heading", RULE_CHAPTER, None
     if _SCENE_BRACKET_RE.match(stripped):
@@ -191,8 +198,8 @@ def parse_script(text: str) -> ParseResult:
             pos += len(raw_line)
             continue
 
-        if ltype == "punct_only":
-            # 并入上一片段（保持偏移与原文还原）
+        if ltype in ("punct_only", "junk"):
+            # 并入上一片段（保持偏移与原文还原），不独立成段
             if segments:
                 last = segments[-1]
                 last.end = pos + len(raw_line)

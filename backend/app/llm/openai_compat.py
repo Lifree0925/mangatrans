@@ -1,7 +1,9 @@
 """OpenAI 兼容 Provider：任意 Base URL + Key + Model + 自动重试。"""
 
 import asyncio
+import hashlib
 import json
+import threading
 import time
 import uuid
 
@@ -14,6 +16,48 @@ from app.llm.protocol import (
     ProviderCapabilities,
     ProviderTestResult,
 )
+
+
+class _LLMCache:
+    """进程级 + 文件持久化的 LLM 响应缓存（重复/重试调用零成本复用）。
+
+    仅缓存确定输出（temperature<=0.3 的翻译调用）；容量上限防膨胀。
+    """
+
+    MAX_ENTRIES = 800
+
+    def __init__(self, path: str):
+        self._path = path
+        self._lock = threading.Lock()
+        self._data: dict[str, dict] = {}
+        try:
+            import os
+
+            if path and os.path.exists(path):
+                with open(path, encoding="utf-8") as f:
+                    self._data = json.load(f)
+        except Exception:  # noqa: BLE001 缓存损坏不影响功能
+            self._data = {}
+
+    def get(self, key: str) -> dict | None:
+        with self._lock:
+            return self._data.get(key)
+
+    def put(self, key: str, value: dict) -> None:
+        with self._lock:
+            if len(self._data) >= self.MAX_ENTRIES:
+                for k in list(self._data)[: self.MAX_ENTRIES // 2]:
+                    self._data.pop(k, None)
+            self._data[key] = value
+            if self._path:
+                try:
+                    import os
+
+                    os.makedirs(os.path.dirname(self._path), exist_ok=True)
+                    with open(self._path, "w", encoding="utf-8") as f:
+                        json.dump(self._data, f, ensure_ascii=False)
+                except Exception:  # noqa: BLE001 写失败忽略
+                    pass
 
 
 class OpenAICompatProvider:
@@ -30,6 +74,10 @@ class OpenAICompatProvider:
         self.api_key = api_key
         self.model = model
         self.capabilities = capabilities or ProviderCapabilities()
+        from app.core.config import settings
+
+        cache_path = str(settings.data_dir / "cache" / "llm_cache.json")
+        self._cache = _LLMCache(cache_path)
         self.max_retries = max(0, int(max_retries))
 
     async def chat(
@@ -67,6 +115,28 @@ class OpenAICompatProvider:
         # 本地模型（Ollama / vLLM 等）通常无需 API Key
         if self.api_key:
             headers["Authorization"] = f"Bearer {self.api_key}"
+
+        # 确定性调用缓存：temperature<=0.3 时命中直接返回（重试/重跑零成本）
+        cache_key = ""
+        if temperature is None or temperature <= 0.3:
+            cache_key = hashlib.sha256(
+                json.dumps(
+                    [self.base_url, model, messages, body.get("response_format")],
+                    ensure_ascii=False,
+                    sort_keys=True,
+                ).encode()
+            ).hexdigest()
+            cached = self._cache.get(cache_key)
+            if cached is not None:
+                return LLMResponse(
+                    content=cached.get("content", ""),
+                    provider_id="openai_compat",
+                    model_name=model,
+                    request_id=cached.get("request_id") or uuid.uuid4().hex,
+                    usage=cached.get("usage", {}),
+                    finish_reason=cached.get("finish_reason"),
+                    latency_ms=0.0,
+                )
 
         # 自动重试：网络抖动/超时/限流/5xx 按 max_retries 指数退避。
         # 长剧本约 60 个窗口，任一窗口一次瞬时故障都不应中断整本翻译。
@@ -127,8 +197,19 @@ class OpenAICompatProvider:
             ) from exc
         choice = data.get("choices", [{}])[0]
         message = choice.get("message", {})
+        content = message.get("content") or ""
+        if cache_key:
+            self._cache.put(
+                cache_key,
+                {
+                    "content": content,
+                    "request_id": data.get("id") or request_id or uuid.uuid4().hex,
+                    "usage": data.get("usage") or {},
+                    "finish_reason": choice.get("finish_reason"),
+                },
+            )
         return LLMResponse(
-            content=message.get("content") or "",
+            content=content,
             provider_id="openai_compat",
             model_name=model,
             request_id=data.get("id") or request_id or uuid.uuid4().hex,

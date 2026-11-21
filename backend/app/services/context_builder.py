@@ -90,6 +90,9 @@ def build_context(
         key = item.get("canonical_key", "")
         if key and key in window_text:
             return True
+        for alias in item.get("aliases", []) or []:
+            if alias and alias in window_text:
+                return True
         data = item.get("data", {}) if isinstance(item.get("data"), dict) else {}
         for addr in data.get("forms_of_address", []) or []:
             if addr and addr in window_text:
@@ -100,12 +103,25 @@ def build_context(
     terms = [k for k in knowledge if k.get("item_type") == "term" and _mention(k)]
     rules = [k for k in knowledge if k.get("item_type") in ("rule", "relation")]
     if chars:
-        blocks.append(
-            _json_block(
-                "APPROVED CHARACTERS",
-                [{"name": c["canonical_key"], "data": c.get("data", {})} for c in chars],
-            )
-        )
+        char_rows = [
+            {
+                "name": c["canonical_key"],
+                "aliases": c.get("aliases", []),
+                "translation": (c.get("data", {}) or {}).get("translation", ""),
+                "data": c.get("data", {}),
+            }
+            for c in chars
+        ]
+        blocks.append(_json_block("APPROVED CHARACTERS", char_rows))
+        # 别名强制统一：原文出现别名时也必须译成正式名
+        alias_rules = [
+            f"\"{alias}\" must be translated as \"{c['canonical_key']}\" (i.e. \"{c.get('data', {}).get('translation', '') or c['canonical_key']}\")"
+            for c in chars
+            for alias in c.get("aliases", []) or []
+            if alias
+        ]
+        if alias_rules:
+            blocks.append(_json_block("ALIAS RULES (enforce consistent names)", alias_rules))
         report["matched_characters"] = [c["canonical_key"] for c in chars]
         snapshot["knowledge_ids"] += [c["id"] for c in chars]
         profiles = [

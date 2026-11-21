@@ -68,17 +68,16 @@ async def generate_for_document(
         if s.chapter_id:
             seg_by_ch.setdefault(s.chapter_id, []).append(s)
 
-    generated = 0
-    failed = 0
-    for ch in chapters:
+    import asyncio
+
+    async def one_chapter(ch: Chapter) -> tuple[bool, bool]:
         text = "".join(s.source_text for s in seg_by_ch.get(ch.id, []))
         if len(text.strip()) < 20:
-            continue
+            return False, False
         try:
             card = await generate_storyline(provider, model, text)
         except Exception:  # noqa: BLE001 单章失败不阻塞
-            failed += 1
-            continue
+            return False, True
         with db_factory() as db:
             base = (
                 db.scalar(
@@ -99,5 +98,15 @@ async def generate_for_document(
                 )
             )
             db.commit()
-        generated += 1
+        return True, False
+
+    sem = asyncio.Semaphore(3)  # 章节并发
+
+    async def limited(ch: Chapter):
+        async with sem:
+            return await one_chapter(ch)
+
+    results = await asyncio.gather(*(limited(ch) for ch in chapters))
+    generated = sum(1 for ok, failed_ in results if ok)
+    failed = sum(1 for _, failed_ in results if failed_)
     return {"generated": generated, "failed": failed}

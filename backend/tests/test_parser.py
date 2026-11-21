@@ -89,3 +89,11 @@ def test_stray_punctuation_merged_into_previous_segment() -> None:
     # 覆盖校验：拼接可还原原文
     restored = "".join(s.text for s in r.segments)
     assert restored == "# 第1回 桃园结义\n。\n话说天下大势。"
+
+
+def test_junk_line_merged_into_previous_segment() -> None:
+    """维基语言链接等杂质行并入上一片段，不独立成段。"""
+    r = parse_script("# 第1回 桃园结义\nvi:Tam quốc diễn nghĩa/Hồi 1\n话说天下大势。")
+    types = [s.type for s in r.segments]
+    assert "junk" not in types
+    assert r.segments[0].text == "# 第1回 桃园结义\nvi:Tam quốc diễn nghĩa/Hồi 1\n"

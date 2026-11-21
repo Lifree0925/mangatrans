@@ -140,17 +140,26 @@ async def extract_knowledge_for_document(
     if buf.strip():
         batches.append(buf)
 
-    total_added = 0
-    failed_batches = 0
-    for i, batch in enumerate(batches):
+    import asyncio
+
+    async def one_batch(batch: str) -> tuple[int, bool]:
         try:
             out = await extract_batch(provider, batch, model)
         except Exception:  # noqa: BLE001 单批失败不阻塞整本翻译
-            failed_batches += 1
-            continue
+            return 0, True
         with db_factory() as db:
             added = merge_candidates(db, project_id, out, mode)
-        total_added += len(added)
+        return len(added), False
+
+    sem = asyncio.Semaphore(4)  # 批次并发（无依赖）
+
+    async def limited(batch: str) -> tuple[int, bool]:
+        async with sem:
+            return await one_batch(batch)
+
+    results = await asyncio.gather(*(limited(b) for b in batches))
+    total_added = sum(r[0] for r in results)
+    failed_batches = sum(1 for r in results if r[1])
     return {
         "batches": len(batches),
         "added": total_added,

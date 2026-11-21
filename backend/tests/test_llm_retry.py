@@ -3,6 +3,7 @@
 import asyncio
 import json
 import threading
+from pathlib import Path
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 from app.llm.openai_compat import OpenAICompatProvider
@@ -41,6 +42,11 @@ def _serve(state: _State):
 
 
 def _run(state, max_retries=2, timeout=10.0):
+    import tempfile
+
+    from app.core.config import settings
+
+    settings.data_dir = Path(tempfile.mkdtemp(prefix="mt_cache_test_"))
     srv = HTTPServer(("127.0.0.1", 0), _serve(state))
     port = srv.server_address[1]
     t = threading.Thread(target=srv.serve_forever, daemon=True)
@@ -124,3 +130,28 @@ def test_max_retries_zero_means_no_retry():
         assert False, "应抛出 LLMError"
     except LLMError:
         assert state.calls == 1
+
+
+def test_cache_hit_skips_http_call():
+    """相同请求第二次命中缓存，不再发起 HTTP。"""
+    import tempfile
+    from pathlib import Path as _Path
+
+    from app.core.config import settings
+
+    settings.data_dir = _Path(tempfile.mkdtemp(prefix="mt_cache_hit_"))
+    state = _State([(200, _ok("pong"))])
+    srv = HTTPServer(("127.0.0.1", 0), _serve(state))
+    port = srv.server_address[1]
+    t = threading.Thread(target=srv.serve_forever, daemon=True)
+    t.start()
+    provider = OpenAICompatProvider(
+        base_url=f"http://127.0.0.1:{port}", api_key="sk-test", model="mock", max_retries=0
+    )
+    try:
+        r1 = asyncio.run(provider.chat(messages=[{"role": "user", "content": "hi"}]))
+        r2 = asyncio.run(provider.chat(messages=[{"role": "user", "content": "hi"}]))
+        assert state.calls == 1  # 缓存命中，无新请求
+        assert r1.content == r2.content == "pong"
+    finally:
+        srv.shutdown()

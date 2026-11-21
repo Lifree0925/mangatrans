@@ -126,6 +126,38 @@ async def translate_window(
     ], polish.carry_over.model_dump()
 
 
+async def repair_window(
+    *,
+    provider: LLMProvider,
+    model: str,
+    window_id: str,
+    context: ContextResult,
+    draft: list[dict],
+    issues: list[dict],
+) -> tuple[list[dict], dict]:
+    """质检打回重做：把问题清单作为修正指令，重新生成 polished。"""
+    issue_block = "\n".join(
+        f"- [{i.get('issue_type','')}] {i.get('explanation','')}"
+        + (f"（建议：{i.get('suggested_fix')}）" if i.get("suggested_fix") else "")
+        for i in issues[:12]
+    )
+    fix_system = POLISH_SYSTEM + (
+        "\n\nThe previous translation was rejected by QA with these issues:\n"
+        + issue_block
+        + "\nRewrite the translations to fix EVERY issue above. Keep all correct parts. Return ONLY the required JSON."
+    )
+    draft_block = "\n\n[FAITHFUL DRAFT]\n" + json.dumps(draft, ensure_ascii=False, indent=2)
+    data = await _chat_json(
+        provider,
+        model,
+        fix_system,
+        context.prompt_text + draft_block,
+        PolishOutput.model_json_schema(),
+    )
+    polish = PolishOutput.model_validate(data)
+    return [t.model_dump() for t in polish.translations], polish.carry_over.model_dump()
+
+
 def validate_window(segments: list[dict], translations: list[dict]) -> list[str]:
     """校验：segment_id 完整、唯一、顺序。返回错误列表。"""
     errors: list[str] = []

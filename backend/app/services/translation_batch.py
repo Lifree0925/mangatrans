@@ -76,6 +76,7 @@ def _load_window_context(db: Session, project_id: str, window: list[SourceSegmen
             "item_type": k.item_type,
             "canonical_key": k.canonical_key,
             "data": json.loads(k.data_json or "{}"),
+            "aliases": [],
         }
         for k in db.scalars(
             select(KnowledgeItem).where(
@@ -84,7 +85,82 @@ def _load_window_context(db: Session, project_id: str, window: list[SourceSegmen
             )
         )
     ]
+    # 别名（如 允→王允、玄德→刘备）：翻译时统一为正式名
+    from app.models.knowledge import KnowledgeAlias
+
+    alias_rows = list(
+        db.scalars(
+            select(KnowledgeAlias).where(
+                KnowledgeAlias.knowledge_id.in_([i["id"] for i in items])
+            )
+        )
+    )
+    for i in items:
+        i["aliases"] = [a.alias for a in alias_rows if a.knowledge_id == i["id"]]
     return card, items, storyline
+
+
+def _window_forced_terms(db: Session, project_id: str, window: list[SourceSegment]) -> dict[str, str]:
+    """窗口内出现且有译名的术语 -> 强制译名。"""
+    import json as _json
+
+    win_text = "".join(s.source_text for s in window)
+    from app.models.knowledge import KnowledgeItem
+
+    forced: dict[str, str] = {}
+    for k in db.scalars(
+        select(KnowledgeItem).where(
+            KnowledgeItem.project_id == project_id,
+            KnowledgeItem.item_type == "term",
+            KnowledgeItem.status.in_(["approved", "auto_approved"]),
+        )
+    ):
+        translation = _json.loads(k.data_json or "{}").get("translation")
+        if translation and translation != k.canonical_key and k.canonical_key in win_text:
+            forced[k.canonical_key] = translation
+    return forced
+
+
+async def _qa_check_loop(
+    *,
+    db_factory,
+    project_id: str,
+    window: list[SourceSegment],
+    draft: list[dict],
+    polished: list[dict],
+    carry: dict,
+    context,
+    provider,
+    model: str,
+    max_loops: int = 3,
+) -> tuple[list[dict], dict, list[dict]]:
+    """质检打回重做：QA 发现 high/critical 问题则带问题重译，最多 3 轮。
+
+    返回 (最终 polished, carry, 最终问题列表)。
+    """
+    from app.services import qa_service
+    from app.services.translation import repair_window
+
+    issues: list[dict] = []
+    for _ in range(max_loops):
+        with db_factory() as db:
+            forced = _window_forced_terms(db, project_id, window)
+            issues = []
+            for seg, tr in zip(window, polished):
+                # 临时 Translation 对象用于 QA
+                class _FakeTr:
+                    target_text = tr["target_text"]
+                det = qa_service.deterministic_qa(db, seg, _FakeTr(), forced)
+                issues.extend(det)
+        high = [i for i in issues if i.get("severity") in ("high", "critical")]
+        if not high:
+            break
+        # 语义 QA 不再逐段调用（性能）；确定性问题直接打回修复
+        draft, polished, carry = await repair_window(
+            provider=provider, model=model, window_id="QA-FIX", context=context,
+            draft=draft, issues=high,
+        )
+    return polished, carry, issues
 
 
 def _persist_window_translations(
@@ -152,6 +228,17 @@ async def translate_window_direct(
     draft, polished, carry = await translate_window(
         provider=get_provider(), model=model, window_id="EXPRESS", context=context
     )
+    polished, carry, _issues = await _qa_check_loop(
+        db_factory=db_factory,
+        project_id=project_id,
+        window=window,
+        draft=draft,
+        polished=polished,
+        carry=carry,
+        context=context,
+        provider=get_provider(),
+        model=model,
+    )
     return carry, draft, polished, context
 
 
@@ -204,6 +291,18 @@ async def process_window_item(db_factory, task_id: str, item_id: str, model: str
     errors = validate_window(seg_dicts, polished)
     if errors:
         return {"error": "; ".join(errors)}
+
+    polished, carry, _issues = await _qa_check_loop(
+        db_factory=db_factory,
+        project_id=task.project_id,
+        window=window,
+        draft=draft,
+        polished=polished,
+        carry=carry,
+        context=context,
+        provider=provider,
+        model=model,
+    )
 
     with db_factory() as db:
         _persist_window_translations(db, window, draft, polished, context, model)
