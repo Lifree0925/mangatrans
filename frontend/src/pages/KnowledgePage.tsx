@@ -50,7 +50,7 @@ export default function KnowledgePage() {
   const [dialogueCollapsed, setDialogueCollapsed] = useState(false);
   const [dialogueActiveChapter, setDialogueActiveChapter] = useState<string | null>(null);
   const dialogueBodyRef = useRef<HTMLDivElement | null>(null);
-  const [minorCollapsed, setMinorCollapsed] = useState(true);
+  const [charGroup, setCharGroup] = useState<"major" | "minor">("major");
   // 章节剧情目录栏（与台词本同款）
   const [storyCollapsed, setStoryCollapsed] = useState(false);
   const [storyActiveChapter, setStoryActiveChapter] = useState<string | null>(null);
@@ -358,29 +358,34 @@ export default function KnowledgePage() {
                 };
                 return (
                   <>
-                    <div className="mb-2 flex items-center gap-2">
-                      <h3 className="text-sm font-semibold">主要角色（常驻 / 重要）</h3>
-                      <span className="text-xs text-(--color-muted)">{major.length} 人</span>
-                    </div>
-                    <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
-                      {major.map((k) => <Card key={k.id} k={k} />)}
-                      {major.length === 0 && (
-                        <p className="col-span-2 text-sm text-(--color-muted)">暂无（一键直出会自动提取）</p>
-                      )}
-                    </div>
-                    <div className="mb-2 mt-5 flex items-center gap-2">
-                      <h3 className="text-sm font-semibold">次要角色（出场少 / 无权重）</h3>
-                      <span className="text-xs text-(--color-muted)">{minor.length} 人</span>
+                    <div className="mb-3 flex items-center gap-1.5">
                       <button
-                        onClick={() => setMinorCollapsed((v) => !v)}
-                        className="ml-1 rounded px-1 py-0.5 text-xs text-(--color-muted) hover:bg-(--color-panel) hover:text-(--color-accent)"
+                        onClick={() => setCharGroup("major")}
+                        className={`rounded-lg px-3 py-1.5 text-sm ${charGroup === "major" ? "bg-(--color-panel2) font-medium" : "text-(--color-muted) hover:bg-(--color-panel)"}`}
                       >
-                        {minorCollapsed ? "展开" : "收起"}
+                        主要角色（常驻 / 重要）· {major.length}
+                      </button>
+                      <button
+                        onClick={() => setCharGroup("minor")}
+                        className={`rounded-lg px-3 py-1.5 text-sm ${charGroup === "minor" ? "bg-(--color-panel2) font-medium" : "text-(--color-muted) hover:bg-(--color-panel)"}`}
+                      >
+                        次要角色（出场少 / 无权重）· {minor.length}
                       </button>
                     </div>
-                    {!minorCollapsed && (
+                    {charGroup === "major" && (
+                      <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
+                        {major.map((k) => <Card key={k.id} k={k} />)}
+                        {major.length === 0 && (
+                          <p className="col-span-2 text-sm text-(--color-muted)">暂无（一键直出会自动提取）</p>
+                        )}
+                      </div>
+                    )}
+                    {charGroup === "minor" && (
                       <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
                         {minor.map((k) => <Card key={k.id} k={k} />)}
+                        {minor.length === 0 && (
+                          <p className="col-span-2 text-sm text-(--color-muted)">暂无次要角色</p>
+                        )}
                       </div>
                     )}
                   </>
