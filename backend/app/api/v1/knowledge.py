@@ -170,7 +170,7 @@ def patch_knowledge(
     stale = 0
     # role_weight 仅影响前台分组展示，不影响翻译，不触发译文待重译
     data_payload = payload.get("data") if isinstance(payload.get("data"), dict) else {}
-    only_weight = set(data_payload.keys()) <= {"role_weight"}
+    only_weight = bool(data_payload) and set(data_payload.keys()) <= {"role_weight"}
     if any(k in payload for k in ("status", "canonical_key", "data")) and not only_weight:
         from app.services.translation_batch import mark_stale_for_knowledge
 
