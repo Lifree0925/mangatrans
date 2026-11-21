@@ -13,8 +13,6 @@ export default function ProjectPage() {
   const { id = "" } = useParams();
   const qc = useQueryClient();
   const fileRef = useRef<HTMLInputElement>(null);
-  const [showReport, setShowReport] = useState(false);
-  const [showQA, setShowQA] = useState(false);
   const [chaptersCollapsed, setChaptersCollapsed] = useState(false);
   // 片段编辑状态：editing = {segmentId, side: 'source'|'target'} | null
   const [editing, setEditing] = useState<{ segmentId: string; side: "source" | "target" } | null>(null);

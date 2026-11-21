@@ -5,7 +5,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Check, ChevronLeft, ChevronRight, Pencil, Plus, Trash2, X } from "lucide-react";
 import { api } from "../lib/api";
 import { confirmAction, toast } from "../lib/feedback";
-import type { ChapterStoryline, KnowledgeEntry, Project } from "../lib/types";
+import type { ChapterStoryline, DialogueLineInfo, DialogueLinesResponse, KnowledgeEntry, Project } from "../lib/types";
 
 type StoryCard = {
   summary: string;
@@ -550,7 +550,7 @@ export default function KnowledgePage() {
             {!dialogueCollapsed && (
               <div className="w-56 shrink-0 overflow-auto border-r-0 py-3">
                 <p className="mb-1 px-3 text-xs font-medium text-(--color-muted)">章节目录</p>
-                {(dialogueLines.data?.chapters ?? []).map((ch) => (
+                {(dialogueLines.data?.chapters ?? []).map((ch: { chapter_id: string | null; chapter_no: number | null; chapter_title: string | null; scenes: { scene_id: string | null; scene_no: number | null; scene_heading: string | null; lines: DialogueLineInfo[] }[] }) => (
                   <button
                     key={ch.chapter_id}
                     onClick={() => {
@@ -609,7 +609,7 @@ export default function KnowledgePage() {
               }}
               className="flex-1 overflow-auto p-4 font-mono text-[13px] leading-6"
             >
-              {(dialogueLines.data?.chapters ?? []).map((ch) => (
+              {(dialogueLines.data?.chapters ?? []).map((ch: { chapter_id: string | null; chapter_no: number | null; chapter_title: string | null; scenes: { scene_id: string | null; scene_no: number | null; scene_heading: string | null; lines: DialogueLineInfo[] }[] }) => (
                 <div key={ch.chapter_id} data-dlg-chapter={ch.chapter_id} className="mx-auto max-w-4xl">
                   <h3 className="mb-1 mt-2 text-base font-bold">
                     第 {ch.chapter_no ?? "?"} 章
@@ -619,14 +619,14 @@ export default function KnowledgePage() {
                       </span>
                     )}
                   </h3>
-                  {ch.scenes.map((sc) => (
+                  {ch.scenes.map((sc: { scene_id: string | null; scene_no: number | null; scene_heading: string | null; lines: DialogueLineInfo[] }) => (
                     <div key={sc.scene_id} className="mb-3">
                       {sc.scene_heading && (
                         <p className="mb-1 mt-3 text-xs text-(--color-muted)">
                           {String(sc.scene_heading).replace(/^#\s*/, "")}
                         </p>
                       )}
-                      {sc.lines.map((ln) => (
+                      {sc.lines.map((ln: DialogueLineInfo) => (
                         <div
                           key={ln.id}
                           className="group relative border-b border-(--color-border) py-2 pr-8"
