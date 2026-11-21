@@ -25,6 +25,7 @@ from app.services.translation import (
     validate_window,
 )
 from app.services.translation_batch import (
+    _forced_terms_for_text,
     _persist_window_translations,
     insert_translation_row,
     translate_window_draft_direct,
@@ -400,18 +401,16 @@ async def run_express(db_factory, project_id: str, source_document_id: str, mode
         _sync_progress(db_factory, task_id, report["steps"], "qa")
         # 5. QA：确定性全量 + 风险窗口语义 QA
         with db_factory() as db:
-            forced = {}
-            for k in db.scalars(
-                select(KnowledgeItem).where(
-                    KnowledgeItem.project_id == project_id,
-                    KnowledgeItem.status.in_(["approved", "auto_approved"]),
-                    KnowledgeItem.item_type == "term",
+            # 全文术语强制表（含别名）：同一地点/专名的多种中文称呼映射到同一译名
+            full_text = "".join(
+                s.source_text
+                for s in db.scalars(
+                    select(SourceSegment).where(
+                        SourceSegment.source_document_id == source_document_id
+                    )
                 )
-            ):
-                translation = json.loads(k.data_json or "{}").get("translation")
-                # 只有明确给出译名的术语才强制；无译名的只作参考（否则整本被误报）
-                if translation and translation != k.canonical_key:
-                    forced[k.canonical_key] = translation
+            )
+            forced = _forced_terms_for_text(db, project_id, full_text)
         prev_qa = report["steps"].get("qa") or {}
         qa_done = int(prev_qa.get("done", 0))
         issues_total = int(prev_qa.get("issues", 0))
@@ -539,27 +538,16 @@ async def run_express(db_factory, project_id: str, source_document_id: str, mode
         from app.services.context_builder import ContextResult
 
         with db_factory() as db:
-            term_rows = list(
-                db.scalars(
-                    select(KnowledgeItem).where(
-                        KnowledgeItem.project_id == project_id,
-                        KnowledgeItem.item_type == "term",
-                        KnowledgeItem.status.in_(["approved", "auto_approved"]),
-                    )
-                )
-            )
-            forced = {}
-            for k in term_rows:
-                data = json.loads(k.data_json or "{}")
-                trans = (data.get("translation") or "").strip()
-                if trans and trans != k.canonical_key:
-                    forced[k.canonical_key] = trans
             segs_all = list(
                 db.scalars(
                     select(SourceSegment).where(
                         SourceSegment.source_document_id == source_document_id
                     )
                 )
+            )
+            # 全文术语强制表（含别名）：同一地点的多种中文称呼全部命中同一译名
+            forced = _forced_terms_for_text(
+                db, project_id, "".join(seg.source_text for seg in segs_all)
             )
         seg_by_id = {seg.id: seg for seg in segs_all}
         if not forced or not segs_all:

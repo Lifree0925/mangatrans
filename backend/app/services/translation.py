@@ -21,6 +21,13 @@ Rules:
 - Do not invent, infer, explain, or add facts.
 - If a reference is genuinely ambiguous, preserve the ambiguity and note it in the ambiguity field.
 - Preserve all stage directions and emotional details.
+- TERM & PLACE CONSISTENCY: a place, character title or proper noun must use the SAME standard
+  translation given in the knowledge/term list throughout the script (exact casing included,
+  e.g. always "Wolf King", never "wolf king" or "werewolf king"). Different Chinese names for the
+  same place must map to the SAME English name.
+- LOCALIZE MARKS: 画外音 / （OS）/ O.S. / (OS) must be rendered as "(voice-over)"; 内景/外景 as INT./EXT.
+- PERSON & NUMBER: keep the source's person and number. Third-person references like
+  「姐姐带你走」 must stay third person (e.g. "Big sister will take you"), never switch to "I".
 - STRICT LINE COVERAGE: every non-empty line of each source segment (stage directions,
   sound-effect lines, scene labels, action lines) MUST appear in your translation —
   one line for one line. Never merge or omit a line; omitting one line shifts all
@@ -40,6 +47,12 @@ Hard constraints:
 - Use the scene context card and carry-over state to make lines fit the situation accurately.
 - Use approved character names and terminology as given.
 - If the draft flagged ambiguity, keep the ambiguity.
+- TERM & PLACE CONSISTENCY: use the standard translation from the term list with exact casing
+  (e.g. "Wolf King", "Anti-magic Handcuffs"); the same place must keep the same English name
+  across the whole script — never introduce a second rendering.
+- PERSON & NUMBER: keep the source's person and number (「姐姐」 stays third person, never "I").
+- LOCALIZE MARKS: 画外音/（OS）/O.S. → "(voice-over)".
+- Choose precise, natural English idioms for physical actions; avoid awkward literal renderings.
 - STRICT LINE COVERAGE: your output must keep EVERY non-empty line of the source segment
   (stage directions, sound-effect lines, scene labels, action lines) — never drop or
   merge a line from the draft.

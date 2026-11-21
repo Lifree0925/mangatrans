@@ -8,7 +8,7 @@ from sqlalchemy.orm import Session
 
 from app.llm.registry import get_provider
 from app.models.document import SourceDocument, SourceSegment
-from app.models.knowledge import KnowledgeItem
+from app.models.knowledge import KnowledgeAlias, KnowledgeItem
 from app.models.task import Task, TaskItem
 from app.models.translation import StyleGuide, Translation
 from app.services.context_builder import ContextResult, build_context
@@ -99,13 +99,12 @@ def _load_window_context(db: Session, project_id: str, window: list[SourceSegmen
     return card, items, storyline
 
 
-def _window_forced_terms(db: Session, project_id: str, window: list[SourceSegment]) -> dict[str, str]:
-    """窗口内出现且有译名的术语 -> 强制译名。"""
-    import json as _json
+def _forced_terms_for_text(db: Session, project_id: str, text: str) -> dict[str, str]:
+    """文本命中的强制术语（含别名）：{中文称呼: 必须出现的英文标准译名}。
 
-    win_text = "".join(s.source_text for s in window)
-    from app.models.knowledge import KnowledgeItem
-
+    同一实体的多种中文称呼（如「边缘酒吧」「荒原边缘酒吧」）全部映射到同一译名，
+    场景名/专有名词强制复用首次确定的译名，杜绝同一地点多种译名。
+    """
     forced: dict[str, str] = {}
     for k in db.scalars(
         select(KnowledgeItem).where(
@@ -114,10 +113,25 @@ def _window_forced_terms(db: Session, project_id: str, window: list[SourceSegmen
             KnowledgeItem.status.in_(["approved", "auto_approved"]),
         )
     ):
-        translation = _json.loads(k.data_json or "{}").get("translation")
-        if translation and translation != k.canonical_key and k.canonical_key in win_text:
-            forced[k.canonical_key] = translation
+        translation = (json.loads(k.data_json or "{}").get("translation") or "").strip()
+        if not translation or translation == k.canonical_key:
+            continue
+        keys = [k.canonical_key]
+        for a in db.scalars(
+            select(KnowledgeAlias.alias).where(KnowledgeAlias.knowledge_id == k.id)
+        ):
+            if a and a != k.canonical_key and a not in keys:
+                keys.append(a)
+        for key in keys:
+            if key in text:
+                forced[key] = translation
     return forced
+
+
+def _window_forced_terms(db: Session, project_id: str, window: list[SourceSegment]) -> dict[str, str]:
+    """窗口内命中的强制术语：{术语中文: 必须出现的英文}。"""
+    win_text = "".join(s.source_text for s in window)
+    return _forced_terms_for_text(db, project_id, win_text)
 
 
 async def _qa_check_loop(

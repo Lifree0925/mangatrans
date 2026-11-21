@@ -78,9 +78,10 @@ def deterministic_qa(db: Session, seg: SourceSegment, tr: Translation, forced_te
     if "```" in tgt:
         issues.append(_issue("markdown_fence", "medium", src, tgt, "译文混入 Markdown 围栏"))
     for zh, en in forced_terms.items():
-        if zh in seg.source_text and en.lower() not in tgt.lower():
+        # 大小写敏感精确匹配：标准译名（Wolf King）大小写漂移也会打回修复
+        if zh in seg.source_text and en not in tgt:
             issues.append(
-                _issue("forced_term", "high", src, tgt, f"强制术语 {zh} 应译为 {en}")
+                _issue("forced_term", "high", src, tgt, f"强制术语 {zh} 必须使用标准译名 {en}（含大小写）")
             )
     return issues
 
