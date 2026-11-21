@@ -39,3 +39,23 @@ def test_health_is_public(client: TestClient) -> None:
     r = client.get("/health")
     assert r.status_code == 200
     assert r.json()["status"] == "ok"
+
+
+def test_delete_project_with_dialogue_lines(client) -> None:
+    """删除带台词本/剧情卡/审计的项目不因外键失败。"""
+    import app.core.database as dbmod
+    from app.models.dialogue import DialogueLine
+    from app.models.project import Project
+
+    pid = client.post("/api/v1/projects", json={"name": "待删除项目"}).json()["id"]
+    client.post(
+        f"/api/v1/projects/{pid}/documents/import",
+        files={"file": ("s.txt", "林风：你好。\n".encode(), "text/plain")},
+    )
+    client.post(f"/api/v1/projects/{pid}/parse", json={})
+    with dbmod.SessionLocal() as db:
+        p = db.get(Project, pid)
+        db.add(DialogueLine(project_id=pid, source_document_id=p.active_source_document_id, speaker_name="林风", source_text="你好。"))
+        db.commit()
+    assert client.delete(f"/api/v1/projects/{pid}").status_code == 204
+    assert client.get(f"/api/v1/projects/{pid}").status_code == 404

@@ -12,7 +12,10 @@ from app.models.knowledge import (
 )
 from app.models.project import Project
 from app.models.qa import QAIssue, WindowQuality
+from app.models.dialogue import DialogueLine
 from app.models.task import Task, TaskItem
+from app.models.audit import AuditLog
+from app.models.storyline import ChapterStoryline
 from app.models.translation import StyleGuide, Translation
 
 
@@ -50,6 +53,15 @@ def delete_project_cascade(db: Session, project_id: str) -> bool:
     )
     db.execute(delete(KnowledgeItem).where(KnowledgeItem.project_id == project_id))
     db.execute(delete(StyleGuide).where(StyleGuide.project_id == project_id))
+    db.execute(delete(DialogueLine).where(DialogueLine.project_id == project_id))
+    db.execute(delete(AuditLog).where(AuditLog.project_id == project_id))
+    db.execute(
+        delete(ChapterStoryline).where(
+            ChapterStoryline.chapter_id.in_(
+                db.query(Chapter.id).filter(Chapter.project_id == project_id).subquery()
+            )
+        )
+    )
     db.execute(delete(Task).where(Task.project_id == project_id))
     db.execute(delete(SourceSegment).where(SourceSegment.project_id == project_id))
     db.execute(delete(Scene).where(Scene.project_id == project_id))
