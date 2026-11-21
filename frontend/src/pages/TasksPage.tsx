@@ -260,7 +260,7 @@ function TranslateSteps({ task }: { task: TaskInfo }) {
     {
       key: "qa",
       label: "质检打回修复",
-      complete: false,
+      complete: finished, // 任务完成即质检闭环：0 条问题也显示完成图标
       active: false,
       detail: `QA 问题 ${p.qa_issues ?? 0} 条（自动打回修复）`,
     },
