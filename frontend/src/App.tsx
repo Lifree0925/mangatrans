@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import { NavLink, Route, Routes } from "react-router-dom";
 import {
+  BookOpen,
   Clapperboard,
   FolderOpen,
   ListChecks,
@@ -16,11 +17,13 @@ import UpdateNotice from "./components/UpdateNotice";
 import { APP_VERSION } from "./lib/version";
 import ProjectsPage from "./pages/ProjectsPage";
 import ProjectPage from "./pages/ProjectPage";
+import KnowledgePage from "./pages/KnowledgePage";
 import TasksPage from "./pages/TasksPage";
 import SettingsPage from "./pages/SettingsPage";
 
 const nav = [
   { to: "/", label: "项目", icon: FolderOpen, end: true },
+  { to: "/knowledge", label: "知识库", icon: BookOpen },
   { to: "/tasks", label: "任务中心", icon: ListChecks },
   { to: "/settings", label: "设置", icon: Settings },
 ];
@@ -90,6 +93,7 @@ export default function App() {
         <Routes>
           <Route path="/" element={<ProjectsPage />} />
           <Route path="/projects/:id" element={<ProjectPage />} />
+          <Route path="/knowledge" element={<KnowledgePage />} />
           <Route path="/tasks" element={<TasksPage />} />
           <Route path="/settings" element={<SettingsPage />} />
         </Routes>

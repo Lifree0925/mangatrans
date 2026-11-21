@@ -1,7 +1,9 @@
 /** 任务中心：任务步骤明细、进度与错误（中文）。 */
 
+import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { CheckCircle2, Circle, Loader2, RotateCcw, Trash2, XCircle } from "lucide-react";
+import { Link } from "react-router-dom";
+import { Archive, CheckCircle2, Circle, History, Loader2, RotateCcw, Trash2, Undo2, X, XCircle } from "lucide-react";
 import { api } from "../lib/api";
 import { toast } from "../lib/feedback";
 import type { TaskInfo } from "../lib/types";
@@ -42,24 +44,40 @@ const EXPRESS_STEPS = [
   { key: "approve", label: "批准定稿" },
 ];
 
+function fmtSecs(secs?: number): string {
+  if (secs == null) return "";
+  if (secs < 60) return `${Math.round(secs)} 秒`;
+  const m = Math.floor(secs / 60);
+  const r = Math.round(secs % 60);
+  return r ? `${m} 分 ${r} 秒` : `${m} 分钟`;
+}
+
 function stepDetail(key: string, step: Record<string, unknown> | undefined): string {
   if (!step) return "";
   switch (key) {
     case "knowledge": {
-      const s = step as { batches?: number; added?: number; failed_batches?: number };
-      return s.batches != null ? `共 ${s.batches} 批，提取 ${s.added ?? 0} 条${s.failed_batches ? `（失败 ${s.failed_batches} 批）` : ""}` : "";
+      const s = step as { batches?: number; added?: number; failed_batches?: number; elapsed_s?: number };
+      const parts: string[] = [];
+      if (s.batches != null) parts.push(`共 ${s.batches} 批`);
+      if (s.added != null) parts.push(s.added ? `新提取 ${s.added} 条` : "无新条目（已存在则去重）");
+      if (s.failed_batches) parts.push(`失败 ${s.failed_batches} 批（已跳过，不阻塞）`);
+      if (s.elapsed_s) parts.push(`耗时 ${fmtSecs(s.elapsed_s)}`);
+      return parts.join(" · ");
     }
     case "scene_cards": {
-      const s = step as { generated?: number; failed?: number };
+      const s = step as { generated?: number; failed?: number; note?: string };
+      if (s.note) return `已生成 ${s.generated ?? 0} 场 · ${s.note}`;
       return s.generated != null ? `已生成 ${s.generated} 场${s.failed ? `（失败 ${s.failed} 场）` : ""}` : "";
     }
     case "trial": {
-      const s = step as { windows?: number };
-      return s.windows != null ? `已试译 ${s.windows} 个窗口` : "";
+      const s = step as { windows?: number; style_guide_id?: string };
+      return s.windows != null ? `已试译 ${s.windows} 个窗口${s.style_guide_id ? " · 风格基线已建立" : ""}` : "";
     }
     case "translation": {
       const s = step as { done?: number; total?: number };
-      return s.total != null ? `已翻译 ${s.done ?? 0} / ${s.total} 个窗口` : "";
+      if (s.total == null) return "";
+      const pct = s.total ? Math.round(((s.done ?? 0) / s.total) * 100) : 0;
+      return `已翻译 ${s.done ?? 0} / ${s.total} 个窗口（${pct}%）`;
     }
     case "qa": {
       const s = step as { done?: number; total?: number; issues?: number; needs_review?: number; blocked?: number; severity_counts?: Record<string, number> };
@@ -72,7 +90,7 @@ function stepDetail(key: string, step: Record<string, unknown> | undefined): str
         sc.low ? `低 ${sc.low}` : "",
       ].filter(Boolean);
       const extra = [
-        s.issues ? `发现问题 ${s.issues} 条` : "",
+        s.issues ? `发现问题 ${s.issues} 条` : "未发现问题",
         sevParts.length ? sevParts.join(" / ") : "",
         s.needs_review ? `待复核 ${s.needs_review} 窗` : "",
         s.blocked ? `拦截 ${s.blocked} 窗` : "",
@@ -93,16 +111,33 @@ function ExpressSteps({ task }: { task: TaskInfo }) {
     current_step?: string;
   };
   const steps = progress.steps ?? {};
+  // 单步完成判定：translation/qa 有进度字段，须 done>=total 才算完成；其余步骤写入即完成
+  const stepDone = (key: string): boolean => {
+    const step = steps[key];
+    if (step === undefined) return false;
+    if (key === "translation" || key === "qa") {
+      const s = step as { done?: number; total?: number };
+      return s.total != null && (s.done ?? 0) >= s.total;
+    }
+    return true;
+  };
   const current = progress.current_step ?? (task.status === "running" ? EXPRESS_STEPS[0].key : "");
-  // 完成判定：该步骤已写入 steps；进行中：current_step 指向；失败任务：停在 current
   const currentIndex = EXPRESS_STEPS.findIndex((s) => s.key === current);
+  // 进行中步骤：运行状态下第一个未完成步骤
+  const firstPending = EXPRESS_STEPS.findIndex((s) => !stepDone(s.key));
   return (
     <div className="mt-3 space-y-1.5">
       {EXPRESS_STEPS.map((s, i) => {
         const step = steps[s.key];
-        const done = step !== undefined || (task.status === "completed");
-        const running = task.status === "running" && !done && i === (currentIndex >= 0 ? currentIndex : i);
-        const failedHere = task.status === "failed" && !done && i === (currentIndex >= 0 ? currentIndex : 0);
+        const done = stepDone(s.key) || task.status === "completed";
+        const running =
+          task.status === "running" &&
+          !done &&
+          (currentIndex >= 0 ? i === currentIndex : i === (firstPending >= 0 ? firstPending : i));
+        const failedHere =
+          task.status === "failed" &&
+          !done &&
+          i === (firstPending >= 0 ? firstPending : currentIndex >= 0 ? currentIndex : 0);
         return (
           <div key={s.key} className="flex items-start gap-2 text-xs">
             <span className="mt-0.5 shrink-0">
@@ -111,7 +146,7 @@ function ExpressSteps({ task }: { task: TaskInfo }) {
               ) : done ? (
                 <CheckCircle2 size={13} className="text-emerald-600" />
               ) : running ? (
-                <Loader2 size={13} className="animate-spin text-(--color-accent)" />
+                <Loader2 size={13} className="animate-spin text-emerald-600" />
               ) : (
                 <Circle size={13} className="text-(--color-border)" />
               )}
@@ -121,6 +156,9 @@ function ExpressSteps({ task }: { task: TaskInfo }) {
                 {s.label}
               </span>
               <span className="ml-2 text-(--color-muted)">{stepDetail(s.key, step)}</span>
+              {running && (
+                <span className="ml-2 font-medium text-(--color-accent)">执行中…</span>
+              )}
             </div>
           </div>
         );
@@ -131,6 +169,7 @@ function ExpressSteps({ task }: { task: TaskInfo }) {
 
 export default function TasksPage() {
   const qc = useQueryClient();
+  const [showHistory, setShowHistory] = useState(false);
 
   const tasks = useQuery({
     queryKey: ["tasks"],
@@ -147,6 +186,24 @@ export default function TasksPage() {
     onError: (err) => toast.error(`删除失败：${String(err)}`),
   });
 
+  const archivedTasks = useQuery({
+    queryKey: ["tasks", "archived"],
+    queryFn: () => api<TaskInfo[]>("/tasks?archived=true"),
+    enabled: showHistory,
+    refetchInterval: 3000,
+  });
+
+  const archiveTask = useMutation({
+    mutationFn: ({ taskId, archived }: { taskId: string; archived: boolean }) =>
+      api(`/tasks/${taskId}/archive`, { method: "POST", body: JSON.stringify({ archived }) }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["tasks"] });
+      qc.invalidateQueries({ queryKey: ["tasks", "archived"] });
+      toast.success("已归档，可在历史记录中查看");
+    },
+    onError: (err) => toast.error(`归档失败：${String(err)}`),
+  });
+
   const retry = useMutation({
     mutationFn: (taskId: string) => api(`/tasks/${taskId}/retry`, { method: "POST" }),
     onSuccess: () => {
@@ -158,8 +215,14 @@ export default function TasksPage() {
 
   return (
     <div className="flex h-full flex-col">
-      <div className="border-b border-(--color-border) px-6 py-4">
+      <div className="flex items-center border-b border-(--color-border) px-6 py-4">
         <h1 className="text-lg font-semibold">任务中心</h1>
+        <button
+          onClick={() => setShowHistory(true)}
+          className="ml-auto flex items-center gap-1.5 rounded-lg border border-(--color-border) px-3 py-1.5 text-sm hover:bg-(--color-panel2)"
+        >
+          <History size={15} /> 历史记录
+        </button>
       </div>
       <div className="flex-1 overflow-auto p-6">
         <div className="w-full space-y-3">
@@ -172,12 +235,24 @@ export default function TasksPage() {
                   <span className="rounded-md bg-(--color-panel2) px-2 py-0.5 text-xs font-medium">
                     {taskTypeLabel[t.task_type] ?? t.task_type}
                   </span>
-                  {t.project_name && (
-                    <span className="text-sm font-medium text-(--color-text)">{t.project_name}</span>
+                  {t.project_name && t.project_id && (
+                    t.status === "running" || t.status === "queued" ? (
+                      <Link
+                        to={`/projects/${t.project_id}`}
+                        title="返回该项目"
+                        className="text-sm font-medium text-(--color-text) hover:text-(--color-accent)"
+                      >
+                        {t.project_name}
+                      </Link>
+                    ) : (
+                      <span className="text-sm font-medium text-(--color-text)">{t.project_name}</span>
+                    )
                   )}
-                  <span className={`text-sm font-medium ${statusColor[t.status] ?? ""}`}>
-                    {statusLabel[t.status] ?? t.status}
-                  </span>
+                  {t.status !== "running" && t.status !== "queued" && (
+                    <span className={`text-sm font-medium ${statusColor[t.status] ?? ""}`}>
+                      {statusLabel[t.status] ?? t.status}
+                    </span>
+                  )}
                   {t.model && (
                     <span className="rounded-md bg-(--color-panel2) px-2 py-0.5 font-mono text-xs text-(--color-muted)">
                       {t.model}
@@ -186,7 +261,6 @@ export default function TasksPage() {
                   {t.created_at && (
                     <span className="text-xs text-(--color-muted)">
                       {new Date(t.created_at).toLocaleString()}
-                      {t.status === "running" && " · 运行中"}
                     </span>
                   )}
                   <div className="ml-auto flex items-center gap-2">
@@ -199,7 +273,16 @@ export default function TasksPage() {
                         <RotateCcw size={12} /> 重试
                       </button>
                     )}
-                    {["failed", "cancelled", "completed"].includes(t.status) && (
+                    {t.status === "completed" && (
+                      <button
+                        onClick={() => archiveTask.mutate({ taskId: t.id, archived: true })}
+                        className="flex items-center gap-1 rounded-lg border border-(--color-border) px-2 py-1 text-xs text-(--color-muted) hover:bg-(--color-panel2)"
+                        title="归档到历史记录"
+                      >
+                        <Archive size={12} /> 归档
+                      </button>
+                    )}
+                    {["failed", "cancelled"].includes(t.status) && (
                       <button
                         onClick={() => removeTask.mutate(t.id)}
                         className="flex items-center gap-1 rounded-lg border border-(--color-border) px-2 py-1 text-xs text-(--color-muted) hover:bg-red-50 hover:text-red-600"
@@ -222,9 +305,11 @@ export default function TasksPage() {
 
                 {t.task_type === "express" && <ExpressSteps task={t} />}
                 {t.task_type !== "express" && prog.total != null && (
-                  <p className="mt-2 text-xs text-(--color-muted)">
+                  <div className="mt-2 flex items-center gap-2 text-xs text-(--color-muted)">
+                    {t.status === "running" && <Loader2 size={13} className="animate-spin text-(--color-accent)" />}
                     已处理 {prog.done ?? 0} / {prog.total} 个窗口
-                  </p>
+                    （{prog.total ? Math.round(((prog.done ?? 0) / prog.total) * 100) : 0}%）
+                  </div>
                 )}
 
                 {t.error_message && (
@@ -237,6 +322,55 @@ export default function TasksPage() {
           })}
         </div>
       </div>
+
+      {showHistory && (
+        <div
+          className="fixed inset-0 z-[70] flex items-center justify-center bg-black/30 p-6"
+          onClick={() => setShowHistory(false)}
+        >
+          <div
+            className="flex max-h-[80vh] w-full max-w-3xl flex-col rounded-2xl bg-(--color-bg) p-5 shadow-2xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between">
+              <h2 className="text-base font-semibold">历史记录</h2>
+              <button
+                onClick={() => setShowHistory(false)}
+                className="rounded-lg p-1.5 text-(--color-muted) hover:bg-(--color-panel2)"
+                title="关闭"
+              >
+                <X size={18} />
+              </button>
+            </div>
+            <div className="mt-4 flex-1 space-y-2 overflow-auto">
+              {archivedTasks.data?.length === 0 && (
+                <p className="py-8 text-center text-sm text-(--color-muted)">暂无历史记录</p>
+              )}
+              {archivedTasks.data?.map((t) => (
+                <div key={t.id} className="flex items-center gap-3 rounded-xl border border-(--color-border) bg-(--color-panel) px-4 py-2.5">
+                  <span className="rounded-md bg-(--color-panel2) px-2 py-0.5 text-xs font-medium">
+                    {taskTypeLabel[t.task_type] ?? t.task_type}
+                  </span>
+                  <span className="text-sm font-medium">{t.project_name ?? "已删除项目"}</span>
+                  <span className={`text-xs ${t.status === "completed" ? "text-emerald-600" : "text-red-600"}`}>
+                    {statusLabel[t.status] ?? t.status}
+                  </span>
+                  {t.created_at && (
+                    <span className="text-xs text-(--color-muted)">{new Date(t.created_at).toLocaleString()}</span>
+                  )}
+                  <button
+                    onClick={() => archiveTask.mutate({ taskId: t.id, archived: false })}
+                    className="ml-auto flex items-center gap-1 rounded-lg border border-(--color-border) px-2 py-1 text-xs hover:bg-(--color-panel2)"
+                    title="取消归档，回到任务中心"
+                  >
+                    <Undo2 size={12} /> 取消归档
+                  </button>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

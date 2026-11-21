@@ -96,12 +96,66 @@ def patch_knowledge(
     if "canonical_key" in payload:
         item.canonical_key = payload["canonical_key"]
         item.version += 1
+    if "data" in payload and isinstance(payload["data"], dict):
+        # 合并 data（如 {"translation": "..."}），保留其它字段
+        import json
+
+        merged = dict(json.loads(item.data_json or "{}"))
+        merged.update(payload["data"])
+        item.data_json = json.dumps(merged, ensure_ascii=False)
+        item.version += 1
+    db.commit()
     stale = 0
-    if "status" in payload or "canonical_key" in payload:
+    if any(k in payload for k in ("status", "canonical_key", "data")):
         from app.services.translation_batch import mark_stale_for_knowledge
 
         stale = mark_stale_for_knowledge(db, item.id)
     return {"id": item.id, "status": item.status, "version": item.version, "stale_translations": stale}
+
+
+@router.delete("/knowledge/{item_id}", status_code=204)
+def delete_knowledge(project_id: str, item_id: str, db: Session = Depends(get_db)) -> None:
+    """删除知识条目（别名/证据级联删除）。"""
+    from sqlalchemy import delete
+
+    from app.models.knowledge import KnowledgeAlias, KnowledgeEvidence
+
+    item = db.get(KnowledgeItem, item_id)
+    if item is None or item.project_id != project_id:
+        raise HTTPException(status_code=404, detail="知识条目不存在")
+    db.execute(delete(KnowledgeAlias).where(KnowledgeAlias.knowledge_id == item_id))
+    db.execute(delete(KnowledgeEvidence).where(KnowledgeEvidence.knowledge_id == item_id))
+    db.delete(item)
+    db.commit()
+
+
+@router.post("/knowledge", status_code=201)
+def add_knowledge(project_id: str, payload: dict, db: Session = Depends(get_db)) -> dict:
+    """手动添加知识条目（例如翻译人名/术语）。payload: {item_type, canonical_key, translation?, status?}"""
+    import json
+
+    project = _project(db, project_id)
+    item_type = payload.get("item_type", "term")
+    if item_type not in ("character", "term", "relation", "rule"):
+        raise HTTPException(status_code=400, detail="类型只能是 人物/术语/关系/规则")
+    key = str(payload.get("canonical_key", "")).strip()
+    if not key:
+        raise HTTPException(status_code=400, detail="条目名称不能为空")
+    translation = str(payload.get("translation", "")).strip()
+    data = {"translation": translation} if translation else {}
+    item = KnowledgeItem(
+        project_id=project_id,
+        item_type=item_type,
+        canonical_key=key,
+        data_json=json.dumps(data, ensure_ascii=False),
+        status=payload.get("status", "approved"),
+        source="manual",
+    )
+    db.add(item)
+    db.commit()
+    db.refresh(item)
+    return {"id": item.id, "item_type": item.item_type, "canonical_key": item.canonical_key,
+            "status": item.status, "data_json": item.data_json}
 
 
 @router.get("/scene-cards", response_model=list[SceneCardOut])

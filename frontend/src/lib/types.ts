@@ -74,6 +74,7 @@ export interface TaskInfo {
   project_id?: string;
   project_name?: string;
   model?: string;
+  archived?: boolean;
 }
 
 export interface ProviderInfo {
@@ -107,4 +108,14 @@ export interface ExportResult {
   content: string | null;
   content_base64: string | null;
   report: { segments: number; untranslated: number; issues_total: number; high_critical_issues: number };
+}
+
+export interface KnowledgeEntry {
+  id: string;
+  item_type: string;
+  canonical_key: string;
+  data_json: string;
+  status: string;
+  source: string;
+  version: number;
 }

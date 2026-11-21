@@ -186,6 +186,65 @@ def get_translations(segment_id: str, db: Session = Depends(get_db)) -> dict:
     }
 
 
+@router.post("/translation/update")
+def start_update_translation(project_id: str, payload: dict, db: Session = Depends(get_db)) -> dict:
+    """增量翻译：只重译「待重译/无译文」片段（知识库或原文修改后使用）。"""
+    project = _project(db, project_id)
+    doc = _active_doc(db, project)
+    from app.services.provider_service import ensure_verified_provider
+
+    ensure_verified_provider(db)
+    from app.services.window_planner import build_windows
+
+    segs = list(
+        db.scalars(
+            select(SourceSegment)
+            .where(SourceSegment.source_document_id == doc.id)
+            .order_by(SourceSegment.segment_no)
+        )
+    )
+    # 当前最新 polished 译文
+    current_ids = set(
+        db.scalars(
+            select(Translation.segment_id).where(
+                Translation.segment_id.in_([s.id for s in segs]),
+                Translation.stage == "polished",
+                Translation.freshness_status == "current",
+            )
+        )
+    )
+    stale_ids = set(
+        db.scalars(
+            select(Translation.segment_id).where(
+                Translation.segment_id.in_([s.id for s in segs]),
+                Translation.stage == "polished",
+                Translation.freshness_status == "stale",
+            )
+        )
+    )
+    targets = [s for s in segs if s.id not in current_ids or s.id in stale_ids]
+    if not targets:
+        return {"task_id": None, "windows": 0, "detail": "没有需要更新的内容"}
+    windows = build_windows(targets)
+    from app.services.translation_batch import expand_translation_task
+
+    task = create_task(
+        db,
+        project_id,
+        "translate",
+        {
+            "kind": "update",
+            "mode": payload.get("mode", "guided"),
+            "source_document_id": doc.id,
+            "model": payload.get("model", "fake-model"),
+        },
+    )
+    count = expand_translation_task(db, task, doc.id, segment_subset=[s.id for s in targets])
+    task.progress_json = json.dumps({"done": 0, "total": count})
+    db.commit()
+    return {"task_id": task.id, "windows": count}
+
+
 @router.post("/translation/start")
 def start_batch_translation(project_id: str, payload: dict, db: Session = Depends(get_db)) -> dict:
     _ensure_no_running_task(db, project_id)

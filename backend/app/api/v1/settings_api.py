@@ -213,6 +213,19 @@ def retry_task(task_id: str, db: Session = Depends(get_db)) -> dict:
     return {"id": task.id, "status": task.status}
 
 
+@router.post("/tasks/{task_id}/archive")
+def archive_task(task_id: str, payload: dict, db: Session = Depends(get_db)) -> dict:
+    """归档/取消归档任务：归档后任务中心隐藏，历史记录查看。"""
+    task = db.get(Task, task_id)
+    if task is None:
+        raise HTTPException(status_code=404, detail="任务不存在")
+    if task.status not in ("completed", "failed", "cancelled"):
+        raise HTTPException(status_code=409, detail="任务仍在执行，完成后才能归档")
+    task.archived = bool(payload.get("archived", True))
+    db.commit()
+    return {"id": task.id, "archived": task.archived}
+
+
 @router.delete("/tasks/{task_id}", status_code=204)
 def delete_task(task_id: str, db: Session = Depends(get_db)) -> None:
     """硬删除任务记录（仅限失败/取消/已完成；运行中拒绝）。"""
@@ -229,12 +242,15 @@ def delete_task(task_id: str, db: Session = Depends(get_db)) -> None:
 
 
 @router.get("/tasks")
-def list_all_tasks(db: Session = Depends(get_db)) -> list[dict]:
-    """任务中心：全部项目最近任务（含项目名）。"""
+def list_all_tasks(db: Session = Depends(get_db), archived: bool = False) -> list[dict]:
+    """任务中心：archived=false 返回活动任务；archived=true 返回历史记录。"""
     from app.models.project import Project
 
     tasks = db.scalars(
-        select(Task).order_by(Task.created_at.desc()).limit(100)
+        select(Task)
+        .where(Task.archived.is_(archived))
+        .order_by(Task.created_at.desc())
+        .limit(200)
     ).all()
     names = {
         p.id: p.name
@@ -251,6 +267,7 @@ def list_all_tasks(db: Session = Depends(get_db)) -> list[dict]:
             "project_id": t.project_id,
             "project_name": names.get(t.project_id, "已删除项目"),
             "model": json.loads(t.config_snapshot_json or "{}").get("model", ""),
+            "archived": t.archived,
         }
         for t in tasks
     ]

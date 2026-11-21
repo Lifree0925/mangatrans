@@ -28,3 +28,25 @@ body {
 ::-webkit-scrollbar { width: 8px; height: 8px; }
 ::-webkit-scrollbar-thumb { background: #d9d9d9; border-radius: 8px; }
 ::-webkit-scrollbar-track { background: transparent; }
+
+/* 译文流式渐显：新完成的窗口淡入，翻译中光标闪烁 */
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(4px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+.translation-fade-in {
+  animation: fadeIn 0.45s ease both;
+}
+@keyframes blink {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0; }
+}
+.translating-cursor {
+  display: inline-block;
+  width: 8px;
+  height: 14px;
+  margin-left: 4px;
+  background: var(--color-accent);
+  animation: blink 1s step-start infinite;
+  vertical-align: -2px;
+}

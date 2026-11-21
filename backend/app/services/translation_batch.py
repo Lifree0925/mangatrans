@@ -16,8 +16,13 @@ from app.services.translation import PROMPT_VERSION, translate_window, validate_
 from app.services.window_planner import build_windows
 
 
-def expand_translation_task(db: Session, task: Task, source_document_id: str) -> int:
-    """把任务展开为窗口级 task_items（串行执行顺序即窗口顺序）。"""
+def expand_translation_task(
+    db: Session, task: Task, source_document_id: str, segment_subset: list[str] | None = None
+) -> int:
+    """把任务展开为窗口级 task_items（串行执行顺序即窗口顺序）。
+
+    segment_subset：增量模式只翻译指定片段（保持原文顺序）。
+    """
     segs = list(
         db.scalars(
             select(SourceSegment)
@@ -25,6 +30,9 @@ def expand_translation_task(db: Session, task: Task, source_document_id: str) ->
             .order_by(SourceSegment.segment_no)
         )
     )
+    if segment_subset is not None:
+        subset = set(segment_subset)
+        segs = [s for s in segs if s.id in subset]
     windows = build_windows(segs)
     for i, window in enumerate(windows):
         db.add(

@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Folder, FolderOpen, Plus, Search, Trash2, X } from "lucide-react";
+import { Check, Folder, FolderOpen, Pencil, Plus, Search, Trash2, X } from "lucide-react";
 import { Link } from "react-router-dom";
 import { api } from "../lib/api";
 import { confirmAction, toast } from "../lib/feedback";
@@ -51,6 +51,20 @@ export default function ProjectsPage() {
       toast.error(`选择文件夹失败：${String(err)}`);
     }
   };
+
+  const [renamingId, setRenamingId] = useState<string | null>(null);
+  const [renameDraft, setRenameDraft] = useState("");
+
+  const rename = useMutation({
+    mutationFn: ({ id, name }: { id: string; name: string }) =>
+      api<Project>(`/projects/${id}`, { method: "PATCH", body: JSON.stringify({ name }) }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["projects"] });
+      setRenamingId(null);
+      toast.success("项目名称已更新");
+    },
+    onError: (err) => toast.error(`重命名失败：${String(err)}`),
+  });
 
   const remove = useMutation({
     mutationFn: (id: string) => api<void>(`/projects/${id}`, { method: "DELETE" }),
@@ -132,7 +146,33 @@ export default function ProjectsPage() {
                     <Folder size={17} className="text-(--color-muted)" />
                   </div>
                   <div className="min-w-0">
-                    <p className="truncate text-sm font-medium">{p.name}</p>
+                    {renamingId === p.id ? (
+                      <div className="flex items-center gap-1.5">
+                        <input
+                          value={renameDraft}
+                          onChange={(e) => setRenameDraft(e.target.value)}
+                          onKeyDown={(e) => e.key === "Enter" && renameDraft.trim() && rename.mutate({ id: p.id, name: renameDraft.trim() })}
+                          autoFocus
+                          className="w-full rounded-lg border border-(--color-accent) bg-(--color-bg) px-2 py-1 text-sm font-medium outline-none"
+                        />
+                        <button
+                          onClick={() => renameDraft.trim() && rename.mutate({ id: p.id, name: renameDraft.trim() })}
+                          className="rounded p-1 text-(--color-accent) hover:bg-(--color-panel2)"
+                          title="保存"
+                        >
+                          <Check size={14} />
+                        </button>
+                        <button
+                          onClick={() => setRenamingId(null)}
+                          className="rounded p-1 text-(--color-muted) hover:bg-(--color-panel2)"
+                          title="取消"
+                        >
+                          <X size={14} />
+                        </button>
+                      </div>
+                    ) : (
+                      <p className="truncate text-sm font-medium">{p.name}</p>
+                    )}
                     <p className="text-xs text-(--color-muted)">
                       {p.source_language} → {p.target_language} ·{" "}
                       {new Date(p.updated_at).toLocaleString()}
@@ -144,6 +184,16 @@ export default function ProjectsPage() {
                     )}
                   </div>
                 </Link>
+                <button
+                  onClick={() => {
+                    setRenamingId(p.id);
+                    setRenameDraft(p.name);
+                  }}
+                  className="rounded-lg p-1.5 text-(--color-muted) opacity-0 hover:bg-(--color-panel2) hover:text-(--color-accent) group-hover:opacity-100"
+                  title="修改项目名称"
+                >
+                  <Pencil size={15} />
+                </button>
                 <button
                   onClick={() => confirmRemove(p)}
                   className="rounded-lg p-1.5 text-(--color-muted) opacity-0 hover:bg-(--color-panel2) hover:text-red-600 group-hover:opacity-100"

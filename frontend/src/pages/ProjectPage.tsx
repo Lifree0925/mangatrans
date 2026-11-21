@@ -2,7 +2,7 @@
 
 import { useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { ArrowLeft, Check, ChevronLeft, ChevronRight, Download, FileUp, Pencil, ScanText, ShieldCheck, X, Zap } from "lucide-react";
+import { ArrowLeft, Check, CheckCircle2, ChevronLeft, ChevronRight, Download, FileUp, Loader2, Pencil, ScanText, ShieldCheck, X, Zap } from "lucide-react";
 import { Link, useParams } from "react-router-dom";
 import { api } from "../lib/api";
 import { toast } from "../lib/feedback";
@@ -86,6 +86,7 @@ export default function ProjectPage() {
   const latestTranslations = useQuery({
     queryKey: ["latest-translations", id],
     queryFn: () => api<{ items: LatestTranslation[] }>(`/projects/${id}/translations/latest`),
+    refetchInterval: 2000,
   });
 
   const saveEdit = async () => {
@@ -132,7 +133,11 @@ export default function ProjectPage() {
     queryKey: ["task", expressTaskId],
     queryFn: () => api<TaskInfo>(`/tasks/${expressTaskId!}`),
     enabled: !!expressTaskId,
-    refetchInterval: (q) => (q.state.data?.status === "running" || q.state.data?.status === "queued" ? 1500 : false),
+    refetchInterval: (q) => {
+      const s = q.state.data?.status;
+      // 未拿到终态前持续轮询；完成/失败/取消后停止
+      return s && !["completed", "failed", "cancelled"].includes(s) ? 1500 : false;
+    },
   });
 
   const invalidate = () =>
@@ -146,6 +151,16 @@ export default function ProjectPage() {
     },
     onSuccess: () => invalidate(),
     onError: (err) => toast.error(`导入失败：${String(err)}`),
+  });
+
+  const update = useMutation({
+    mutationFn: () => api<{ task_id: string | null; windows: number }>(`/projects/${id}/translation/update`, { method: "POST", body: "{}" }),
+    onSuccess: (r) => {
+      qc.invalidateQueries({ queryKey: ["project-tasks", id] });
+      if (r.task_id) toast.success(`已启动更新翻译（${r.windows} 个窗口）`);
+      else toast.info("没有需要更新的内容");
+    },
+    onError: (err) => toast.error(`更新翻译失败：${String(err)}`),
   });
 
   const express = useMutation({
@@ -224,7 +239,6 @@ export default function ProjectPage() {
         <Link to="/" className="rounded p-1 text-(--color-muted) hover:bg-(--color-panel2)">
           <ArrowLeft size={16} />
         </Link>
-        <h1 className="font-semibold">{project.data?.name ?? "…"}</h1>
         {providers.data && providers.data.length > 0 ? (
           <label className="flex items-center gap-1.5 text-xs text-(--color-muted)">
             <select
@@ -244,6 +258,35 @@ export default function ProjectPage() {
             未配置模型 → 去设置
           </Link>
         )}
+        {(() => {
+          const list = projectTasks.data ?? [];
+          const running = list.find(
+            (t) => t.status === "running" || t.status === "queued"
+          );
+          const anyTask =
+            (expressTaskId ? list.find((t) => t.id === expressTaskId) : undefined) ??
+            running ??
+            (expressTask?.data ?? null);
+          if (!anyTask) return null;
+          const isRunning = anyTask.status === "running" || anyTask.status === "queued";
+          const label = isRunning
+            ? "翻译中…"
+            : anyTask.status === "failed"
+              ? "任务失败"
+              : "任务已完成";
+          return (
+            <span className={`flex items-center gap-1.5 rounded-lg px-2 py-1 text-xs ${
+              isRunning
+                ? "bg-(--color-panel) font-medium text-(--color-accent)"
+                : anyTask.status === "failed"
+                  ? "bg-red-50 text-red-600"
+                  : "bg-emerald-50 text-emerald-700"
+            }`}>
+              {isRunning && <Loader2 size={12} className="animate-spin" />}
+              {label}
+            </span>
+          );
+        })()}
         <div className="ml-auto flex items-center gap-2">
           {/* 1. 数据准备 */}
           <button
@@ -269,24 +312,64 @@ export default function ProjectPage() {
             <ScanText size={15} /> {parse.isPending ? "解析中…" : "解析"}
           </button>
 
-          {/* 2. 主操作：翻译 */}
+          {/* 2. 主操作：翻译（情境化） */}
           <span className="mx-1 h-5 w-px bg-(--color-border)" />
-          <button
-            onClick={() => express.mutate()}
-            disabled={
+          {(() => {
+            const busy =
               express.isPending ||
-              (projectTasks.data ?? []).some((t) => t.status === "running" || t.status === "queued")
+              update.isPending ||
+              (projectTasks.data ?? []).some((t) => t.status === "running" || t.status === "queued");
+            const items = latestTranslations.data?.items ?? [];
+            const staleCount = items.filter((i) => i.freshness_status === "stale").length;
+            const translatedCount = items.length;
+            if (busy) {
+              return (
+                <button
+                  disabled
+                  className="flex items-center gap-1.5 rounded-lg bg-(--color-accent) px-3 py-1.5 text-sm text-white opacity-50"
+                >
+                  <Loader2 size={15} className="animate-spin" />
+                  直出中…
+                </button>
+              );
             }
-            className="flex items-center gap-1.5 rounded-lg bg-(--color-accent) px-3 py-1.5 text-sm text-white hover:bg-(--color-accent-hover) disabled:opacity-50"
-            title="自动完成整理、翻译与检查，生成完整英文剧本"
-          >
-            <Zap size={15} />
-            {express.isPending
-              ? "启动中…"
-              : expressTask?.data?.status === "running" || expressTask?.data?.status === "queued"
-                ? "直出中…"
-                : "一键直出"}
-          </button>
+            if (staleCount > 0) {
+              return (
+                <button
+                  onClick={() => update.mutate()}
+                  className="flex items-center gap-1.5 rounded-lg bg-(--color-accent) px-3 py-1.5 text-sm text-white hover:bg-(--color-accent-hover)"
+                  title={`有 ${staleCount} 条译文待重译（原文或知识库被修改），只重译受影响内容`}
+                >
+                  <Zap size={15} /> 更新翻译（{staleCount}）
+                </button>
+              );
+            }
+            if (translatedCount > 0) {
+              return (
+                <span className="flex items-center gap-2">
+                  <span className="flex items-center gap-1 rounded-lg bg-emerald-50 px-3 py-1.5 text-sm font-medium text-emerald-700">
+                    <CheckCircle2 size={15} /> 已翻译完成
+                  </span>
+                  <button
+                    onClick={() => express.mutate()}
+                    className="rounded-lg border border-(--color-border) px-3 py-1.5 text-sm text-(--color-muted) hover:bg-(--color-panel2)"
+                    title="重新翻译全部内容（覆盖已有译文）"
+                  >
+                    重新翻译
+                  </button>
+                </span>
+              );
+            }
+            return (
+              <button
+                onClick={() => express.mutate()}
+                className="flex items-center gap-1.5 rounded-lg bg-(--color-accent) px-3 py-1.5 text-sm text-white hover:bg-(--color-accent-hover)"
+                title="自动完成整理、翻译与检查，生成完整英文剧本"
+              >
+                <Zap size={15} /> 一键直出
+              </button>
+            );
+          })()}
 
           {/* 3. 检查与交付 */}
           <span className="mx-1 h-5 w-px bg-(--color-border)" />
@@ -307,16 +390,6 @@ export default function ProjectPage() {
         </div>
       </div>
 
-      {expressTask?.data && (
-        <div className="border-b border-(--color-border) bg-(--color-panel) px-5 py-1.5 text-xs text-(--color-muted)">
-          一键直出任务：{expressTask.data.status}
-          {(expressTask.data.progress as { done?: number; total?: number }).total != null &&
-            `（${(expressTask.data.progress as { done?: number }).done ?? 0}/${(expressTask.data.progress as { total?: number }).total ?? 0}）`}
-          {expressTask.data.error_message && (
-            <span className="text-red-600"> · {expressTask.data.error_message}</span>
-          )}
-        </div>
-      )}
 
       <div className="flex flex-1 overflow-hidden">
         {!chaptersCollapsed && (
@@ -482,7 +555,7 @@ export default function ProjectPage() {
                     {isEditingTarget ? editor : (
                       <>
                         {tr ? (
-                          <p className={`whitespace-pre-wrap text-(--color-muted) transition-colors group-hover:text-(--color-accent) ${tr.freshness_status === "stale" ? "italic" : ""}`}>
+                          <p className={`translation-fade-in whitespace-pre-wrap text-(--color-muted) transition-colors group-hover:text-(--color-accent) ${tr.freshness_status === "stale" ? "italic" : ""}`}>
                             {tr.target_text}
                             {tr.freshness_status === "stale" && (
                               <span
