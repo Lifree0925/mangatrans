@@ -64,12 +64,17 @@ async def lifespan(_app: FastAPI):
     import app.core.database as dbmod
 
     from app.pipeline.runner import recover_threaded_tasks
+    from app.pipeline.worker import recover_all_running
     from app.services.provider_service import set_default_from_db
 
     with dbmod.SessionLocal() as db:
         set_default_from_db(db)
         # 崩溃恢复：把无执行线程的 running 线程型任务标记失败（可手动重试）
         recover_threaded_tasks(db)
+        # 进程重启后无正在执行的窗口：全部 running 项回 pending，Worker 立即续跑
+        recovered = recover_all_running(db)
+        if recovered:
+            print(f"回收上次进程残留的 {recovered} 个执行中窗口，Worker 将续跑")
 
     worker_task = asyncio.create_task(worker_loop())
     try:

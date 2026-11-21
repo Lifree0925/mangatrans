@@ -235,11 +235,12 @@ function TranslateSteps({ task }: { task: TaskInfo }) {
   const draftDone = p.draft_carry ? Object.keys(p.draft_carry).length : 0;
   const done = p.done ?? 0;
   const running = task.status === "running" || task.status === "queued";
+  const finished = task.status === "completed";
   const nodes = [
     {
       key: "draft",
       label: "草稿（锁事实）",
-      complete: total > 0 && draftDone >= total,
+      complete: finished || (total > 0 && draftDone >= total),
       active: running && draftDone < total,
       detail:
         total > 0
@@ -249,7 +250,7 @@ function TranslateSteps({ task }: { task: TaskInfo }) {
     {
       key: "polish",
       label: "润色（情境化 · 思考模式）",
-      complete: total > 0 && done >= total,
+      complete: finished || (total > 0 && done >= total),
       active: running && draftDone > 0 && done < total,
       detail:
         total > 0
@@ -261,7 +262,7 @@ function TranslateSteps({ task }: { task: TaskInfo }) {
       label: "质检打回修复",
       complete: false,
       active: false,
-      detail: `已修复 ${p.qa_issues ?? 0} 处`,
+      detail: `QA 问题 ${p.qa_issues ?? 0} 条（自动打回修复）`,
     },
     {
       key: "failed",
@@ -453,7 +454,7 @@ export default function TasksPage() {
                   </div>
                 </div>
 
-                {pct != null && (
+                {pct != null && t.status !== "completed" && (
                   <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-(--color-panel2)">
                     <div
                       className="h-full rounded-full bg-(--color-accent) transition-all"
@@ -495,28 +496,6 @@ export default function TasksPage() {
                     </div>
                   );
                 })()}
-
-                {t.task_type !== "express" && prog.total != null && (
-                  <div className="mt-2 flex items-center gap-2 text-xs text-(--color-muted)">
-                    {t.status === "running" && <Loader2 size={13} className="animate-spin text-(--color-accent)" />}
-                    {t.task_type === "dialogue" ? (
-                      <span>
-                        批次 {prog.done ?? 0} / {prog.total}
-                        {typeof prog.lines === "number" && ` · 已抽出台词 ${prog.lines} 条`}
-                        {prog.discarded ? ` · 丢弃 ${prog.discarded}` : ""}
-                        {prog.failed_batches ? ` · 失败批次 ${prog.failed_batches}` : ""}
-                      </span>
-                    ) : (
-                      <span>
-                        已处理 {prog.done ?? 0} / {prog.total} 个窗口
-                        （{prog.total ? Math.round(((prog.done ?? 0) / prog.total) * 100) : 0}%）
-                        {(t.progress as { qa_issues?: number }).qa_issues != null && (
-                          <> · QA 问题 {(t.progress as { qa_issues?: number }).qa_issues} 条</>
-                        )}
-                      </span>
-                    )}
-                  </div>
-                )}
 
                 {t.error_message && (
                   <div className="mt-2 rounded-lg bg-red-50 px-3 py-2 text-xs leading-5 text-red-600">

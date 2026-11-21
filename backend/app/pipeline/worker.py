@@ -41,6 +41,17 @@ def recover_stale_items(db) -> int:
     return len(rows)
 
 
+def recover_all_running(db) -> int:
+    """进程启动时回收全部 running 项（单机单 Worker：进程重启后不存在
+    正在执行的窗口，running 全部是上次进程的残留，无需等 30 分钟超时）。"""
+    rows = list(db.scalars(select(TaskItem).where(TaskItem.status == "running")))
+    for item in rows:
+        item.status = "pending"
+        item.finished_at = None
+    db.commit()
+    return len(rows)
+
+
 def _task_usable(db, task_id: str) -> bool:
     """任务级暂停/取消检查。"""
     task = db.get(Task, task_id)
@@ -153,7 +164,15 @@ def _apply_polish_progress(factory, task_id: str, res: dict) -> None:
         progress = json.loads(task.progress_json or "{}")
         progress["carry_over"] = res.get("polish_carry")
         progress["qa_issues"] = int(progress.get("qa_issues", 0)) + int(res.get("qa_issues", 0))
-        done = int(progress.get("done", 0)) + 1
+        # done 直接用成功项计数（不用累加）：进程重启/异常中断后进度自动校准
+        done = int(
+            db.scalar(
+                select(func.count())
+                .select_from(TaskItem)
+                .where(TaskItem.task_id == task_id, TaskItem.status == "succeeded")
+            )
+            or 0
+        )
         progress["done"] = done
         total = int(progress.get("total", 0)) or db.scalar(
             select(func.count()).select_from(TaskItem).where(TaskItem.task_id == task_id)
