@@ -18,6 +18,7 @@ from app.services.translation_batch import process_window_draft_item, process_wi
 
 LEASE_TIMEOUT_MINUTES = 30
 POLL_SECONDS = 1.0
+WINDOW_TIMEOUT_SECONDS = 600  # 单窗口硬超时：思考模式慢调用兜底，防 gather 僵死
 DRAFT_CONCURRENCY = 10
 POLISH_CONCURRENCY = 10
 
@@ -192,7 +193,10 @@ async def run_once(db_factory=None) -> int:
     if drafts:
         results = await asyncio.gather(
             *[
-                process_window_draft_item(factory, tid, iid, model)
+                asyncio.wait_for(
+                    process_window_draft_item(factory, tid, iid, model),
+                    timeout=WINDOW_TIMEOUT_SECONDS,
+                )
                 for tid, iid, model in jobs
             ],
             return_exceptions=True,
@@ -213,7 +217,13 @@ async def run_once(db_factory=None) -> int:
         return 0
 
     results = await asyncio.gather(
-        *[process_window_polish_item(factory, tid, iid, model) for tid, iid, model in jobs],
+        *[
+            asyncio.wait_for(
+                process_window_polish_item(factory, tid, iid, model),
+                timeout=WINDOW_TIMEOUT_SECONDS,
+            )
+            for tid, iid, model in jobs
+        ],
         return_exceptions=True,
     )
     touched_tasks: set[str] = set()

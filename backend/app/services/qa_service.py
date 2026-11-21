@@ -106,7 +106,8 @@ async def semantic_qa(
         messages=[{"role": "user", "content": prompt}],
         response_schema=SemanticOutput.model_json_schema(),
         temperature=0.2,
-        thinking="enabled",  # 质检需要推理，开启思考
+        thinking="enabled",  # 质检需要推理，开启思考（轻量 effort）
+        reasoning_effort="low",
     )
     try:
         out = SemanticOutput.model_validate(parse_llm_json(resp.content))

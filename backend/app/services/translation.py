@@ -68,10 +68,12 @@ class PolishOutput(BaseModel):
 
 async def _chat_json_validate(
     provider: LLMProvider, model: str, system: str, user: str, schema: dict,
-    out_model: type, thinking: str | None = "disabled",
+    out_model: type, thinking: str | None = "disabled", reasoning_effort: str | None = None,
 ):
     """调用 + 解析 + Pydantic 校验；校验失败带修复提示重试一次（思考模式输出易带瑕疵）。"""
-    data = await _chat_json(provider, model, system, user, schema, thinking=thinking)
+    data = await _chat_json(
+        provider, model, system, user, schema, thinking=thinking, reasoning_effort=reasoning_effort
+    )
     try:
         return out_model.model_validate(data)
     except ValidationError:
@@ -79,13 +81,25 @@ async def _chat_json_validate(
             "\n\n[FIX] Your last reply had schema errors (missing fields or wrong types). "
             "Return ONLY the complete JSON matching the required schema. No reasoning, no commentary."
         )
-        data = await _chat_json(provider, model, system, user_fixed, schema, thinking=thinking)
-        return out_model.model_validate(data)
+        data = await _chat_json(
+            provider, model, system, user_fixed, schema,
+            thinking=thinking, reasoning_effort=reasoning_effort,
+        )
+        try:
+            return out_model.model_validate(data)
+        except ValidationError:
+            # 兜底：思考模式输出持续不合格时退到非思考再试一次，保证窗口完成
+            if thinking == "enabled":
+                data = await _chat_json(
+                    provider, model, system, user_fixed, schema, thinking="disabled"
+                )
+                return out_model.model_validate(data)
+            raise
 
 
 async def _chat_json(
     provider: LLMProvider, model: str, system: str, user: str, schema: dict,
-    thinking: str | None = "disabled",
+    thinking: str | None = "disabled", reasoning_effort: str | None = None,
 ):
     """调用并解析 JSON；输出格式瑕疵时重试一次（带修复提示）。"""
     messages = [{"role": "system", "content": system}, {"role": "user", "content": user}]
@@ -95,6 +109,7 @@ async def _chat_json(
         response_schema=schema,
         temperature=0.3,
         thinking=thinking,
+        reasoning_effort=reasoning_effort,
     )
     if resp.finish_reason == "length":
         # 输出预算耗尽被截断：重试大概率同样截断，直接抛出明确错误
@@ -114,6 +129,7 @@ async def _chat_json(
             response_schema=schema,
             temperature=0.2,
             thinking=thinking,
+            reasoning_effort=reasoning_effort,
         )
         if resp.finish_reason == "length":
             raise LLMError("模型输出被截断（finish_reason=length）", retryable=False, code="output_truncated")
@@ -155,7 +171,7 @@ async def translate_window_polish(
     draft_block = "\n\n[FAITHFUL DRAFT]\n" + json.dumps(draft, ensure_ascii=False, indent=2)
     polish = await _chat_json_validate(
         provider, model, POLISH_SYSTEM, context.prompt_text + draft_block,
-        PolishOutput.model_json_schema(), PolishOutput, thinking="enabled",
+        PolishOutput.model_json_schema(), PolishOutput, thinking="enabled", reasoning_effort="low",
     )
     polish_list = [t.model_dump() for t in polish.translations]
     # 完整性复查：译文显著短于原文的段判定为漏译（截断），单段重译一次
@@ -244,7 +260,7 @@ async def repair_window(
     draft_block = "\n\n[FAITHFUL DRAFT]\n" + json.dumps(draft, ensure_ascii=False, indent=2)
     polish = await _chat_json_validate(
         provider, model, fix_system, context.prompt_text + draft_block,
-        PolishOutput.model_json_schema(), PolishOutput, thinking="enabled",
+        PolishOutput.model_json_schema(), PolishOutput, thinking="enabled", reasoning_effort="low",
     )
     return [t.model_dump() for t in polish.translations], polish.carry_over.model_dump()
 
