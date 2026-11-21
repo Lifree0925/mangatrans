@@ -538,6 +538,61 @@ export default function ProjectPage() {
 
       </div>
 
+      {editing && (() => {
+        const seg = segs.find((x) => x.id === editing.segmentId);
+        const sideLabel = editing.side === "source" ? "原文" : "译文";
+        return (
+          <div className="fixed inset-0 z-[90] flex items-center justify-center bg-black/30 p-6" onClick={() => setEditing(null)}>
+            <div className="flex h-[520px] w-full max-w-xl flex-col rounded-2xl bg-(--color-bg) p-5 shadow-2xl" onClick={(e) => e.stopPropagation()}>
+              <div className="flex shrink-0 items-center justify-between">
+                <h3 className="text-base font-semibold">
+                  编辑{sideLabel}
+                  {seg && (
+                    <span className="ml-2 font-sans text-xs font-normal text-(--color-muted)">
+                      片段 {seg.segment_no} · {seg.segment_type === "dialogue" ? "对白" : seg.segment_type === "narrative" ? "叙述" : seg.segment_type}
+                    </span>
+                  )}
+                </h3>
+                <button
+                  onClick={() => setEditing(null)}
+                  className="rounded-lg p-1.5 text-(--color-muted) hover:bg-(--color-panel2)"
+                  title="关闭"
+                >
+                  <X size={18} />
+                </button>
+              </div>
+              <textarea
+                value={editDraft}
+                onChange={(e) => setEditDraft(e.target.value)}
+                autoFocus
+                className="mt-4 h-[320px] w-full flex-1 resize-none rounded-xl border border-(--color-border) bg-(--color-bg) px-3 py-2 font-mono text-[13px] leading-6 outline-none focus:border-(--color-text)"
+              />
+              <div className="mt-3 flex shrink-0 justify-between">
+                <p className="font-sans text-xs leading-5 text-(--color-muted)">
+                  {editing.side === "source"
+                    ? "修改原文后，该段译文将标记为「待重译」，可一键重译。"
+                    : "直接修改译文将保存为新校对版本，不会被重译覆盖。"}
+                </p>
+                <div className="flex gap-2">
+                  <button
+                    onClick={() => setEditing(null)}
+                    className="rounded-lg border border-(--color-border) bg-(--color-bg) px-4 py-1.5 text-sm hover:bg-(--color-panel2)"
+                  >
+                    取消
+                  </button>
+                  <button
+                    onClick={saveEdit}
+                    className="flex items-center gap-1 rounded-lg bg-(--color-accent) px-4 py-1.5 text-sm text-white hover:bg-(--color-accent-hover)"
+                  >
+                    <Check size={14} /> 保存
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
+
       {retranslateOpen && (() => {
         const chs = chapters.data ?? [];
         const sel = retranslateChapters;
