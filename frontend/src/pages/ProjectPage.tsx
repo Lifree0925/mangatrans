@@ -1,6 +1,6 @@
 /** 项目工作台：导入、解析、章节树、片段列表、解析报告。 */
 
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ArrowLeft, Check, ChevronLeft, ChevronRight, Download, FileUp, Loader2, Pencil, RotateCcw, X, Zap } from "lucide-react";
 import { Link, useParams } from "react-router-dom";
@@ -23,18 +23,20 @@ export default function ProjectPage() {
   const bodyRef = useRef<HTMLDivElement | null>(null);
   const scrollRaf = useRef<number | null>(null);
 
+  // 段锚点缓存：数据变化时计算一次 offsetTop，滚动时不再触发布局查询（性能关键）
+  const segAnchorsRef = useRef<{ top: number; chapterId: string }[]>([]);
+
   const onBodyScroll = () => {
     if (scrollRaf.current != null) return;
     scrollRaf.current = requestAnimationFrame(() => {
       scrollRaf.current = null;
-      const container = bodyRef.current;
-      if (!container) return;
-      const top = container.getBoundingClientRect().top;
+      const c = bodyRef.current;
+      if (!c) return;
+      const st = c.scrollTop;
       let current: string | null = null;
-      for (const el of container.querySelectorAll<HTMLElement>("[data-seg-no]")) {
-        const r = el.getBoundingClientRect();
-        if (r.top >= top - 4) {
-          current = el.dataset.chapterId ?? null;
+      for (const a of segAnchorsRef.current) {
+        if (a.top >= st) {
+          current = a.chapterId;
           break;
         }
       }
@@ -247,6 +249,15 @@ export default function ProjectPage() {
   });
 
   const segs = segments.data ?? [];
+  useEffect(() => {
+    const c = bodyRef.current;
+    if (!c) return;
+    const anchors: { top: number; chapterId: string }[] = [];
+    c.querySelectorAll<HTMLElement>("[data-seg-no]").forEach((el) => {
+      anchors.push({ top: el.offsetTop, chapterId: el.dataset.chapterId ?? "" });
+    });
+    segAnchorsRef.current = anchors;
+  }, [segments.data]);
 
   return (
     <div className="h-full flex flex-col">
@@ -398,7 +409,7 @@ export default function ProjectPage() {
 
       <div className="flex flex-1 overflow-hidden">
         {!chaptersCollapsed && (
-        <aside className="w-[179px] shrink-0 overflow-auto p-3 text-sm">
+        <aside className="slim-scroll w-[179px] shrink-0 overflow-auto p-3 text-sm">
           {chapters.data?.map((ch) => {
             const firstSegNo = segs.find((seg) => seg.chapter_id === ch.id)?.segment_no;
             return (
@@ -450,7 +461,7 @@ export default function ProjectPage() {
         <div
           ref={bodyRef}
           onScroll={onBodyScroll}
-          className="flex-1 overflow-auto p-4 font-mono text-[13px] leading-6"
+          className="relative flex-1 overflow-auto p-4 font-mono text-[13px] leading-6"
         >
           <div className="mx-auto max-w-4xl">
             {segs.map((s) => {

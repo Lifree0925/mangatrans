@@ -1,6 +1,6 @@
 /** 知识库：角色档案（性格/说话方式）与章节剧情卡（情节/伏笔）。修改均通过浮层完成。 */
 
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Check, ChevronLeft, ChevronRight, Pencil, Plus, Trash2, X } from "lucide-react";
 import { api } from "../lib/api";
@@ -50,6 +50,8 @@ export default function KnowledgePage() {
   const [dialogueCollapsed, setDialogueCollapsed] = useState(false);
   const [dialogueActiveChapter, setDialogueActiveChapter] = useState<string | null>(null);
   const dialogueBodyRef = useRef<HTMLDivElement | null>(null);
+  const storyAnchorsRef = useRef<{ top: number; chapterId: string }[]>([]);
+  const dialogueAnchorsRef = useRef<{ top: number; chapterId: string }[]>([]);
   const [charGroup, setCharGroup] = useState<"major" | "minor">("major");
   // 章节剧情目录栏（与台词本同款）
   const [storyCollapsed, setStoryCollapsed] = useState(false);
@@ -140,6 +142,23 @@ export default function KnowledgePage() {
     enabled: !!active && tab === "dialogue",
     refetchInterval: 10000,
   });
+
+  useEffect(() => {
+    const sc = storyBodyRef.current;
+    if (sc) {
+      storyAnchorsRef.current = [];
+      sc.querySelectorAll<HTMLElement>("[data-story-chapter]").forEach((el) => {
+        storyAnchorsRef.current.push({ top: el.offsetTop, chapterId: el.dataset.storyChapter ?? "" });
+      });
+    }
+    const dc = dialogueBodyRef.current;
+    if (dc) {
+      dialogueAnchorsRef.current = [];
+      dc.querySelectorAll<HTMLElement>("[data-dlg-chapter]").forEach((el) => {
+        dialogueAnchorsRef.current.push({ top: el.offsetTop, chapterId: el.dataset.dlgChapter ?? "" });
+      });
+    }
+  }, [storylines.data, dialogueLines.data, tab]);
   const patchDialogueLine = useMutation({
     mutationFn: ({ id, body }: { id: string; body: Record<string, unknown> }) =>
       api(`/projects/${active}/dialogue-lines/${id}`, { method: "PATCH", body: JSON.stringify(body) }),
@@ -286,7 +305,7 @@ export default function KnowledgePage() {
         )}
       </div>
 
-      <div className={(tab === "dialogue" || tab === "storylines") && active ? "flex-1 overflow-hidden" : "flex-1 overflow-auto p-4"}>
+      <div className={(tab === "dialogue" || tab === "storylines") && active ? "flex-1 overflow-hidden" : "slim-scroll flex-1 overflow-auto p-4"}>
         {!active ? null : (
         <div className={tab === "dialogue" || tab === "storylines" ? "h-full" : "mx-auto max-w-5xl"}>
           {tab === "profiles" && (
@@ -426,7 +445,7 @@ export default function KnowledgePage() {
           <div className="flex h-full">
             {/* 章节目录（可收起） */}
             {!storyCollapsed && (
-              <div className="w-[179px] shrink-0 overflow-auto py-3">
+              <div className="slim-scroll w-[179px] shrink-0 overflow-auto py-3">
                 <p className="mb-1 px-3 text-xs font-medium text-(--color-muted)">章节目录</p>
                 {(storylines.data ?? []).map((s) => (
                   <button
@@ -469,19 +488,19 @@ export default function KnowledgePage() {
             <div
               ref={storyBodyRef}
               onScroll={() => {
-                const container = storyBodyRef.current;
-                if (!container) return;
-                const top = container.getBoundingClientRect().top;
+                const c = storyBodyRef.current;
+                if (!c) return;
+                const st = c.scrollTop;
                 let current: string | null = null;
-                for (const el of container.querySelectorAll<HTMLElement>("[data-story-chapter]")) {
-                  if (el.getBoundingClientRect().top >= top - 4) {
-                    current = el.dataset.storyChapter ?? null;
+                for (const a of storyAnchorsRef.current) {
+                  if (a.top >= st) {
+                    current = a.chapterId;
                     break;
                   }
                 }
                 setStoryActiveChapter(current);
               }}
-              className="flex-1 overflow-auto p-4"
+              className="relative flex-1 overflow-auto p-4"
             >
               <div className="mx-auto max-w-4xl space-y-3">
                 {(storylines.data ?? []).map((s) => {
@@ -548,7 +567,7 @@ export default function KnowledgePage() {
           <div className="flex h-full">
             {/* 章节目录（可收起） */}
             {!dialogueCollapsed && (
-              <div className="w-[179px] shrink-0 overflow-auto py-3">
+              <div className="slim-scroll w-[179px] shrink-0 overflow-auto py-3">
                 <p className="mb-1 px-3 text-xs font-medium text-(--color-muted)">章节目录</p>
                 {(dialogueLines.data?.chapters ?? []).map((ch: { chapter_id: string | null; chapter_no: number | null; chapter_title: string | null; scenes: { scene_id: string | null; scene_no: number | null; scene_heading: string | null; lines: DialogueLineInfo[] }[] }) => (
                   <button
@@ -595,19 +614,19 @@ export default function KnowledgePage() {
             <div
               ref={dialogueBodyRef}
               onScroll={() => {
-                const container = dialogueBodyRef.current;
-                if (!container) return;
-                const top = container.getBoundingClientRect().top;
+                const c = dialogueBodyRef.current;
+                if (!c) return;
+                const st = c.scrollTop;
                 let current: string | null = null;
-                for (const el of container.querySelectorAll<HTMLElement>("[data-dlg-chapter]")) {
-                  if (el.getBoundingClientRect().top >= top - 4) {
-                    current = el.dataset.dlgChapter ?? null;
+                for (const a of dialogueAnchorsRef.current) {
+                  if (a.top >= st) {
+                    current = a.chapterId;
                     break;
                   }
                 }
                 setDialogueActiveChapter(current);
               }}
-              className="flex-1 overflow-auto p-4 font-mono text-[13px] leading-6"
+              className="relative flex-1 overflow-auto p-4 font-mono text-[13px] leading-6"
             >
               {(dialogueLines.data?.chapters ?? []).map((ch: { chapter_id: string | null; chapter_no: number | null; chapter_title: string | null; scenes: { scene_id: string | null; scene_no: number | null; scene_heading: string | null; lines: DialogueLineInfo[] }[] }) => (
                 <div key={ch.chapter_id} data-dlg-chapter={ch.chapter_id} className="mx-auto max-w-4xl">
