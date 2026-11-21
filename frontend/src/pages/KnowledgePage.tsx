@@ -506,22 +506,31 @@ export default function KnowledgePage() {
                         <p className="col-span-2 text-(--color-muted)">{card.summary || "（无摘要）"}</p>
                         <div>
                           <p className="text-xs font-medium text-(--color-muted)">重要情节</p>
-                          <ul className="mt-1 list-disc space-y-0.5 pl-4">
-                            {card.key_events.map((e, i) => <li key={i}>{e}</li>)}
-                            {card.key_events.length === 0 && <li className="text-(--color-muted)">—</li>}
-                          </ul>
+                          {card.key_events.length > 0 ? (
+                            <ul className="mt-1 list-disc space-y-0.5 pl-4">
+                              {card.key_events.map((e, i) => <li key={i}>{e}</li>)}
+                            </ul>
+                          ) : (
+                            <p className="mt-1 text-(--color-muted)">暂无</p>
+                          )}
                         </div>
                         <div>
                           <p className="text-xs font-medium text-amber-600">伏笔（翻译时勿剧透）</p>
-                          <ul className="mt-1 list-disc space-y-0.5 pl-4">
-                            {card.foreshadowing.map((e, i) => <li key={i}>{e}</li>)}
-                            {card.foreshadowing.length === 0 && <li className="text-(--color-muted)">—</li>}
-                          </ul>
+                          {card.foreshadowing.length > 0 ? (
+                            <ul className="mt-1 list-disc space-y-0.5 pl-4">
+                              {card.foreshadowing.map((e, i) => <li key={i}>{e}</li>)}
+                            </ul>
+                          ) : (
+                            <p className="mt-1 text-(--color-muted)">暂无</p>
+                          )}
                           <p className="mt-2 text-xs font-medium text-(--color-muted)">前情依赖</p>
-                          <ul className="mt-1 list-disc space-y-0.5 pl-4">
-                            {card.prior_deps.map((e, i) => <li key={i}>{e}</li>)}
-                            {card.prior_deps.length === 0 && <li className="text-(--color-muted)">—</li>}
-                          </ul>
+                          {card.prior_deps.length > 0 ? (
+                            <ul className="mt-1 list-disc space-y-0.5 pl-4">
+                              {card.prior_deps.map((e, i) => <li key={i}>{e}</li>)}
+                            </ul>
+                          ) : (
+                            <p className="mt-1 text-(--color-muted)">暂无</p>
+                          )}
                         </div>
                       </div>
                     </div>
@@ -769,7 +778,7 @@ export default function KnowledgePage() {
           <div className="flex max-h-[85vh] w-full max-w-2xl flex-col rounded-2xl bg-(--color-bg) p-5 shadow-2xl" onClick={(e) => e.stopPropagation()}>
             <div className="flex items-center justify-between">
               <h2 className="text-base font-semibold">
-                编辑剧情卡 · 第 {editingStory.chapter_no} 章 {editingStory.chapter_title}
+                编辑剧情卡 · 第 {editingStory.chapter_no} 章 {editingStory.chapter_title ? String(editingStory.chapter_title).replace(/^#\s*第\d+回\s*/, "") : ""}
               </h2>
               <button onClick={() => setEditingStory(null)} className="rounded-lg p-1.5 text-(--color-muted) hover:bg-(--color-panel2)"><X size={16} /></button>
             </div>
