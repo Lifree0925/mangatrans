@@ -14,6 +14,16 @@ from app import __version__
 from app.api.v1 import dialogue, documents, knowledge, projects, qa, settings_api, translation
 from app.core import security
 from app.core.config import settings
+from app.core.single_instance import acquire_single_instance
+
+# 单实例锁：同一数据目录已有后端存活时本进程直接退出，避免孤儿进程堆积与并发写库。
+# 桌面壳（Tauri）在 spawn 前会探测 lock 文件中的端口复用已有实例，正常路径不会走到这里。
+_LOCK_FD = acquire_single_instance()
+if _LOCK_FD is None:
+    import sys
+
+    print("backend: 另一实例已在运行（同一数据目录），本进程退出", flush=True)
+    sys.exit(0)
 
 ALLOWED_ORIGINS = [
     "http://localhost:5173",

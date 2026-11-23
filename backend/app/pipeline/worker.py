@@ -14,13 +14,19 @@ from sqlalchemy import func, select
 
 import app.core.database as dbmod
 from app.models.task import Task, TaskItem
-from app.services.translation_batch import process_window_draft_item, process_window_polish_item
+from app.services.translation_batch import (
+    process_window_draft_item,
+    process_window_polish_item,
+    process_window_qa_item,
+)
 
 LEASE_TIMEOUT_MINUTES = 30
 POLL_SECONDS = 1.0
 WINDOW_TIMEOUT_SECONDS = 240  # 单窗口硬超时：思考模式慢调用兜底（截断已有降级重试，240s 足够）
+QA_TIMEOUT_SECONDS = 600  # QA 定点修复最多 3 轮润色请求：超时只重跑 QA 节点，不碰窗口翻译
 DRAFT_CONCURRENCY = 10
 POLISH_CONCURRENCY = 10
+QA_CONCURRENCY = 10
 
 
 def recover_stale_items(db) -> int:
@@ -132,6 +138,36 @@ def claim_polish_batch(db, limit: int = POLISH_CONCURRENCY) -> list[TaskItem]:
     return claimed
 
 
+def claim_qa_batch(db, limit: int = QA_CONCURRENCY) -> list[TaskItem]:
+    """原子领取最多 limit 个 QA 待办（并发执行；只领取活动任务的节点）。"""
+    rows = list(
+        db.scalars(
+            select(TaskItem)
+            .join(Task, TaskItem.task_id == Task.id)
+            .where(
+                TaskItem.status == "pending",
+                TaskItem.phase == "qa",
+                Task.status.in_(["running", "queued"]),
+            )
+            .order_by(TaskItem.window_id)
+            .limit(limit)
+        )
+    )
+    claimed: list[TaskItem] = []
+    for item in rows:
+        if not _task_usable(db, item.task_id):
+            continue
+        task = db.get(Task, item.task_id)
+        if task is not None and task.status == "queued":
+            task.status = "running"
+        item.status = "running"
+        item.started_at = datetime.now(timezone.utc)
+        item.attempts += 1
+        claimed.append(item)
+    db.commit()
+    return claimed
+
+
 def _mark_failed(factory, task_id: str, item_id: str, code: str) -> None:
     """失败处理：attempts < 3 时自动回 pending 重试（失败节点续跑），
     attempts 达上限才标记 failed 并累计任务进度中的 failed 计数。"""
@@ -191,13 +227,19 @@ def _apply_polish_progress(factory, task_id: str, res: dict) -> None:
             db.scalar(
                 select(func.count())
                 .select_from(TaskItem)
-                .where(TaskItem.task_id == task_id, TaskItem.status == "succeeded")
+                .where(
+                    TaskItem.task_id == task_id,
+                    TaskItem.status == "succeeded",
+                    TaskItem.phase != "qa",
+                )
             )
             or 0
         )
         progress["done"] = done
         total = int(progress.get("total", 0)) or db.scalar(
-            select(func.count()).select_from(TaskItem).where(TaskItem.task_id == task_id)
+            select(func.count())
+            .select_from(TaskItem)
+            .where(TaskItem.task_id == task_id, TaskItem.phase != "qa")
         ) or done
         progress["total"] = total
         progress["phase"] = "polish"
@@ -260,6 +302,20 @@ async def _maybe_lock_terms(factory) -> int:
     return int(result.get("locked", 0))
 
 
+def _apply_qa_progress(factory, task_id: str, res: dict) -> None:
+    """QA 节点完成后写任务进度（并发 QA 下单协程顺序写）。"""
+    with factory() as db:
+        task = db.get(Task, task_id)
+        if task is None:
+            return
+        progress = json.loads(task.progress_json or "{}")
+        progress["qa_done"] = int(progress.get("qa_done", 0)) + 1
+        progress["qa_issues"] = int(progress.get("qa_issues", 0)) + int(res.get("qa_issues", 0))
+        progress["phase"] = "qa"
+        task.progress_json = json.dumps(progress, ensure_ascii=False)
+        db.commit()
+
+
 def _mark_task_completed(factory, task_id: str) -> None:
     """全部窗口 polished 成功且无 draft 遗留 → 任务 completed。"""
     with factory() as db:
@@ -310,31 +366,56 @@ async def run_once(db_factory=None) -> int:
     with factory() as db:
         items = claim_polish_batch(db)
         jobs = [(it.task_id, it.id, _model_of(db, it.task_id)) for it in items]
-    if not jobs:
-        return 0
+    if jobs:
+        results = await asyncio.gather(
+            *[
+                asyncio.wait_for(
+                    process_window_polish_item(factory, tid, iid, model),
+                    timeout=WINDOW_TIMEOUT_SECONDS,
+                )
+                for tid, iid, model in jobs
+            ],
+            return_exceptions=True,
+        )
+        touched_tasks: set[str] = set()
+        for (tid, iid, _model), res in zip(jobs, results):
+            touched_tasks.add(tid)
+            if isinstance(res, BaseException):
+                _mark_failed(factory, tid, iid, type(res).__name__)
+            elif isinstance(res, dict) and "error" in res:
+                _mark_failed(factory, tid, iid, res["error"])
+            else:
+                _apply_polish_progress(factory, tid, res)
+        for tid in touched_tasks:
+            _mark_task_completed(factory, tid)
+        return len(jobs)
 
-    results = await asyncio.gather(
+    # QA 节点：定点查询 + 定点修改（与窗口翻译解耦，失败/超时只重跑 QA 自身）
+    with factory() as db:
+        qa_items = claim_qa_batch(db)
+        qa_jobs = [(it.task_id, it.id, _model_of(db, it.task_id)) for it in qa_items]
+    if not qa_jobs:
+        return 0
+    qa_results = await asyncio.gather(
         *[
             asyncio.wait_for(
-                process_window_polish_item(factory, tid, iid, model),
-                timeout=WINDOW_TIMEOUT_SECONDS,
+                process_window_qa_item(factory, tid, iid, model),
+                timeout=QA_TIMEOUT_SECONDS,
             )
-            for tid, iid, model in jobs
+            for tid, iid, model in qa_jobs
         ],
         return_exceptions=True,
     )
-    touched_tasks: set[str] = set()
-    for (tid, iid, _model), res in zip(jobs, results):
-        touched_tasks.add(tid)
+    for (tid, iid, _model), res in zip(qa_jobs, qa_results):
         if isinstance(res, BaseException):
             _mark_failed(factory, tid, iid, type(res).__name__)
         elif isinstance(res, dict) and "error" in res:
             _mark_failed(factory, tid, iid, res["error"])
         else:
-            _apply_polish_progress(factory, tid, res)
-    for tid in touched_tasks:
+            _apply_qa_progress(factory, tid, res)
+    for tid in {t for t, _i, _m in qa_jobs}:
         _mark_task_completed(factory, tid)
-    return len(jobs)
+    return len(qa_jobs)
 
 
 def finalize_stale_tasks(db) -> int:

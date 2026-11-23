@@ -65,8 +65,8 @@ export default function TaskNotifier() {
         if (t.status === "completed") {
           toast.success(`${name}已完成`);
         } else if (t.status === "failed") {
-          const reason = t.error_message ? `：${String(t.error_message).slice(0, 120)}` : "";
-          toast.error(`${name}失败${reason}`);
+          // 只提示失败；错误详情在任务卡展示，避免同一错误显示两遍
+          toast.error(`${name}失败，请到任务中心查看详情`);
         }
       }
     }

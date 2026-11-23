@@ -213,29 +213,25 @@ async def run_trial(
 
 
 def _persist_window(db_factory, window, draft, polished, carry, context, model) -> None:
-    """试译译文直接入库（复用为正式译文），draft 与 polished 各一个版本。"""
+    """试译译文直接入库（复用为正式译文），draft 与 polished 各一个版本。
+
+    走 insert_translation_row：版本号由单条 INSERT...SELECT 原子分配，跨协程/进程安全。
+    """
+    from app.services.translation_batch import insert_translation_row
+
     with db_factory() as db:
         for src, dr, po in zip(window, draft, polished):
-            base = db.scalar(
-                select(func.max(Translation.version)).where(
-                    Translation.segment_id == src["segment_id"]
-                )
-            ) or 0
             for stage, entry in (("draft", dr), ("polished", po)):
-                base += 1
-                db.add(
-                    Translation(
-                        segment_id=src["segment_id"],
-                        version=base,
-                        stage=stage,
-                        target_text=entry["target_text"],
-                        notes_json=json.dumps(entry.get("notes", []), ensure_ascii=False),
-                        ambiguity_json=json.dumps(entry.get("ambiguity", []), ensure_ascii=False),
-                        model_name=model,
-                        provider_id="default",
-                        prompt_version=PROMPT_VERSION,
-                        context_snapshot_json=json.dumps(context.snapshot, ensure_ascii=False),
-                        source_hash=sha256(src["source_text"]),
-                    )
+                insert_translation_row(
+                    db,
+                    segment_id=src["segment_id"],
+                    stage=stage,
+                    target_text=entry["target_text"],
+                    notes_json=json.dumps(entry.get("notes", []), ensure_ascii=False),
+                    ambiguity_json=json.dumps(entry.get("ambiguity", []), ensure_ascii=False),
+                    model_name=model,
+                    provider_id="default",
+                    prompt_version=PROMPT_VERSION,
+                    context_snapshot_json=json.dumps(context.snapshot, ensure_ascii=False),
+                    source_hash=sha256(src["source_text"]),
                 )
-        db.commit()

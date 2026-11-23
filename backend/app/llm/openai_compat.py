@@ -91,14 +91,24 @@ class OpenAICompatProvider:
         request_id: str | None = None,
         thinking: str | None = "disabled",
         reasoning_effort: str | None = None,
+        max_tokens: int | None = None,
     ) -> LLMResponse:
         model = model or self.model
+        # 输出预算：思考模式下 reasoning 与 content 共享 completion 预算（DeepSeek 官方语义），
+        # 显式传 8192 会导致思维链挤占译文空间、finish_reason=length（历史截断根因）。
+        # 思考模式给 32K（官方默认 64K 的收敛值），非思考按调用方/能力值。
+        if max_tokens is None:
+            # thinking 为 None 时服务商默认开启思考模式，同样需要大预算
+            max_tokens = (
+                32768 if thinking != "disabled" else self.capabilities.max_output_tokens
+            )
         body: dict = {
             "model": model,
             "messages": messages,
             "temperature": temperature if temperature is not None else 0.3,
-            # 显式限制输出预算：依赖供应商默认值曾导致长段翻译被静默截断（漏译后半情节）
-            "max_tokens": max(1, int(self.capabilities.max_output_tokens)),
+            # 显式限制输出预算：依赖供应商默认值曾导致长段翻译被静默截断（漏译后半情节）；
+            # 截断降级重试时可用 max_tokens 覆盖更合适的预算
+            "max_tokens": max(1, int(max_tokens)),
         }
         # 思考模式显式控制：默认关闭（只有润色/质检环节显式开启），避免依赖服务商默认行为
         if thinking is not None:
@@ -131,13 +141,14 @@ class OpenAICompatProvider:
         if temperature is None or temperature <= 0.3:
             cache_key = hashlib.sha256(
                 json.dumps(
-                    [self.base_url, model, messages, body.get("response_format"), thinking, reasoning_effort],
+                    [self.base_url, model, messages, body.get("response_format"),
+                     thinking, reasoning_effort, body.get("max_tokens")],
                     ensure_ascii=False,
                     sort_keys=True,
                 ).encode()
             ).hexdigest()
             cached = self._cache.get(cache_key)
-            if cached is not None:
+            if cached is not None and cached.get("finish_reason") != "length":
                 return LLMResponse(
                     content=cached.get("content", ""),
                     provider_id="openai_compat",
@@ -230,9 +241,13 @@ class OpenAICompatProvider:
                 async with httpx.AsyncClient(timeout=timeout) as client:
                     retry_body = dict(body)
                     retry_body["messages"] = retry_messages
-                    # 截断重试降级：关闭思考模式，输出预算全部留给译文
+                    # 截断重试降级：关闭思考后 reasoning 不再占预算，max_tokens 提升回
+                    # 译文专属空间（不再减半——历史做法把预算砍到 4096 导致反复截断）
                     retry_body.pop("reasoning_effort", None)
                     retry_body["thinking"] = {"type": "disabled"}
+                    retry_body["max_tokens"] = max(
+                        int(retry_body.get("max_tokens", 8192)), 16384
+                    )
                     r2 = await client.post(
                         f"{self.base_url}/chat/completions",
                         json=retry_body,
@@ -246,7 +261,7 @@ class OpenAICompatProvider:
                 pass
         message = choice.get("message", {})
         content = message.get("content") or ""
-        if cache_key:
+        if cache_key and choice.get("finish_reason") != "length":
             self._cache.put(
                 cache_key,
                 {

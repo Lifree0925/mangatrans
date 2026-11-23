@@ -229,11 +229,11 @@ export default function ProjectsPage() {
             })()}
           </div>
 
-          {connecting && <div className="mt-4" /> /* 静默等待：窗口在后端就绪后才显示，此处不出现等待字样 */}
+          {connecting && <div className="mt-4" /> /* 启动初始化期间静默：窗口立即显示，数据就绪后自动出现 */}
           {projects.error && !connecting && (
             <div className="mt-4 rounded-xl border border-(--color-border) bg-(--color-panel) px-4 py-3 text-xs text-(--color-muted)">
               <div className="flex items-center gap-2">
-                <span>本地服务未就绪（正在自动重试…）</span>
+                <span>本地服务未就绪，系统会自动重试</span>
                 <button
                   onClick={() => projects.refetch()}
                   className="ml-auto rounded-lg border border-(--color-border) bg-(--color-bg) px-2 py-1 hover:bg-(--color-panel2)"
@@ -244,7 +244,7 @@ export default function ProjectsPage() {
               {diag && (
                 <div className="mt-2">
                   {diag.alive ? (
-                    <p className="text-emerald-600">后端进程运行中，等待服务就绪…</p>
+                    <p className="text-emerald-600">后端进程运行中，正在初始化</p>
                   ) : (
                     <>
                       <p className="font-medium text-red-600">

@@ -47,6 +47,7 @@ class LLMProvider(Protocol):
         request_id: str | None = None,
         thinking: str | None = "disabled",
         reasoning_effort: str | None = None,
+        max_tokens: int | None = None,
     ) -> LLMResponse: ...
 
     async def test_connection(self) -> ProviderTestResult: ...

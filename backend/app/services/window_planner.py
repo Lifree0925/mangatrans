@@ -2,8 +2,8 @@
 
 from app.models.document import SourceSegment
 
-TARGET_MIN = 800
-TARGET_MAX = 2200
+TARGET_MIN = 700
+TARGET_MAX = 1000  # 单窗输出控制：思考模式思维链与译文共享预算，过长窗口易 finish_reason=length
 
 
 def build_windows(segments: list[SourceSegment]) -> list[list[SourceSegment]]:

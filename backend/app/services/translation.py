@@ -53,6 +53,11 @@ Hard constraints:
 - PERSON & NUMBER: keep the source's person and number (「姐姐」 stays third person, never "I").
 - LOCALIZE MARKS: 画外音/（OS）/O.S. → "(voice-over)".
 - Choose precise, natural English idioms for physical actions; avoid awkward literal renderings.
+- STYLE (hard rules for short-form drama): spoken dialogue must be colloquial and fragmented
+  like real speech; keep any single spoken sentence under 18 words; never use bookish
+  connectives such as thus/therefore/nevertheless/moreover in dialogue; map Chinese profanity
+  by INTENSITY to the matching English register (mild → "damn", strong → "fuck", keep insults
+  character-appropriate), never soften or inflate the original force.
 - STRICT LINE COVERAGE: your output must keep EVERY non-empty line of the source segment
   (stage directions, sound-effect lines, scene labels, action lines) — never drop or
   merge a line from the draft.
@@ -95,10 +100,12 @@ class RepairOutput(BaseModel):
 async def _chat_json_validate(
     provider: LLMProvider, model: str, system: str, user: str, schema: dict,
     out_model: type, thinking: str | None = "disabled", reasoning_effort: str | None = None,
+    max_tokens: int | None = None,
 ):
     """调用 + 解析 + Pydantic 校验；校验失败带修复提示重试一次（思考模式输出易带瑕疵）。"""
     data = await _chat_json(
-        provider, model, system, user, schema, thinking=thinking, reasoning_effort=reasoning_effort
+        provider, model, system, user, schema, thinking=thinking,
+        reasoning_effort=reasoning_effort, max_tokens=max_tokens,
     )
     try:
         return out_model.model_validate(data)
@@ -123,11 +130,22 @@ async def _chat_json_validate(
             raise
 
 
+def _usage_note(resp) -> str:
+    u = getattr(resp, "usage", None) or {}
+    parts = [f"{k}={v}" for k, v in u.items() if isinstance(v, (int, float))]
+    return "（" + ", ".join(parts) + "）" if parts else ""
+
+
 async def _chat_json(
     provider: LLMProvider, model: str, system: str, user: str, schema: dict,
     thinking: str | None = "disabled", reasoning_effort: str | None = None,
+    max_tokens: int | None = None,
 ):
-    """调用并解析 JSON；输出格式瑕疵时重试一次（带修复提示）。"""
+    """调用并解析 JSON；输出格式瑕疵时重试一次（带修复提示）。
+
+    截断（finish_reason=length）恢复：思考模式下思维链与译文共享 completion 预算，
+    关思考后把预算提升给译文（历史做法把预算砍到 4096 导致反复截断）。
+    """
     messages = [{"role": "system", "content": system}, {"role": "user", "content": user}]
     resp = await provider.chat(
         model=model,
@@ -136,10 +154,10 @@ async def _chat_json(
         temperature=0.3,
         thinking=thinking,
         reasoning_effort=reasoning_effort,
+        max_tokens=max_tokens,
     )
     if resp.finish_reason == "length":
-        # 输出预算耗尽被截断：思考模式最易挤占输出预算 → 关思考重试一次
-        if thinking == "enabled":
+        if thinking == "enabled" or thinking is None:
             resp = await provider.chat(
                 model=model,
                 messages=messages,
@@ -147,13 +165,17 @@ async def _chat_json(
                 temperature=0.3,
                 thinking="disabled",
                 reasoning_effort=None,
+                max_tokens=max(max_tokens or 0, 16384),
             )
             if resp.finish_reason != "length":
                 try:
                     return parse_llm_json(resp.content)
                 except ValueError:
                     pass
-        raise LLMError("模型输出被截断（finish_reason=length）", retryable=False, code="output_truncated")
+        raise LLMError(
+            f"模型输出被截断（finish_reason=length）{_usage_note(resp)}",
+            retryable=False, code="output_truncated",
+        )
     try:
         return parse_llm_json(resp.content)
     except ValueError:
@@ -172,8 +194,8 @@ async def _chat_json(
             reasoning_effort=reasoning_effort,
         )
         if resp.finish_reason == "length":
-            if thinking == "enabled":
-                # 同上：关思考再试一次，避免润色窗口因思考占预算反复截断
+            if thinking == "enabled" or thinking is None:
+                # 同上：关思考 + 预算提升给译文，避免反复截断
                 resp = await provider.chat(
                     model=model,
                     messages=messages,
@@ -181,14 +203,32 @@ async def _chat_json(
                     temperature=0.2,
                     thinking="disabled",
                     reasoning_effort=None,
+                    max_tokens=max(max_tokens or 0, 16384),
                 )
                 if resp.finish_reason != "length":
                     try:
                         return parse_llm_json(resp.content)
                     except ValueError:
                         pass
-            raise LLMError("模型输出被截断（finish_reason=length）", retryable=False, code="output_truncated")
+            raise LLMError(
+                f"模型输出被截断（finish_reason=length）{_usage_note(resp)}",
+                retryable=False, code="output_truncated",
+            )
         return parse_llm_json(resp.content)
+
+
+def estimate_window_output_tokens(source_chars: int) -> int:
+    """按窗口源文本字符数估算译文输出 token 数（中文→英文约 1.6x + JSON/carry 冗余 1200）。"""
+    return max(2048, min(int(source_chars * 1.6) + 1200, 60000))
+
+
+def _should_think_for_window(source_chars: int) -> bool:
+    """润色思考模式仅用于输出预算可控的窗口：估算输出过大时关思考，先保证不截断。
+
+    思考模式下思维链与译文共享 completion 预算；源文本 ≤ 3000 字符（估算输出 ≤ 6000 token）
+    的窗口开思考，超长窗口关思考翻译（译文预算 8K 兜底）。
+    """
+    return source_chars <= 3000
 
 
 async def translate_window_draft(
@@ -197,6 +237,7 @@ async def translate_window_draft(
     model: str,
     window_id: str,
     context: ContextResult,
+    source_chars: int | None = None,
 ) -> list[dict]:
     """Draft 阶段：只锁事实，不依赖 carry-over，可安全并发；顺带输出 carry-over。
 
@@ -206,6 +247,7 @@ async def translate_window_draft(
     draft = await _chat_json_validate(
         provider, model, DRAFT_SYSTEM, context.prompt_text,
         DraftOutput.model_json_schema(), DraftOutput, thinking="disabled",
+        max_tokens=min(8192, estimate_window_output_tokens(source_chars or 2048)),
     )
     return [t.model_dump() for t in draft.translations], (
         draft.carry_over.model_dump() if draft.carry_over else None
@@ -224,9 +266,18 @@ async def translate_window_polish(
 ) -> tuple[list[dict], dict]:
     """Polish 阶段：情境自然化 + carry-over 生成；单窗口内串行。"""
     draft_block = "\n\n[FAITHFUL DRAFT]\n" + json.dumps(draft, ensure_ascii=False, indent=2)
+    # 思考模式：思维链与译文共享 completion 预算，max_tokens 给足（32K，provider 层默认）；
+    # 超大窗口关思考翻译，译文预算 8K 兜底，先保证不截断（历史 finish_reason=length 根因）
+    src_chars = sum(len(s.get("source_text", "")) for s in (segments or []))
+    use_thinking = _should_think_for_window(src_chars)
     polish = await _chat_json_validate(
         provider, model, POLISH_SYSTEM, context.prompt_text + draft_block,
-        PolishOutput.model_json_schema(), PolishOutput, thinking="enabled", reasoning_effort="low",
+        PolishOutput.model_json_schema(), PolishOutput,
+        thinking="enabled" if use_thinking else "disabled",
+        reasoning_effort="low" if use_thinking else None,
+        max_tokens=(
+            None if use_thinking else min(8192, estimate_window_output_tokens(src_chars))
+        ),
     )
     polish_list = [t.model_dump() for t in polish.translations]
     # 完整性复查：译文显著短于原文的段判定为漏译（截断），单段重译一次
@@ -259,7 +310,8 @@ async def translate_window(
 ) -> tuple[list[dict], dict]:
     """兼容入口：串行完成 Draft+Polish（测试与独立调用用）。"""
     draft, _draft_carry = await translate_window_draft(
-        provider=provider, model=model, window_id=window_id, context=context
+        provider=provider, model=model, window_id=window_id, context=context,
+        source_chars=sum(len(s.get("source_text", "")) for s in (segments or [])),
     )
     polish, carry = await translate_window_polish(
         provider=provider, model=model, window_id=window_id, context=context,
@@ -428,7 +480,7 @@ async def repair_segments(
     )
     out = await _chat_json_validate(
         provider, model, system, user, RepairOutput.model_json_schema(), RepairOutput,
-        thinking="enabled", reasoning_effort="low",
+        thinking="enabled", reasoning_effort="low", max_tokens=None,
     )
     return {
         e.segment_id: e.target_text

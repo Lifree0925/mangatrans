@@ -29,6 +29,9 @@ EXTRACT_PROMPT = """你是剧本分析助手。阅读给定的中文剧本片段
 6. 每个 term 在 data 中必须给出标准英文译名（字段 translation）：专有名词首字母大写、
    全剧本统一（如「狼王」→ Wolf King、「禁魔手铐」→ Anti-magic Handcuffs）；
    这是全文强制复用的译名，不允许给出多种可选译法。
+6b. 同一 term 的 data 中必须给出 variants 数组：该译名在英文中的合法变体形态
+   （如「狼人」→ ["werewolves"]，「手铐」→ ["handcuffs"]；无变体给空数组 []）。
+   variants 只允许词形变化（复数/时态），不允许出现第二种译名。
 7. 只返回 JSON，不要任何解释。
 
 片段：

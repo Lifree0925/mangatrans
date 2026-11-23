@@ -205,3 +205,137 @@ def test_stale_marking_on_knowledge_change(client: TestClient, wait_task) -> Non
 
     with dbmod.SessionLocal() as db:
         assert db.get(Translation, t_id).freshness_status == "stale"
+
+
+def _drive_worker(task_id: str, max_rounds: int = 60) -> str:
+    """手动驱动 Worker 直到任务结束（TestClient 非 with 形式不启动 lifespan worker）。"""
+    status = "running"
+    for _ in range(max_rounds):
+        asyncio.run(run_once())
+        with dbmod.SessionLocal() as db:
+            task = db.get(Task, task_id)
+            status = task.status
+        if status in ("completed", "failed"):
+            break
+    return status
+
+
+def test_qa_items_are_independent_nodes(client, wait_task) -> None:
+    """QA 打回修复是独立任务节点：窗口翻译（draft/polish）完成后才执行，
+    且 QA 节点与窗口节点一一对应、全部成功后才完成任务。"""
+    pid = _setup_script(client, wait_task)
+    f = FakeProvider()
+
+    def h(messages):
+        content = messages[-1]["content"]
+        system = messages[0]["content"] if messages else ""
+        if "translate only these" in content or "FAITHFUL DRAFT" in content:
+            ids = re.findall(r"\[([0-9a-f]{32})\]", content)
+            natural = "POLISH pass" in system
+            out = {
+                "window_id": "W",
+                "translations": [
+                    {
+                        "segment_id": sid,
+                        "target_text": f"EN-{sid}-" + ("polished" if natural else "draft"),
+                        "notes": [],
+                        "ambiguity": [],
+                    }
+                    for sid in dict.fromkeys(ids)
+                ],
+            }
+            if natural:
+                out["carry_over"] = {
+                    "forms_of_address": ["直呼其名"],
+                    "ongoing_state": "tension",
+                    "open_threads": [],
+                    "active_expressions": [],
+                }
+            return out
+        return None
+
+    set_provider(f.on(h))
+    r = client.post(f"/api/v1/projects/{pid}/translation/start", json={})
+    assert r.status_code == 200, r.text
+    task_id = r.json()["task_id"]
+
+    assert _drive_worker(task_id) == "completed"
+
+    with dbmod.SessionLocal() as db:
+        items = list(db.scalars(
+            select(TaskItem).where(TaskItem.task_id == task_id).order_by(TaskItem.window_id)
+        ))
+        phases = {i.phase for i in items}
+        assert "qa" in phases, f"应存在独立 QA 节点，实际 phases={phases}"
+        qa_items = [i for i in items if i.phase == "qa"]
+        assert all(i.status == "succeeded" for i in qa_items), "QA 节点应全部成功"
+        window_items = [i for i in items if i.phase in ("draft", "polish")]
+        assert len(qa_items) == len({i.window_id for i in window_items})
+        task = db.get(Task, task_id)
+        progress = json.loads(task.progress_json or "{}")
+        assert progress.get("qa_done", 0) == len(qa_items)
+
+
+def test_qa_retry_does_not_restart_windows(client, wait_task) -> None:
+    """QA 节点失败后重试：只重跑 QA 节点，窗口翻译节点保持 succeeded 不被重启。"""
+    pid = _setup_script(client, wait_task)
+    f = FakeProvider()
+
+    def h(messages):
+        content = messages[-1]["content"]
+        system = messages[0]["content"] if messages else ""
+        if "translate only these" in content or "FAITHFUL DRAFT" in content:
+            ids = re.findall(r"\[([0-9a-f]{32})\]", content)
+            natural = "POLISH pass" in system
+            out = {
+                "window_id": "W",
+                "translations": [
+                    {
+                        "segment_id": sid,
+                        "target_text": f"EN-{sid}-" + ("polished" if natural else "draft"),
+                        "notes": [],
+                        "ambiguity": [],
+                    }
+                    for sid in dict.fromkeys(ids)
+                ],
+            }
+            if natural:
+                out["carry_over"] = {
+                    "forms_of_address": ["直呼其名"],
+                    "ongoing_state": "tension",
+                    "open_threads": [],
+                    "active_expressions": [],
+                }
+            return out
+        return None
+
+    set_provider(f.on(h))
+    r = client.post(f"/api/v1/projects/{pid}/translation/start", json={})
+    task_id = r.json()["task_id"]
+    assert _drive_worker(task_id) == "completed"
+
+    # 人为把 QA 节点置 failed（模拟 QA 阶段失败），再重试
+    with dbmod.SessionLocal() as db:
+        for item in db.scalars(
+            select(TaskItem).where(TaskItem.task_id == task_id, TaskItem.phase == "qa")
+        ):
+            item.status = "failed"
+        task = db.get(Task, task_id)
+        task.status = "failed"
+        db.commit()
+
+    rr = client.post(f"/api/v1/tasks/{task_id}/retry", json={})
+    assert rr.status_code == 200, rr.text
+    assert _drive_worker(task_id) == "completed"
+
+    with dbmod.SessionLocal() as db:
+        qa_items = list(db.scalars(
+            select(TaskItem).where(TaskItem.task_id == task_id, TaskItem.phase == "qa")
+        ))
+        assert qa_items and all(i.status == "succeeded" for i in qa_items)
+        wins = list(db.scalars(
+            select(TaskItem).where(TaskItem.task_id == task_id, TaskItem.phase != "qa")
+        ))
+        assert all(i.status == "succeeded" for i in wins)
+        task = db.get(Task, task_id)
+        assert task.status == "completed"

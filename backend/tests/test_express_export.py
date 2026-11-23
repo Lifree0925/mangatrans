@@ -171,8 +171,8 @@ def test_express_end_to_end(client: TestClient, wait_task) -> None:
     assert rows
     assert all(t.review_status == "approved" for t in rows)
 
-    # 导出双语 Markdown
-    r = client.post(f"/api/v1/projects/{pid}/export", json={"bilingual": True})
+    # 导出双语 Markdown（常规导出：中英对照保留）
+    r = client.post(f"/api/v1/projects/{pid}/export", json={"delivery": False, "bilingual": True})
     assert r.status_code == 200
     data = r.json()
     assert data["content"].startswith("# 一键直出")
@@ -199,7 +199,63 @@ def test_export_bilingual_contains_original(client: TestClient, wait_task) -> No
         with dbmod.SessionLocal() as db:
             if db.get(Task, task_id).status == "completed":
                 break
-    r = client.post(f"/api/v1/projects/{pid}/export", json={"bilingual": True})
+    r = client.post(f"/api/v1/projects/{pid}/export", json={"delivery": False, "bilingual": True})
     body = r.json()["content"]
     assert "（原文）" in body
     assert "Hello" in body
+
+
+def test_export_delivery_template(client: TestClient, wait_task) -> None:
+    """交付版导出：按《剧本交付模板.md》生成（中文骨架 + 英文台词）。"""
+    pid = _setup(client, wait_task)
+    set_provider(_universal_fake(client, pid))
+    r = client.post(f"/api/v1/projects/{pid}/translation/start", json={})
+    task_id = r.json()["task_id"]
+    import asyncio
+
+    from app.pipeline.worker import run_once
+
+    for _ in range(60):
+        asyncio.run(run_once())
+        with dbmod.SessionLocal() as db:
+            if db.get(Task, task_id).status == "completed":
+                break
+
+    r = client.post(f"/api/v1/projects/{pid}/export", json={"title_en": "First Meeting"})
+    assert r.status_code == 200, r.text
+    data = r.json()
+    body = data["content"]
+    assert data["filename"].endswith(".md")
+    # 顶部：英文剧名 + 《中文剧名》
+    assert body.startswith("First Meeting\n《")
+    # 集标题
+    assert "\n第1集\n" in body
+    # 场景行（中文原文保留，且只出现一次）
+    assert "【咖啡厅·日内】" in body
+    # 叙述/动作行保留中文原文
+    assert "（两人对视）" in body
+    # 台词已替换为英文译文（fake 译文）
+    assert "Hello" in body
+    # 结尾
+    assert "（剧终）" in body
+
+
+def test_export_delivery_default_is_template(client: TestClient, wait_task) -> None:
+    """不带 delivery 参数时默认输出交付模板（需求变更后的默认交付物）。"""
+    pid = _setup(client, wait_task)
+    set_provider(_universal_fake(client, pid))
+    r = client.post(f"/api/v1/projects/{pid}/translation/start", json={})
+    task_id = r.json()["task_id"]
+    import asyncio
+
+    from app.pipeline.worker import run_once
+
+    for _ in range(60):
+        asyncio.run(run_once())
+        with dbmod.SessionLocal() as db:
+            if db.get(Task, task_id).status == "completed":
+                break
+    r = client.post(f"/api/v1/projects/{pid}/export", json={})
+    body = r.json()["content"]
+    assert "（剧终）" in body
+    assert "第1集" in body

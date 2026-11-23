@@ -49,6 +49,13 @@ AI 漫剧剧本翻译系统（Windows 桌面版）：本地优先工作台，将
 - 后端 uvicorn `--reload`、前端 Vite HMR；只构建/重启受影响服务。
 - 验收与发布再走完整构建（PyInstaller + Tauri bundle + GitHub Actions Windows runner），本机 Linux 不产出 Windows 安装包。
 
+## 发版边界（用户 2026-11-21 明确要求）
+
+- **只有用户明确说"发版"才发版**；用户未发出发版指令时，只修改本地文件并跑测试，
+  不 commit、不 push、不打 tag、不触发 CI 构建。
+- 发版指令一旦给出，流程为：bump 版本号（`tauri.conf.json` / `frontend/package.json` / `update.json`）
+  → 前后端测试 → commit → push main → tag `vX.Y.Z` → push tag → 盯 CI → 确认 release 资产。
+
 ## 本仓库实测的坑（务必遵守）
 
 1. **长驻后台进程**：必须 `setsid nohup <cmd> </dev/null >log 2>&1 &`，否则 exec 会话结束进程被清理。

@@ -164,3 +164,84 @@ def test_cache_hit_skips_http_call():
         assert r1.content == r2.content == "pong"
     finally:
         srv.shutdown()
+
+
+def test_thinking_budget_and_truncation_retry(tmp_path, monkeypatch):
+    """截断根因回归：思考模式 max_tokens 给足（32K）；截断重试关思考且预算提升
+    （历史做法减半到 4096 导致反复 finish_reason=length）。"""
+    from app.core.config import settings
+
+    settings.data_dir = tmp_path
+
+    class State:
+        def __init__(self):
+            self.bodies: list[dict] = []
+            self.calls = 0
+
+    state = State()
+
+    class H(BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+
+        def log_message(self, *a):
+            pass
+
+        def do_POST(self):
+            n = int(self.headers.get("content-length", 0))
+            raw = self.rfile.read(n)
+            state.bodies.append(json.loads(raw))
+            state.calls += 1
+            if state.calls == 1:
+                # 第一次：length 截断
+                content = {
+                    "id": "x1", "choices": [
+                        {"index": 0, "finish_reason": "length",
+                         "message": {"role": "assistant", "content": '{"trunc"', "reasoning_content": "..."}}
+                    ], "usage": {"prompt_tokens": 100, "completion_tokens": 8192,
+                                 "completion_tokens_details": {"reasoning_tokens": 7000}}
+                }
+            else:
+                content = {
+                    "id": "x2", "choices": [
+                        {"index": 0, "finish_reason": "stop",
+                         "message": {"role": "assistant", "content": "ok"}}
+                    ], "usage": {"prompt_tokens": 100, "completion_tokens": 50,
+                                 "completion_tokens_details": {"reasoning_tokens": 0}}
+                }
+            data = json.dumps(content).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+
+    srv = HTTPServer(("127.0.0.1", 0), H)
+    port = srv.server_address[1]
+    t = threading.Thread(target=srv.serve_forever, daemon=True)
+    t.start()
+    try:
+        provider = OpenAICompatProvider(
+            base_url=f"http://127.0.0.1:{port}", api_key="sk-test", model="mock"
+        )
+
+        async def go():
+            return await provider.chat(
+                messages=[{"role": "user", "content": "translate"}],
+                thinking="enabled", reasoning_effort="low",
+            )
+
+        resp = asyncio.run(go())
+        assert resp.finish_reason == "stop", resp.content
+
+        assert state.calls == 2, f"应有一次截断重试，实际 {state.calls} 次"
+        first = state.bodies[0]
+        second = state.bodies[1]
+        # 思考模式：预算给足（思维链与译文共享 completion 预算）
+        assert first["max_tokens"] == 32768, first["max_tokens"]
+        assert first["thinking"] == {"type": "enabled"}
+        # 截断重试：关思考 + 预算提升（不再减半）
+        assert second["thinking"] == {"type": "disabled"}
+        assert second["max_tokens"] >= 16384, second["max_tokens"]
+        assert "concise" in second["messages"][-1]["content"].lower()
+    finally:
+        srv.shutdown()

@@ -1,17 +1,38 @@
-"""导出：Markdown / TXT / DOCX，支持中英对照或纯英文。"""
+"""导出：按《剧本交付模板.md》生成交付版。
+
+交付模板约定：
+- 顶部：英文剧名行 + 《中文剧名》行 + 空行
+- 集标题：第N集（章间空行分隔）
+- 场景行：N-M 地点 时间 内外（中文原文）
+- 人物行：人物：Role1、Role2（角色名英文化）
+- 动作/音效/闪回等叙述行：保留中文原文（制作团队以中文阅读）
+- 台词：英文角色名（中文语气说明）：英文台词（唯一被替换为译文的部分）
+- 结尾：（剧终）
+"""
 
 import base64
+import re
 from io import BytesIO
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.models.document import SourceSegment
+from app.models.document import Chapter, Scene, SourceSegment
 from app.models.project import Project
 from app.models.qa import QAIssue
 from app.models.translation import Translation
 
 FORMATS = {"md": ".md", "txt": ".txt", "docx": ".docx"}
+
+# 原文台词行："角色（中文语气说明）：台词"
+_DIALOGUE_SRC_RE = re.compile(r"^\s*([^（(：:]+?)\s*[（(]([^）)]*)[）)]\s*[:：]\s*(.*)$")
+# 译文台词行："Role (english direction): line"
+_DIALOGUE_EN_RE = re.compile(
+    r"^\s*([A-Za-z][A-Za-z0-9 .'&-]*?)\s*(?:\([^)]*\))?\s*[:：]\s*(.*)$"
+)
+_CHAPTER_HEADING_RE = re.compile(r"^第\s*[0-9一二三四五六七八九十百]+\s*[集話话回章]")
+_SCENE_HEADING_RE = re.compile(r"^\d+\s*[-–]\s*\d+\s*\S")
+_CAST_HEADING_RE = re.compile(r"^\s*(?:人物列表|人物)\s*[：:]")
 
 
 def _current_polished(db: Session, segment_ids: list[str]) -> dict[str, Translation]:
@@ -35,9 +56,17 @@ def _load(db: Session, project: Project):
             .order_by(SourceSegment.segment_no)
         )
     )
+    chapters = {
+        c.id: c
+        for c in db.scalars(select(Chapter).where(Chapter.project_id == project.id))
+    }
+    scenes = {
+        s.id: s
+        for s in db.scalars(select(Scene).where(Scene.project_id == project.id))
+    }
     trans = _current_polished(db, [s.id for s in segs])
     issues = list(db.scalars(select(QAIssue).where(QAIssue.project_id == project.id)))
-    return segs, trans, issues
+    return segs, chapters, scenes, trans, issues
 
 
 def _report(segs, trans, issues) -> dict:
@@ -49,6 +78,67 @@ def _report(segs, trans, issues) -> dict:
         "issues_total": len(issues),
         "high_critical_issues": len(high_critical),
     }
+
+
+def _build_role_map(segs, trans) -> dict[str, str]:
+    """中文原文角色名 → 英文角色名（从原文/译文台词前缀对齐得到）。"""
+    role_map: dict[str, str] = {}
+    for s in segs:
+        if s.segment_type != "dialogue":
+            continue
+        t = trans.get(s.id)
+        if t is None:
+            continue
+        src_lines = [l.strip() for l in (s.source_text or "").split("\n") if l.strip()]
+        tgt_lines = [l.strip() for l in (t.target_text or "").split("\n") if l.strip()]
+        for sl, tl in zip(src_lines, tgt_lines):
+            m1 = _DIALOGUE_SRC_RE.match(sl)
+            m2 = _DIALOGUE_EN_RE.match(tl)
+            if m1 and m2:
+                src_role = m1.group(1).strip()
+                en_role = m2.group(1).strip()
+                if src_role and en_role and src_role != en_role:
+                    role_map[src_role] = en_role
+    return role_map
+
+
+def _render_cast_line(line: str, role_map: dict[str, str]) -> str:
+    """人物行：角色名逐个替换为英文（标签统一为「人物：」）。"""
+    m = _CAST_HEADING_RE.match(line)
+    if not m:
+        return line.strip()
+    names = re.split(r"[、，,]\s*", line.split("：", 1)[-1] if "：" in line else line.split(":", 1)[-1])
+    rendered = [role_map.get(n.strip(), n.strip()) for n in names if n.strip()]
+    return "人物：" + "、".join(rendered)
+
+
+def _render_dialogue(src_text: str, tgt_text: str) -> list[str]:
+    """台词合成：英文角色名（中文语气说明）：英文台词；原文行与译文行逐行对齐。"""
+    src_lines = [l.strip() for l in (src_text or "").split("\n") if l.strip()]
+    tgt_lines = [l.strip() for l in (tgt_text or "").split("\n") if l.strip()]
+    out: list[str] = []
+    for i, sl in enumerate(src_lines):
+        tl = tgt_lines[i] if i < len(tgt_lines) else None
+        if tl is None:
+            out.append(sl)  # 无译文行：保留原文
+            continue
+        m = _DIALOGUE_SRC_RE.match(sl)
+        if not m:
+            out.append(tl)  # 原文无「角色（语气）」结构：直接用译文行
+            continue
+        direction = m.group(2).strip()
+        tm = _DIALOGUE_EN_RE.match(tl)
+        if tm:
+            en_role = tm.group(1).strip()
+            en_line = tm.group(2).strip()
+            out.append(
+                f"{en_role}（{direction}）：{en_line}" if direction else f"{en_role}：{en_line}"
+            )
+        else:
+            out.append(tl)  # 译文行无法解析前缀：保留译文原样
+    # 译文行多于原文行（不应出现，validate_window 保证行数一致）：保底输出
+    out.extend(tl for tl in tgt_lines[len(src_lines):])
+    return out
 
 
 def _export_markdown(project: Project, segs, trans, bilingual: bool) -> str:
@@ -124,14 +214,101 @@ def _export_docx(project: Project, segs, trans, bilingual: bool) -> bytes:
     return buf.getvalue()
 
 
+def _export_delivery_markdown(
+    project: Project, segs, chapters, scenes, trans, title_en: str | None, doc_title: str | None
+) -> str:
+    """按交付模板生成 .md 正文。"""
+    role_map = _build_role_map(segs, trans)
+    lines: list[str] = []
+    lines.append((title_en or "").strip() or project.name)
+    lines.append(f"《{doc_title or project.name}》")
+    lines.append("")
+
+    last_chapter_id = None
+    last_scene_id = None
+    for s in segs:
+        if s.chapter_id != last_chapter_id:
+            ch = chapters.get(s.chapter_id) if s.chapter_id else None
+            if lines and lines[-1] != "":
+                lines.append("")  # 集间空行
+            lines.append(f"第{ch.chapter_no if ch else '?'}集")
+            lines.append("")
+            last_chapter_id = s.chapter_id
+            last_scene_id = None
+
+        if s.scene_id != last_scene_id and s.scene_id:
+            sc = scenes.get(s.scene_id)
+            if sc is not None and sc.heading:
+                lines.append(sc.heading.strip())
+            last_scene_id = s.scene_id
+
+        t = trans.get(s.id)
+        text = t.target_text.strip() if t else ""
+
+        if s.segment_type == "heading":
+            stripped = s.source_text.strip()
+            if (
+                _CHAPTER_HEADING_RE.match(stripped)
+                or _SCENE_HEADING_RE.match(stripped)
+                or (
+                    s.scene_id
+                    and scenes.get(s.scene_id) is not None
+                    and (scenes[s.scene_id].heading or "").strip() == stripped
+                )
+            ):
+                continue  # 章/场景行已由上方结构输出
+            if _CAST_HEADING_RE.match(stripped):
+                lines.append(_render_cast_line(stripped, role_map))
+                continue
+            lines.append(stripped)
+        elif s.segment_type == "dialogue":
+            lines.extend(_render_dialogue(s.source_text, text))
+        else:
+            # 动作 / 音效 / 闪回等：交付模板保留中文原文
+            body = s.source_text.strip()
+            if body:
+                lines.append(body)
+
+    # 结尾：（剧终）；原文已含则不再重复
+    last_text = (lines[-1] if lines else "").strip()
+    if "剧终" not in last_text:
+        lines.append("")
+        lines.append("（剧终）")
+    return "\n".join(lines) + "\n"
+
+
 def export_project(
-    db: Session, project: Project, bilingual: bool, fmt: str = "md"
+    db: Session,
+    project: Project,
+    bilingual: bool = True,
+    fmt: str = "md",
+    title_en: str | None = None,
+    doc_title: str | None = None,
+    delivery: bool = True,
 ) -> dict:
-    if fmt not in FORMATS:
-        fmt = "md"
-    segs, trans, issues = _load(db, project)
+    """导出剧本。
+
+    delivery=True：交付版（剧本交付模板.md，中文场景/动作/音效 + 英文台词）；
+    delivery=False：常规导出（中英对照 / 纯英文 × md / txt / docx）。
+    """
+    segs, chapters, scenes, trans, issues = _load(db, project)
     report = _report(segs, trans, issues)
 
+    if delivery:
+        body = _export_delivery_markdown(
+            project, segs, chapters, scenes, trans, title_en, doc_title
+        )
+        name = (doc_title or project.name).strip() or "剧本"
+        return {
+            "filename": f"{name}.md",
+            "format": "md",
+            "content": body,
+            "content_base64": None,
+            "report": report,
+        }
+
+    if fmt not in FORMATS:
+        fmt = "md"
     if fmt == "docx":
         data = _export_docx(project, segs, trans, bilingual)
         return {
@@ -141,7 +318,6 @@ def export_project(
             "content_base64": base64.b64encode(data).decode("ascii"),
             "report": report,
         }
-
     if fmt == "txt":
         body = _export_txt(project, segs, trans, bilingual)
     else:

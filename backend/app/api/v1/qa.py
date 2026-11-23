@@ -116,8 +116,31 @@ def list_issues(project_id: str, db: Session = Depends(get_db)) -> list[dict]:
 def export_project_route(
     project_id: str, payload: dict, db: Session = Depends(get_db)
 ) -> JSONResponse:
-    """导出：format = md / txt / docx；bilingual 控制中英对照或纯英文。"""
+    """导出剧本。
+
+    payload.delivery（默认 true）：交付版（剧本交付模板.md，中文场景/动作/音效 + 英文台词，
+    title_en 为可选英文剧名）；false：常规导出（bilingual × md/txt/docx）。
+    """
+    from app.models.document import SourceDocument
+
     project = _project(db, project_id)
-    bilingual = bool(payload.get("bilingual", True))
-    fmt = str(payload.get("format", "md")).lower()
-    return JSONResponse(export_project(db, project, bilingual, fmt))
+    doc_title = None
+    if project.active_source_document_id:
+        doc = db.get(SourceDocument, project.active_source_document_id)
+        if doc is not None:
+            # 中文剧名取文件名（去掉扩展名）
+            import os
+
+            doc_title = os.path.splitext(doc.filename or "")[0] or None
+    title_en = str(payload.get("title_en") or "").strip() or None
+    delivery = bool(payload.get("delivery", True))
+    return JSONResponse(
+        export_project(
+            db, project,
+            bilingual=bool(payload.get("bilingual", True)),
+            fmt=str(payload.get("format", "md")).lower(),
+            title_en=title_en,
+            doc_title=doc_title,
+            delivery=delivery,
+        )
+    )

@@ -40,6 +40,7 @@ class FakeProvider:
         request_id: str | None = None,
         thinking: str | None = "disabled",
         reasoning_effort: str | None = None,
+        max_tokens: int | None = None,
     ) -> LLMResponse:
         self.calls.append({"messages": messages, "schema": response_schema, "thinking": thinking})
         result = None

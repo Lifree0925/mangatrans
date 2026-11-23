@@ -5,7 +5,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
 import { Archive, Circle, CheckCircle2, History, Loader2, Pause, Play, RotateCcw, Trash2, Undo2, X, XCircle } from "lucide-react";
 import { api } from "../lib/api";
-import { toast } from "../lib/feedback";
+import { toast, useConfirmStore } from "../lib/feedback";
 import type { TaskInfo } from "../lib/types";
 
 const statusColor: Record<string, string> = {
@@ -230,7 +230,7 @@ function ExpressSteps({ task }: { task: TaskInfo }) {
 function TranslateSteps({ task }: { task: TaskInfo }) {
   const p = task.progress as {
     done?: number; total?: number; draft_carry?: Record<string, unknown>;
-    qa_issues?: number; failed?: number; phase?: string;
+    qa_issues?: number; qa_done?: number; failed?: number; phase?: string;
   };
   const total = p.total ?? 0;
   const draftDone = p.draft_carry ? Object.keys(p.draft_carry).length : 0;
@@ -260,10 +260,13 @@ function TranslateSteps({ task }: { task: TaskInfo }) {
     },
     {
       key: "qa",
-      label: "质检打回修复",
-      complete: finished, // 任务完成即质检闭环：0 条问题也显示完成图标
-      active: false,
-      detail: `QA 问题 ${p.qa_issues ?? 0} 条（自动打回修复）`,
+      label: "质检打回定点修复",
+      complete: total > 0 && (p.qa_done ?? 0) >= total,
+      active: running && done >= total && (p.qa_done ?? 0) < total,
+      detail:
+        total > 0
+          ? `定点修复 ${p.qa_done ?? 0} / ${total} 个窗口，发现问题 ${p.qa_issues ?? 0} 条`
+          : "等待润色完成",
     },
     {
       key: "failed",
@@ -313,10 +316,13 @@ export default function TasksPage() {
     mutationFn: (taskId: string) => api(`/tasks/${taskId}`, { method: "DELETE" }),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["tasks"] });
+      qc.invalidateQueries({ queryKey: ["tasks", "archived"] });
       toast.success("任务记录已删除");
     },
     onError: (err) => toast.error(`删除失败：${String(err)}`),
   });
+
+  const confirm = useConfirmStore((s) => s.show);
 
   const archivedTasks = useQuery({
     queryKey: ["tasks", "archived"],
@@ -556,6 +562,20 @@ export default function TasksPage() {
                     title="取消归档，回到任务中心"
                   >
                     <Undo2 size={12} /> 取消归档
+                  </button>
+                  <button
+                    onClick={async () => {
+                      const ok = await confirm(
+                        "永久删除任务记录？",
+                        "删除后不可恢复（不影响已生成的译文）。",
+                        true
+                      );
+                      if (ok) removeTask.mutate(t.id);
+                    }}
+                    className="flex items-center gap-1 rounded-lg border border-(--color-border) px-2 py-1 text-xs text-(--color-muted) hover:bg-red-50 hover:text-red-600"
+                    title="永久删除这条任务记录"
+                  >
+                    <Trash2 size={12} /> 删除
                   </button>
                 </div>
               ))}

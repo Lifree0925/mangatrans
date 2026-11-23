@@ -49,6 +49,8 @@ export default function ProjectPage() {
   // 重新翻译浮层：全部重翻 / 章节多选重译
   const [retranslateOpen, setRetranslateOpen] = useState(false);
   const [retranslateChapters, setRetranslateChapters] = useState<Set<string>>(new Set());
+  const [exportMode, setExportMode] = useState<"delivery" | "general">("delivery");
+  const [exportTitleEn, setExportTitleEn] = useState("");
   const [exportBilingual, setExportBilingual] = useState(true);
   const [exportFormat, setExportFormat] = useState<"md" | "txt" | "docx">("md");
   const isTauri = !!(
@@ -184,7 +186,11 @@ export default function ProjectPage() {
     try {
       const r = await api<ExportResult>(`/projects/${id}/export`, {
         method: "POST",
-        body: JSON.stringify({ bilingual: exportBilingual, format: exportFormat }),
+        body: JSON.stringify(
+          exportMode === "delivery"
+            ? { delivery: true, title_en: exportTitleEn.trim() || undefined }
+            : { delivery: false, bilingual: exportBilingual, format: exportFormat }
+        ),
       });
       if (isTauri) {
         const { invoke } = await import("@tauri-apps/api/core");
@@ -720,59 +726,108 @@ export default function ProjectPage() {
               </button>
             </div>
 
-            <p className="mt-4 text-xs text-(--color-muted)">文件类型</p>
-            <div className="mt-2 grid grid-cols-3 gap-2">
-              {[
-                { value: "md" as const, label: "Markdown", hint: ".md" },
-                { value: "txt" as const, label: "纯文本", hint: ".txt" },
-                { value: "docx" as const, label: "Word 文档", hint: ".docx" },
-              ].map((f) => (
-                <button
-                  key={f.value}
-                  onClick={() => setExportFormat(f.value)}
-                  className={`rounded-lg border px-2 py-2.5 text-sm ${
-                    exportFormat === f.value
-                      ? "border-(--color-text) bg-(--color-panel) font-medium"
-                      : "border-(--color-border) hover:bg-(--color-panel)"
-                  }`}
-                >
-                  {f.label}
-                  <span className="mt-0.5 block text-[11px] font-normal text-(--color-muted)">
-                    {f.hint}
-                  </span>
-                </button>
-              ))}
-            </div>
-
-            <p className="mt-4 text-xs text-(--color-muted)">内容形式</p>
+            <p className="mt-4 text-xs text-(--color-muted)">导出类型</p>
             <div className="mt-2 grid grid-cols-2 gap-2">
               <button
-                onClick={() => setExportBilingual(true)}
+                onClick={() => setExportMode("delivery")}
                 className={`rounded-lg border px-3 py-2.5 text-sm ${
-                  exportBilingual
+                  exportMode === "delivery"
                     ? "border-(--color-text) bg-(--color-panel) font-medium"
                     : "border-(--color-border) hover:bg-(--color-panel)"
                 }`}
               >
-                中英对照
+                交付版
                 <span className="mt-0.5 block text-[11px] font-normal text-(--color-muted)">
-                  便于人工校对
+                  剧本交付模板
                 </span>
               </button>
               <button
-                onClick={() => setExportBilingual(false)}
+                onClick={() => setExportMode("general")}
                 className={`rounded-lg border px-3 py-2.5 text-sm ${
-                  !exportBilingual
+                  exportMode === "general"
                     ? "border-(--color-text) bg-(--color-panel) font-medium"
                     : "border-(--color-border) hover:bg-(--color-panel)"
                 }`}
               >
-                纯英文
+                常规导出
                 <span className="mt-0.5 block text-[11px] font-normal text-(--color-muted)">
-                  交付版本
+                  中英对照 / 纯英文
                 </span>
               </button>
             </div>
+
+            {exportMode === "delivery" ? (
+              <>
+                <p className="mt-4 text-xs text-(--color-muted)">英文剧名（可选）</p>
+                <input
+                  value={exportTitleEn}
+                  onChange={(e) => setExportTitleEn(e.target.value)}
+                  placeholder="如 Betrayed by the Vampire, Marked by the Alpha"
+                  className="mt-2 w-full rounded-lg border border-(--color-border) bg-(--color-bg) px-3 py-2 text-sm outline-none focus:border-(--color-text)"
+                />
+                <div className="mt-3 rounded-lg bg-(--color-panel) px-3 py-2.5 text-xs leading-5 text-(--color-muted)">
+                  <p>按《剧本交付模板》生成：</p>
+                  <p className="mt-1">· 集/场景/人物/动作/音效保留中文原文</p>
+                  <p>· 台词输出英文（角色名英文、语气说明中文）</p>
+                </div>
+              </>
+            ) : (
+              <>
+                <p className="mt-4 text-xs text-(--color-muted)">文件类型</p>
+                <div className="mt-2 grid grid-cols-3 gap-2">
+                  {[
+                    { value: "md" as const, label: "Markdown", hint: ".md" },
+                    { value: "txt" as const, label: "纯文本", hint: ".txt" },
+                    { value: "docx" as const, label: "Word 文档", hint: ".docx" },
+                  ].map((f) => (
+                    <button
+                      key={f.value}
+                      onClick={() => setExportFormat(f.value)}
+                      className={`rounded-lg border px-2 py-2.5 text-sm ${
+                        exportFormat === f.value
+                          ? "border-(--color-text) bg-(--color-panel) font-medium"
+                          : "border-(--color-border) hover:bg-(--color-panel)"
+                      }`}
+                    >
+                      {f.label}
+                      <span className="mt-0.5 block text-[11px] font-normal text-(--color-muted)">
+                        {f.hint}
+                      </span>
+                    </button>
+                  ))}
+                </div>
+
+                <p className="mt-4 text-xs text-(--color-muted)">内容形式</p>
+                <div className="mt-2 grid grid-cols-2 gap-2">
+                  <button
+                    onClick={() => setExportBilingual(true)}
+                    className={`rounded-lg border px-3 py-2.5 text-sm ${
+                      exportBilingual
+                        ? "border-(--color-text) bg-(--color-panel) font-medium"
+                        : "border-(--color-border) hover:bg-(--color-panel)"
+                    }`}
+                  >
+                    中英对照
+                    <span className="mt-0.5 block text-[11px] font-normal text-(--color-muted)">
+                      便于人工校对
+                    </span>
+                  </button>
+                  <button
+                    onClick={() => setExportBilingual(false)}
+                    className={`rounded-lg border px-3 py-2.5 text-sm ${
+                      !exportBilingual
+                        ? "border-(--color-text) bg-(--color-panel) font-medium"
+                        : "border-(--color-border) hover:bg-(--color-panel)"
+                    }`}
+                  >
+                    纯英文
+                    <span className="mt-0.5 block text-[11px] font-normal text-(--color-muted)">
+                      英文成品
+                    </span>
+                  </button>
+                </div>
+              </>
+            )}
 
             <div className="mt-4 rounded-lg bg-(--color-panel) px-3 py-2.5 text-xs leading-5 text-(--color-muted)">
               <p>

@@ -148,7 +148,11 @@ def build_context(
             blocks.append(_json_block("CHARACTER PROFILES (personality & speech style)", profiles))
     if terms:
         forced_terms = [
-            {"term": t["canonical_key"], "translation": t.get("data", {}).get("translation")}
+            {
+                "term": t["canonical_key"],
+                "translation": t.get("data", {}).get("translation"),
+                "variants": t.get("data", {}).get("variants") or [],
+            }
             for t in terms
             if t.get("data", {}).get("translation")
         ]

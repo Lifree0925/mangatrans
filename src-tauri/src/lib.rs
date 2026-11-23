@@ -1,7 +1,8 @@
 //! MangaTrans 桌面壳：管理 Python sidecar 生命周期（动态端口 + 随机会话令牌）。
 //!
-//! 启动策略：sidecar 启动后立即显示窗口，健康检查在后台任务中进行，
-//! 不阻塞窗口创建（one-file sidecar 首次启动解压可能需要数秒到数十秒）。
+//! 启动策略：窗口立即显示（不等后端就绪），前端静默重试请求；后端通过
+//! backend.lock 单实例锁（数据目录隔离），App 崩溃遗留的孤儿后端会被下一次
+//! 启动复用，不产生进程堆积。
 
 use std::io::Write;
 use std::net::TcpListener;
@@ -25,6 +26,8 @@ struct BackendState {
     child: Mutex<Option<CommandChild>>,
     /// sidecar 进程是否已退出（Terminated 事件置位）
     child_exited: Arc<AtomicBool>,
+    /// 复用已有后端时的进程 pid（退出时经 pid 结束，保证下次启动运行新版本）
+    reused_pid: Option<u32>,
 }
 
 /// 用系统默认浏览器打开外部链接（更新下载等）。仅允许 GitHub 相关域名白名单。
@@ -243,6 +246,43 @@ fn append_log(path: &Path, line: &str) {
     }
 }
 
+/// 后端单实例锁文件：{data_dir}/backend.lock（JSON：pid/port/token）。
+fn backend_lock_path(data_dir: &Path) -> PathBuf {
+    data_dir.join("backend.lock")
+}
+
+/// 读取既有后端实例信息（不存在/损坏返回 None）。
+fn read_backend_lock(data_dir: &Path) -> Option<(u16, String, u32)> {
+    let path = backend_lock_path(data_dir);
+    let text = std::fs::read_to_string(&path).ok()?;
+    let value: serde_json::Value = serde_json::from_str(&text).ok()?;
+    let port = value.get("port")?.as_u64()?;
+    let token = value.get("token")?.as_str()?.to_string();
+    let pid = value.get("pid").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+    if port == 0 || port > 65535 {
+        return None;
+    }
+    Some((port as u16, token, pid))
+}
+
+/// 探测既有后端是否存活（最多约 2 秒）。存活则复用其端口、令牌与 pid。
+fn try_reuse_existing_backend(data_dir: &Path) -> Option<(u16, String, u32)> {
+    let (port, token, pid) = read_backend_lock(data_dir)?;
+    let url = format!("http://127.0.0.1:{port}/health");
+    for _ in 0..4 {
+        if reqwest::blocking::get(&url)
+            .map(|r| r.status().is_success())
+            .unwrap_or(false)
+        {
+            return Some((port, token, pid));
+        }
+        std::thread::sleep(Duration::from_millis(500));
+    }
+    // 锁文件存在但进程不可达：死进程残留，清理锁文件
+    let _ = std::fs::remove_file(backend_lock_path(data_dir));
+    None
+}
+
 /// 后台等待后端健康检查就绪（最多 8 秒；sidecar 正常 2-3 秒就绪）。
 fn wait_until_healthy(port: u16, log_path: &Path) {
     let url = format!("http://127.0.0.1:{port}/health");
@@ -271,11 +311,38 @@ pub fn run() {
             }
         }))
         .setup(|app| {
-            let port = find_free_port().expect("无法分配本地端口");
-            let token = generate_token();
             // 数据目录：MT_DATA_DIR > 用户配置 > 系统应用数据目录
             let data_dir = resolve_data_dir(app.handle());
             let log_path = sidecar_log_path(&data_dir);
+            let main_window = app
+                .get_webview_window("main")
+                .expect("main window missing");
+
+            // 复用既有后端：上次 App 崩溃遗留的孤儿 sidecar 仍健康时直接复用，
+            // 不新拉进程（消除多后端进程堆积与并发写库）
+            if let Some((existing_port, existing_token, existing_pid)) =
+                try_reuse_existing_backend(&data_dir)
+            {
+                append_log(
+                    &log_path,
+                    &format!("[reuse] 复用已有后端 http://127.0.0.1:{existing_port}"),
+                );
+                app.manage(BackendState {
+                    port: existing_port,
+                    token: existing_token,
+                    data_dir: data_dir.to_string_lossy().to_string(),
+                    child: Mutex::new(None),
+                    child_exited: Arc::new(AtomicBool::new(false)),
+                    reused_pid: Some(existing_pid),
+                });
+                // 立即显示窗口：用户打开即见主界面，不等任何连接
+                let _ = main_window.show();
+                let _ = main_window.set_focus();
+                return Ok(());
+            }
+
+            let port = find_free_port().expect("无法分配本地端口");
+            let token = generate_token();
 
             let child_exited = Arc::new(AtomicBool::new(false));
             let exit_flag = child_exited.clone();
@@ -326,17 +393,13 @@ pub fn run() {
                 }
             };
 
-            // 健康检查后台执行：就绪（或 8 秒超时）后再显示窗口，
-            // 用户打开软件即见主界面，不经过「正在连接」等待画面
+            // 窗口立即显示：不等健康检查（前端静默重试，连接失败展示诊断信息）
+            let _ = main_window.show();
+            let _ = main_window.set_focus();
+            // 健康检查后台执行，仅写日志供诊断
             let health_log = log_path.clone();
-            let main_window = app
-                .get_webview_window("main")
-                .expect("main window missing");
             tauri::async_runtime::spawn_blocking(move || {
                 wait_until_healthy(port, &health_log);
-                // 就绪或超时都显示窗口：超时时由前端诊断 UI 给出原因
-                let _ = main_window.show();
-                let _ = main_window.set_focus();
             });
 
             app.manage(BackendState {
@@ -345,6 +408,7 @@ pub fn run() {
                 data_dir: data_dir.to_string_lossy().to_string(),
                 child: Mutex::new(child),
                 child_exited,
+                reused_pid: None,
             });
             Ok(())
         })
@@ -361,9 +425,20 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("Tauri 构建失败")
         .run(|app, event| {
-            // 退出时回收 sidecar 进程
+            // 退出时回收后端进程：新 spawn 的 child 直接 kill；
+            // 复用的孤儿后端按 pid 结束（保证下次启动运行当前版本后端）
             if let tauri::RunEvent::ExitRequested { .. } | tauri::RunEvent::Exit = event {
                 if let Some(state) = app.try_state::<BackendState>() {
+                    if let Some(pid) = state.reused_pid {
+                        #[cfg(target_os = "windows")]
+                        let _ = std::process::Command::new("taskkill")
+                            .args(["/F", "/PID", &pid.to_string()])
+                            .output();
+                        #[cfg(not(target_os = "windows"))]
+                        let _ = std::process::Command::new("kill")
+                            .arg(pid.to_string())
+                            .output();
+                    }
                     if let Ok(mut guard) = state.child.lock() {
                         if let Some(child) = guard.take() {
                             let _ = child.kill();

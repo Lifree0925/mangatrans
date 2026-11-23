@@ -2,8 +2,8 @@
 
 import json
 
-from sqlalchemy import func, select
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy import func, select, text
+from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.orm import Session
 
 from app.llm.registry import get_provider
@@ -99,13 +99,14 @@ def _load_window_context(db: Session, project_id: str, window: list[SourceSegmen
     return card, items, storyline
 
 
-def _forced_terms_for_text(db: Session, project_id: str, text: str) -> dict[str, str]:
-    """文本命中的强制术语（含别名）：{中文称呼: 必须出现的英文标准译名}。
+def _forced_terms_for_text(db: Session, project_id: str, text: str) -> dict[str, dict]:
+    """文本命中的强制术语（含别名）：{中文称呼: {"en": 标准译名, "variants": [...]}}。
 
     同一实体的多种中文称呼（如「边缘酒吧」「荒原边缘酒吧」）全部映射到同一译名，
     场景名/专有名词强制复用首次确定的译名，杜绝同一地点多种译名。
+    variants 声明译名合法变体（复数、时态等），词边界匹配不再误伤 werewolves。
     """
-    forced: dict[str, str] = {}
+    forced: dict[str, dict] = {}
     for k in db.scalars(
         select(KnowledgeItem).where(
             KnowledgeItem.project_id == project_id,
@@ -113,9 +114,14 @@ def _forced_terms_for_text(db: Session, project_id: str, text: str) -> dict[str,
             KnowledgeItem.status.in_(["approved", "auto_approved"]),
         )
     ):
-        translation = (json.loads(k.data_json or "{}").get("translation") or "").strip()
+        data = json.loads(k.data_json or "{}")
+        translation = (data.get("translation") or "").strip()
         if not translation or translation == k.canonical_key:
             continue
+        variants = [
+            v.strip() for v in (data.get("variants") or [])
+            if isinstance(v, str) and v.strip()
+        ]
         keys = [k.canonical_key]
         for a in db.scalars(
             select(KnowledgeAlias.alias).where(KnowledgeAlias.knowledge_id == k.id)
@@ -124,7 +130,7 @@ def _forced_terms_for_text(db: Session, project_id: str, text: str) -> dict[str,
                 keys.append(a)
         for key in keys:
             if key in text:
-                forced[key] = translation
+                forced[key] = {"en": translation, "variants": variants}
     return forced
 
 
@@ -134,81 +140,209 @@ def _window_forced_terms(db: Session, project_id: str, window: list[SourceSegmen
     return _forced_terms_for_text(db, project_id, win_text)
 
 
-async def _qa_check_loop(
-    *,
-    db_factory,
-    project_id: str,
-    window: list[SourceSegment],
-    draft: list[dict],
-    polished: list[dict],
-    carry: dict,
-    context,
-    provider,
-    model: str,
-    max_loops: int = 3,
-) -> tuple[list[dict], dict, list[dict]]:
-    """质检打回定点修复：QA 发现 high/critical 问题时，AI 只重译问题段（窗口其余段保持不变），
-    每轮只修剩余问题段，最多 3 轮。返回 (最终 polished, carry, 最终问题列表)。
+async def process_window_qa_item(db_factory, task_id: str, item_id: str, model: str) -> dict:
+    """独立 QA 任务节点：定点查询（确定性 QA 定位问题段）+ 定点修改（润色模型只重译问题段）。
+
+    与窗口翻译解耦：QA 打回绝不重启初翻/润色任务，本节点失败/超时也只重跑自身。
+    最多 3 轮修复；仍未修复的段标 needs_review 转人工，不再自动重译。
     """
     from app.services import qa_service
     from app.services.translation import repair_segments
 
-    issues: list[dict] = []
-    for _ in range(max_loops):
+    with db_factory() as db:
+        task = db.get(Task, task_id)
+        item = db.get(TaskItem, item_id)
+        if task is None or item is None:
+            return {"error": "task/item not found"}
+        seg_ids = json.loads(item.window_segments_json or "[]")
+        window = list(db.scalars(select(SourceSegment).where(SourceSegment.id.in_(seg_ids))))
+        window.sort(key=lambda s: seg_ids.index(s.id))
+        project_id = task.project_id
+        # 本窗口最新 polished（QA 只检查/修改润色层，初翻不参与）
+        rows = list(
+            db.scalars(
+                select(Translation).where(
+                    Translation.segment_id.in_([s.id for s in window]),
+                    Translation.stage == "polished",
+                ).order_by(Translation.version.desc())
+            )
+        )
+        polished: dict[str, dict] = {}
+        for t in rows:
+            polished.setdefault(t.segment_id, t)
+        forced = _window_forced_terms(db, project_id, window)
+        draft_rows = list(
+            db.scalars(
+                select(Translation).where(
+                    Translation.segment_id.in_([s.id for s in window]),
+                    Translation.stage == "draft",
+                ).order_by(Translation.version.desc())
+            )
+        )
+        draft_latest: dict[str, Translation] = {}
+        for t in draft_rows:
+            draft_latest.setdefault(t.segment_id, t)
+
+    seg_by_id = {s.id: s for s in window}
+    provider = get_provider()
+    issues_total = 0
+    repaired = 0
+    leftover: list[str] = []
+    for _ in range(3):
         with db_factory() as db:
             forced = _window_forced_terms(db, project_id, window)
-            issues = []
-            seg_high: dict[str, list[dict]] = {}
-            for seg, tr in zip(window, polished):
-                # 临时 Translation 对象用于 QA
-                class _FakeTr:
-                    target_text = tr["target_text"]
-                det = qa_service.deterministic_qa(db, seg, _FakeTr(), forced)
-                issues.extend(det)
-                high_here = [i for i in det if i.get("severity") in ("high", "critical")]
-                if high_here:
-                    seg_high[seg.id] = high_here
-        if not seg_high:
+            seg_fix: dict[str, list[dict]] = {}
+            for seg in window:
+                tr = polished.get(seg.id)
+                if tr is None:
+                    continue
+                det = qa_service.deterministic_qa(db, seg, tr, forced)
+                need_fix = [i for i in det if qa_service.should_repair(i)]
+                if need_fix:
+                    seg_fix[seg.id] = need_fix
+                issues_total += len(det)
+        if not seg_fix:
             break
-        # 定点修复：只重译问题段；修复失败则保持原样退出（不整窗重做）
+        # 定点修改：润色模型只重译问题段（窗口其余段保持不变，初翻不参与）
+        target = sorted(seg_fix)
+        context = ContextResult(
+            prompt_text=(
+                "SOURCE SEGMENTS (translate only these, one translation per segment_id):\n"
+                + "\n".join(f"[{s.id}] {s.source_text}" for s in window if s.id in target)
+            )
+        )
+        draft = [
+            {"segment_id": s.id, "target_text": draft_latest[s.id].target_text}
+            for s in window if s.id in target and s.id in draft_latest
+        ]
         try:
             fixed_map = await repair_segments(
-                provider=provider, model=model, window_id="QA-FIX", context=context,
-                draft=draft,
-                issues=[i for lst in seg_high.values() for i in lst],
-                seg_ids=sorted(seg_high),
+                provider=provider, model=model, window_id=f"QA-{item.window_id}",
+                context=context, draft=draft,
+                issues=[i for lst in seg_fix.values() for i in lst],
+                seg_ids=target,
             )
-        except Exception:  # noqa: BLE001 定点修复异常：保持原译文，不阻塞窗口
+        except Exception:  # noqa: BLE001 定点修复异常：保留原译文，不阻塞
             fixed_map = {}
         if not fixed_map:
+            leftover = [sid for sid in target]
             break
-        for e in polished:
-            if e.get("segment_id") in fixed_map:
-                e["target_text"] = fixed_map[e["segment_id"]]
-    return polished, carry, issues
+        fixed_ok: dict[str, str] = {}
+        for sid in target:
+            text = (fixed_map.get(sid) or "").strip()
+            seg = seg_by_id.get(sid)
+            if not text or seg is None:
+                continue
+            if validate_window(
+                [{"segment_id": sid, "source_text": seg.source_text}],
+                [{"segment_id": sid, "target_text": text}],
+            ):
+                continue  # 校验不通过：不写库
+            fixed_ok[sid] = text
+        if not fixed_ok:
+            leftover = [sid for sid in target]
+            break
+        with db_factory() as db:
+            for sid, text in fixed_ok.items():
+                insert_translation_row(
+                    db, segment_id=sid, stage="polished", target_text=text,
+                    review_status="unreviewed", freshness_status="current",
+                    notes_json="[]", ambiguity_json="[]",
+                    model_name=model, provider_id="default",
+                    prompt_version=PROMPT_VERSION, context_snapshot_json="{}",
+                    source_hash=sha256(seg_by_id[sid].source_text),
+                )
+            db.commit()
+        repaired += len(fixed_ok)
+        # 修复段替换进内存，供下一轮重检
+        for sid, text in fixed_ok.items():
+            t = polished.get(sid)
+            if t is not None:
+                t.target_text = text
+        # 重检修复段：仍有应修问题的进入下一轮
+        still_bad: list[str] = []
+        with db_factory() as db:
+            forced = _window_forced_terms(db, project_id, window)
+            for sid in fixed_ok:
+                seg = seg_by_id[sid]
+                det = qa_service.deterministic_qa(db, seg, polished[sid], forced)
+                if any(qa_service.should_repair(i) for i in det):
+                    still_bad.append(sid)
+        if not still_bad:
+            break
+        leftover = still_bad
+    # 超限未修复段：标 needs_review 转人工（不触发任何任务重跑）
+    if leftover:
+        with db_factory() as db:
+            for sid in leftover:
+                t = db.scalar(
+                    select(Translation).where(
+                        Translation.segment_id == sid, Translation.stage == "polished"
+                    ).order_by(Translation.version.desc()).limit(1)
+                )
+                if t is not None:
+                    t.review_status = "needs_review"
+            db.commit()
+
+    with db_factory() as db:
+        item = db.get(TaskItem, item_id)
+        item.status = "succeeded"
+        item.finished_at = func.now()
+        db.commit()
+    return {"done": 1, "window_id": item.window_id, "qa_issues": issues_total,
+            "repaired": repaired}
 
 
 def insert_translation_row(db: Session, *, segment_id: str, **kw) -> Translation:
-    """并发安全的译文插入：UNIQUE(segment_id, version) 冲突时在 SAVEPOINT 内
-    重读最大版本重试（最多 3 次），避免双任务并发写同版本撞约束。"""
-    last_exc: IntegrityError | None = None
-    for _ in range(3):
+    """并发安全的译文插入。
+
+    版本号由同一条 INSERT ... SELECT COALESCE(MAX(version),0)+1 原子分配：
+    SQLite 单语句（隐式事务）内完成读 max 与插入，跨协程/跨进程都不会再产生
+    UNIQUE(segment_id, version) 冲突（历史根因：应用层"读 max+1"存在竞态窗口）。
+    保留 busy/locked 与残余完整性冲突的兜底重试。
+    """
+    # raw SQL 不触发 ORM 的 Python 端 default：NOT NULL 列统一显式补默认
+    kw.setdefault("review_status", "unreviewed")
+    kw.setdefault("freshness_status", "current")
+    kw.setdefault("notes_json", "[]")
+    kw.setdefault("ambiguity_json", "[]")
+    kw.setdefault("model_name", "")
+    kw.setdefault("provider_id", "")
+    kw.setdefault("prompt_version", "")
+    kw.setdefault("context_snapshot_json", "{}")
+    kw.setdefault("source_hash", "")
+    last_exc: Exception | None = None
+    from app.models.translation import new_id as _new_id, utcnow as _utcnow
+
+    kw.setdefault("created_at", _utcnow())
+
+    for _ in range(4):
         try:
-            with db.begin_nested():
-                base = (
-                    db.scalar(
-                        select(func.max(Translation.version)).where(
-                            Translation.segment_id == segment_id
-                        )
-                    )
-                    or 0
-                )
-                t = Translation(segment_id=segment_id, version=base + 1, **kw)
-                db.add(t)
-                db.flush()
+            db.commit()  # 隔离本次失败影响面：此前已 flush 的行先落库
+            rid = _new_id()
+            cols = ["id", "segment_id", "version", *kw.keys()]
+            select_exprs = [
+                ":id",
+                ":segment_id",
+                "COALESCE(MAX(version),0)+1",
+                *(f":{c}" for c in kw),
+            ]
+            sql = (
+                "INSERT INTO translations ("
+                + ", ".join(cols)
+                + ") SELECT "
+                + ", ".join(select_exprs)
+                + " FROM translations WHERE segment_id = :segment_id"
+            )
+            db.execute(text(sql), {"id": rid, "segment_id": segment_id, **kw})
+            db.commit()
+            t = db.get(Translation, rid)
+            if t is None:  # 理论不可达：插入后按主键读取必须存在
+                raise RuntimeError("译文插入后读取失败")
             return t
-        except IntegrityError as exc:
+        except (IntegrityError, OperationalError) as exc:
             last_exc = exc
+            db.rollback()  # 只回滚当前这一行
             continue
     assert last_exc is not None
     raise last_exc
@@ -216,13 +350,22 @@ def insert_translation_row(db: Session, *, segment_id: str, **kw) -> Translation
 
 def _persist_stage(
     db: Session, window: list[SourceSegment], entries: list[dict], stage: str,
-    context, model: str,
+    context, model: str, *, only_segment_ids: set[str] | None = None,
+    review_status: str | None = None,
 ) -> None:
-    """按阶段入库：draft 与 polished 分别持久化（两轮都入库）。"""
-    for src, entry in zip(window, entries):
-        insert_translation_row(
-            db,
-            segment_id=src.id,
+    """按阶段入库（draft 与 polished 分别持久化）。
+
+    按 segment_id 映射回填（不按下标 zip：输出顺序错位时绝不写错段）；
+    only_segment_ids 只落库指定段（QA 定点修复只给修复段追加新版本，防版本爆炸）。
+    """
+    by_id = {e.get("segment_id"): e for e in entries}
+    for src in window:
+        if only_segment_ids is not None and src.id not in only_segment_ids:
+            continue
+        entry = by_id.get(src.id)
+        if entry is None:
+            continue  # 缺失段不入库（调用方必须先过 validate_window）
+        kw = dict(
             stage=stage,
             target_text=entry["target_text"],
             notes_json=json.dumps(entry.get("notes", []), ensure_ascii=False),
@@ -233,18 +376,26 @@ def _persist_stage(
             context_snapshot_json=json.dumps(context.snapshot, ensure_ascii=False),
             source_hash=sha256(src.source_text),
         )
+        if review_status:
+            kw["review_status"] = review_status
+        insert_translation_row(db, segment_id=src.id, **kw)
 
 
 def _persist_window_translations(
     db: Session, window: list[SourceSegment], draft, polished, context, model: str
 ) -> None:
-    """draft 与 polished 连续版本入库（共享 base 递增，避免版本冲突）。"""
-    for src, dr, po in zip(window, draft, polished):
-        for entry in (dr, po):
+    """draft 与 polished 入库：按 segment_id 映射回填，顺序无关、绝不写错段。"""
+    draft_by_id = {e.get("segment_id"): e for e in draft}
+    polished_by_id = {e.get("segment_id"): e for e in polished}
+    for src in window:
+        for stage, by_id in (("draft", draft_by_id), ("polished", polished_by_id)):
+            entry = by_id.get(src.id)
+            if entry is None:
+                continue  # 缺失段不入库（调用方必须先过 validate_window）
             insert_translation_row(
                 db,
                 segment_id=src.id,
-                stage="draft" if entry is dr else "polished",
+                stage=stage,
                 target_text=entry["target_text"],
                 notes_json=json.dumps(entry.get("notes", []), ensure_ascii=False),
                 ambiguity_json=json.dumps(entry.get("ambiguity", []), ensure_ascii=False),
@@ -296,7 +447,8 @@ async def translate_window_draft_direct(
     """Draft 阶段（可并发）：不依赖 carry-over。返回 (draft, draft_carry, context)。"""
     seg_dicts, context, _sg, _card = await _window_material(db_factory, project_id, window, None)
     draft, carry = await translate_window_draft(
-        provider=get_provider(), model=model, window_id="DRAFT", context=context
+        provider=get_provider(), model=model, window_id="DRAFT", context=context,
+        source_chars=sum(len(s["source_text"]) for s in seg_dicts),
     )
     return draft, carry, context
 
@@ -329,6 +481,12 @@ async def process_window_draft_item(db_factory, task_id: str, item_id: str, mode
         project_id = task.project_id
 
     draft, carry, context = await translate_window_draft_direct(db_factory, project_id, window, model)
+    errors = validate_window(
+        [{"segment_id": s.id, "source_text": s.source_text} for s in window], draft
+    )
+    if errors:
+        # 段缺失/顺序错位/重复：拒绝按序回填（历史串段根因），整窗重试
+        return {"error": "draft 校验失败：" + "; ".join(errors[:3])}
     with db_factory() as db:
         _persist_stage(db, window, draft, "draft", context, model)
         item = db.get(TaskItem, item_id)
@@ -397,37 +555,39 @@ async def process_window_polish_item(db_factory, task_id: str, item_id: str, mod
     if errors:
         return {"error": "; ".join(errors)}
 
-    # context 供 QA 循环使用
+    # polished 整窗先落库一次（QA 定点修复由独立 QA 节点追加新版本）
     seg_dicts, context, _sg, _card = await _window_material(
         db_factory, project_id, window, carry_over
     )
-    provider = get_provider()
-    polished, carry, qa_issues = await _qa_check_loop(
-        db_factory=db_factory,
-        project_id=project_id,
-        window=window,
-        draft=draft,
-        polished=polished,
-        carry=carry,
-        context=context,
-        provider=provider,
-        model=model,
-    )
-
     with db_factory() as db:
         _persist_stage(db, window, polished, "polished", context, model)
+        db.commit()
+
+    # 创建独立 QA 节点：QA 打回绝不重启本窗口的初翻/润色，
+    # QA 节点失败/超时只重跑自身（定点查询+定点修改）。
+    with db_factory() as db:
+        exists = db.scalar(
+            select(TaskItem.id).where(
+                TaskItem.task_id == task_id,
+                TaskItem.phase == "qa",
+                TaskItem.window_id == item.window_id,
+            ).limit(1)
+        )
+        if exists is None:
+            db.add(TaskItem(
+                task_id=task_id,
+                segment_id=window[0].id,
+                window_id=item.window_id,
+                phase="qa",
+                window_segments_json=item.window_segments_json,
+            ))
         item = db.get(TaskItem, item_id)
         item.status = "succeeded"
         item.result_id = item.id
         item.finished_at = func.now()
         db.commit()
     # 任务级 progress 由调度层顺序写（并发 Polish 下避免读改写竞争）
-    return {
-        "done": 1,
-        "window_id": window_id,
-        "polish_carry": carry,
-        "qa_issues": len(qa_issues),
-    }
+    return {"done": 1, "window_id": window_id, "polish_carry": carry}
 
 
 def mark_stale_for_knowledge(db: Session, knowledge_id: str) -> int:

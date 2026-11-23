@@ -109,12 +109,12 @@ def add_manual_translation(project_id: str, segment_id: str, payload: dict, db: 
     text = str(payload.get("target_text", "")).strip()
     if not text:
         raise HTTPException(status_code=400, detail="译文不能为空")
-    base = db.scalar(
-        select(func.max(Translation.version)).where(Translation.segment_id == segment_id)
-    ) or 0
-    t = Translation(
+    # 人工编辑与后台任务可能并发写同一段：版本号由原子 INSERT...SELECT 分配
+    from app.services.translation_batch import insert_translation_row
+
+    t = insert_translation_row(
+        db,
         segment_id=segment_id,
-        version=base + 1,
         stage="polished",
         target_text=text,
         review_status="approved",
@@ -124,7 +124,6 @@ def add_manual_translation(project_id: str, segment_id: str, payload: dict, db: 
         prompt_version="manual",
         source_hash=seg.source_hash,
     )
-    db.add(t)
     db.add(AuditLog(
         project_id=project_id, entity_type="translation", entity_id=segment_id,
         action="add_translation", before_text=None, after_text=text))

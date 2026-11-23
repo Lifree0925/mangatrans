@@ -31,6 +31,7 @@ from app.services.translation_batch import (
     translate_window_draft_direct,
     translate_window_polish_direct,
 )
+from app.services.term_match import target_hits_term
 from app.services.window_planner import build_windows
 
 
@@ -46,6 +47,115 @@ def _sync_progress(db_factory, task_id: str, steps: dict, current_step: str) -> 
             {"steps": steps, "current_step": current_step}, ensure_ascii=False
         )
         db.commit()
+
+
+async def _repair_express_qa(
+    db_factory, project_id: str, window, win_issues: list[dict],
+    provider, model: str, forced: dict,
+) -> tuple[int, list[str]]:
+    """Express QA 打回定点修复：AI 只修问题段（medium/high/critical），最多 3 轮。
+
+    每轮修复段写库新版本；重检（确定性 QA）仍有问题的段转 needs_review，不再自动重译。
+    返回 (修复段数, 未修复段 id 列表)。
+    """
+    from app.services.context_builder import ContextResult
+    from app.services.translation_batch import insert_translation_row
+
+    target_ids = sorted({
+        i.get("segment_id") for i in win_issues
+        if qa_service.should_repair(i) and i.get("segment_id")
+    })
+    if not target_ids:
+        return 0, []
+    seg_by_id = {s.id: s for s in window}
+    with db_factory() as db:
+        draft_rows = list(
+            db.scalars(
+                select(Translation).where(
+                    Translation.segment_id.in_([s.id for s in window]),
+                    Translation.stage == "draft",
+                ).order_by(Translation.version.desc())
+            )
+        )
+    draft_latest: dict[str, Translation] = {}
+    for t in draft_rows:
+        draft_latest.setdefault(t.segment_id, t)
+    draft = [
+        {"segment_id": s.id, "target_text": draft_latest[s.id].target_text}
+        for s in window
+        if s.id in target_ids and s.id in draft_latest
+    ]
+    ctx = ContextResult(
+        prompt_text=(
+            "SOURCE SEGMENTS (translate only these, one translation per segment_id):\n"
+            + "\n".join(f"[{s.id}] {s.source_text}" for s in window if s.id in target_ids)
+        )
+    )
+    fixed_total = 0
+    remaining = list(target_ids)
+    for _ in range(3):
+        if not remaining:
+            break
+        try:
+            fixed_map = await repair_segments(
+                provider=provider, model=model, window_id="QA-FIX-EXPRESS",
+                context=ctx, draft=draft,
+                issues=[i for i in win_issues if i.get("segment_id") in remaining],
+                seg_ids=remaining,
+            )
+        except Exception:  # noqa: BLE001 修复异常：保留原译文转人工
+            fixed_map = {}
+        if not fixed_map:
+            break
+        fixed_ok: dict[str, str] = {}
+        for sid in list(remaining):
+            text = (fixed_map.get(sid) or "").strip()
+            seg = seg_by_id.get(sid)
+            if not text or seg is None:
+                continue
+            if validate_window(
+                [{"segment_id": sid, "source_text": seg.source_text}],
+                [{"segment_id": sid, "target_text": text}],
+            ):
+                continue  # 校验不通过：该段不写库
+            fixed_ok[sid] = text
+        if not fixed_ok:
+            break
+        with db_factory() as db:
+            for sid, text in fixed_ok.items():
+                insert_translation_row(
+                    db, segment_id=sid, stage="polished", target_text=text,
+                    review_status="unreviewed", freshness_status="current",
+                    notes_json="[]", ambiguity_json="[]",
+                    model_name=model, provider_id="default",
+                    prompt_version=PROMPT_VERSION, context_snapshot_json="{}",
+                    source_hash=sha256(seg_by_id[sid].source_text),
+                )
+            db.commit()
+        fixed_total += len(fixed_ok)
+        # 重检修复段：确定性 QA 仍有 medium/high/critical 才算未修复
+        with db_factory() as db:
+            still_bad: list[str] = []
+            for sid in fixed_ok:
+                seg = seg_by_id[sid]
+                class _FakeTr:
+                    target_text = fixed_ok[sid]
+                det = qa_service.deterministic_qa(db, seg, _FakeTr(), forced)
+                if any(qa_service.should_repair(i) for i in det):
+                    still_bad.append(sid)
+        remaining = [sid for sid in remaining if sid in still_bad]
+    if remaining:
+        with db_factory() as db:
+            for sid in remaining:
+                t = db.scalar(
+                    select(Translation).where(
+                        Translation.segment_id == sid, Translation.stage == "polished"
+                    ).order_by(Translation.version.desc()).limit(1)
+                )
+                if t is not None:
+                    t.review_status = "needs_review"
+            db.commit()
+    return fixed_total, remaining
 
 
 async def run_express(db_factory, project_id: str, source_document_id: str, model: str, task_id: str = "express") -> dict:
@@ -504,7 +614,18 @@ async def run_express(db_factory, project_id: str, source_document_id: str, mode
                 "severity_counts": severity_counts,
             }
             _sync_progress(db_factory, task_id, report["steps"], "qa")
-            gate = qa_service.evaluate_gate(win_issues)
+            # 质检打回定点修复：AI 只修问题段（最多 3 轮），修复段写库新版本；
+            # 仍不合格转 needs_review，不整窗重做
+            fixed_n, leftover = await _repair_express_qa(
+                db_factory, project_id, window, win_issues, provider, model, forced
+            )
+            if fixed_n:
+                report["steps"]["qa"]["fixed"] = int(report["steps"]["qa"].get("fixed") or 0) + fixed_n
+                _sync_progress(db_factory, task_id, report["steps"], "qa")
+            # 修复后 gate 只看未修复段的问题：全部修复即 passed（low 问题不挡发布）
+            gate = qa_service.evaluate_gate(
+                [i for i in win_issues if i.get("segment_id") in leftover]
+            )
             if gate == "needs_review":
                 needs_review += 1
             elif gate == "blocked":
@@ -554,9 +675,13 @@ async def run_express(db_factory, project_id: str, source_document_id: str, mode
             report["steps"]["term_consistency"] = {"fixed": 0, "found": 0}
             _sync_progress(db_factory, task_id, report["steps"], "term_consistency")
             return
-        # 段级命中检测：原文含术语但最新译文未使用译名
+        # 段级命中检测：原文含术语但最新译文未使用译名（词边界 + 大小写不敏感）
         fixes: dict[str, str] = {}  # segment_id -> 译名要求说明
-        for key, trans in forced.items():
+        for key, spec in forced.items():
+            trans = spec.get("en") or ""
+            variants = spec.get("variants") or []
+            if not trans:
+                continue
             hit_segs = [seg for seg in segs_all if key in seg.source_text]
             if len(hit_segs) < 3:
                 continue  # 出现太少不强制
@@ -568,9 +693,12 @@ async def run_express(db_factory, project_id: str, source_document_id: str, mode
                         .order_by(Translation.version.desc())
                         .limit(1)
                     )
-                    if t is None or trans in (t.target_text or ""):
+                    if t is None:
                         continue
-                    fixes[seg.id] = f"必须使用译名 {trans}（术语 {key}）"
+                    tgt = t.target_text or ""
+                    if target_hits_term(tgt, trans, variants):
+                        continue  # 已命中（含大小写差异/单复数变体）：不修
+                    fixes[seg.id] = f"必须使用译名 {trans}（术语 {key}，允许变体 {variants}）"
         if not fixes:
             report["steps"]["term_consistency"] = {"fixed": 0, "found": 0}
             _sync_progress(db_factory, task_id, report["steps"], "term_consistency")
@@ -612,10 +740,13 @@ async def run_express(db_factory, project_id: str, source_document_id: str, mode
                     timeout=180,
                 )
                 text = fixed_map.get(sid, "")
+                # 校验通过才写库（历史 bug：判定写反，导致不合格译文入库、合格译文被丢弃）
                 if text and not validate_window(
                     [{"segment_id": sid, "source_text": seg.source_text}],
                     [{"segment_id": sid, "target_text": text}],
                 ):
+                    return sid, None
+                if text:
                     return sid, text
             except Exception:  # noqa: BLE001 单段修复失败不阻塞
                 return sid, None
