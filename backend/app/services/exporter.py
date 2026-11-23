@@ -277,6 +277,19 @@ def _export_delivery_markdown(
     return "\n".join(lines) + "\n"
 
 
+def _delivery_docx(body: str) -> bytes:
+    """交付模板内容转 Word：逐行段落，保持与 .md/.txt 完全一致的行结构。"""
+    from docx import Document
+
+    doc = Document()
+    for line in body.split("\n"):
+        if line.strip():
+            doc.add_paragraph(line)
+    buf = BytesIO()
+    doc.save(buf)
+    return buf.getvalue()
+
+
 def export_project(
     db: Session,
     project: Project,
@@ -294,21 +307,29 @@ def export_project(
     segs, chapters, scenes, trans, issues = _load(db, project)
     report = _report(segs, trans, issues)
 
+    if fmt not in FORMATS:
+        fmt = "md"
     if delivery:
         body = _export_delivery_markdown(
             project, segs, chapters, scenes, trans, title_en, doc_title
         )
         name = (doc_title or project.name).strip() or "剧本"
+        if fmt == "docx":
+            return {
+                "filename": f"{name}.docx",
+                "format": "docx",
+                "content": None,
+                "content_base64": base64.b64encode(_delivery_docx(body)).decode("ascii"),
+                "report": report,
+            }
         return {
-            "filename": f"{name}.md",
-            "format": "md",
+            "filename": f"{name}.{fmt}",
+            "format": fmt,
             "content": body,
             "content_base64": None,
             "report": report,
         }
 
-    if fmt not in FORMATS:
-        fmt = "md"
     if fmt == "docx":
         data = _export_docx(project, segs, trans, bilingual)
         return {

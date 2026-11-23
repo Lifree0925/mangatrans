@@ -259,3 +259,36 @@ def test_export_delivery_default_is_template(client: TestClient, wait_task) -> N
     body = r.json()["content"]
     assert "（剧终）" in body
     assert "第1集" in body
+
+
+def test_export_delivery_file_types(client: TestClient, wait_task) -> None:
+    """交付版支持 md / txt / docx 三种文件类型，内容结构一致。"""
+    pid = _setup(client, wait_task)
+    set_provider(_universal_fake(client, pid))
+    r = client.post(f"/api/v1/projects/{pid}/translation/start", json={})
+    task_id = r.json()["task_id"]
+    import asyncio
+
+    from app.pipeline.worker import run_once
+
+    for _ in range(60):
+        asyncio.run(run_once())
+        with dbmod.SessionLocal() as db:
+            if db.get(Task, task_id).status == "completed":
+                break
+
+    for fmt in ("md", "txt", "docx"):
+        r = client.post(
+            f"/api/v1/projects/{pid}/export",
+            json={"delivery": True, "format": fmt, "title_en": "First Meeting"},
+        )
+        assert r.status_code == 200, r.text
+        data = r.json()
+        assert data["format"] == fmt
+        assert data["filename"].endswith(f".{fmt}")
+        if fmt == "docx":
+            assert data["content_base64"], "docx 应返回 base64"
+            assert data["content"] is None
+        else:
+            assert "（剧终）" in data["content"]
+            assert "第1集" in data["content"]

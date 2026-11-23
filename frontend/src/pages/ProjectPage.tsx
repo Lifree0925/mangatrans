@@ -188,7 +188,11 @@ export default function ProjectPage() {
         method: "POST",
         body: JSON.stringify(
           exportMode === "delivery"
-            ? { delivery: true, title_en: exportTitleEn.trim() || undefined }
+            ? {
+                delivery: true,
+                title_en: exportTitleEn.trim() || undefined,
+                format: exportFormat,
+              }
             : { delivery: false, bilingual: exportBilingual, format: exportFormat }
         ),
       });
@@ -765,10 +769,28 @@ export default function ProjectPage() {
                   placeholder="如 Betrayed by the Vampire, Marked by the Alpha"
                   className="mt-2 w-full rounded-lg border border-(--color-border) bg-(--color-bg) px-3 py-2 text-sm outline-none focus:border-(--color-text)"
                 />
-                <div className="mt-3 rounded-lg bg-(--color-panel) px-3 py-2.5 text-xs leading-5 text-(--color-muted)">
-                  <p>按《剧本交付模板》生成：</p>
-                  <p className="mt-1">· 集/场景/人物/动作/音效保留中文原文</p>
-                  <p>· 台词输出英文（角色名英文、语气说明中文）</p>
+                <p className="mt-4 text-xs text-(--color-muted)">文件类型</p>
+                <div className="mt-2 grid grid-cols-3 gap-2">
+                  {[
+                    { value: "md" as const, label: "Markdown", hint: ".md" },
+                    { value: "txt" as const, label: "纯文本", hint: ".txt" },
+                    { value: "docx" as const, label: "Word 文档", hint: ".docx" },
+                  ].map((f) => (
+                    <button
+                      key={f.value}
+                      onClick={() => setExportFormat(f.value)}
+                      className={`rounded-lg border px-2 py-2.5 text-sm ${
+                        exportFormat === f.value
+                          ? "border-(--color-text) bg-(--color-panel) font-medium"
+                          : "border-(--color-border) hover:bg-(--color-panel)"
+                      }`}
+                    >
+                      {f.label}
+                      <span className="mt-0.5 block text-[11px] font-normal text-(--color-muted)">
+                        {f.hint}
+                      </span>
+                    </button>
+                  ))}
                 </div>
               </>
             ) : (
