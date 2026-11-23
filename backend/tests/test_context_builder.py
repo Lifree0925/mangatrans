@@ -40,12 +40,15 @@ def test_unrelated_knowledge_excluded() -> None:
         knowledge=[
             {"id": "K1", "item_type": "character", "canonical_key": "林晓", "data": {}},
             {"id": "K2", "item_type": "term", "canonical_key": "天机阁", "data": {"translation": "Tianji Pavilion"}},
+            {"id": "K3", "item_type": "rule", "canonical_key": "林晓的称呼规则", "data": {"rule": "不要直呼全名"}},
+            {"id": "K4", "item_type": "relation", "canonical_key": "林晓与王强", "data": {"relation": "旧识"}},
         ],
         style_guide=None,
         carry_over=None,
     )
     assert "APPROVED CHARACTERS" not in result.prompt_text
     assert "FORCED TERMS" not in result.prompt_text
+    assert "RELEVANT RULES / RELATIONS" not in result.prompt_text
     assert result.snapshot["knowledge_ids"] == []
 
 
@@ -100,3 +103,34 @@ def test_polish_context_includes_profile_storyline_and_carry() -> None:
     assert "CARRY-OVER STATE (previous window)" in text
     assert "两人刚重逢" in text
     assert result.report["matched_characters"] == ["林晓"]
+
+
+def test_storyline_is_filtered_to_window_characters() -> None:
+    """章节剧情只保留窗口人物相关的重要情节与人物状态。"""
+    result = build_context(
+        segments=[{
+            "segment_id": "S1", "segment_no": 1, "segment_type": "dialogue",
+            "speaker_name": "林晓", "source_text": "你来了。\n",
+        }],
+        scene_card=None,
+        knowledge=[{
+            "id": "K1", "item_type": "character", "canonical_key": "林晓",
+            "aliases": [], "data": {"personality": "警惕"},
+        }],
+        style_guide=None,
+        carry_over=None,
+        storyline={
+            "id": "ST1", "summary": "本章重逢",
+            "key_events": ["林晓与王强见面", "王强独自离开"],
+            "prior_deps": ["两人上一集不欢而散"],
+            "foreshadowing": ["王强隐瞒了秘密"],
+            "character_states": {"林晓": "保持警惕", "王强": "已经离开"},
+        },
+    )
+    text = result.prompt_text
+    assert "林晓与王强见面" in text
+    assert "王强独自离开" not in text
+    assert "两人上一集不欢而散" in text
+    assert "保持警惕" in text
+    assert '"王强": "已经离开"' not in text
+    assert result.report["filtered_storyline_items"]
