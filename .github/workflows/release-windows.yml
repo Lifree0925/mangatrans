@@ -77,10 +77,15 @@ jobs:
         env:
           REQUIRE_SIGNATURE: ${{ secrets.WINDOWS_SIGN_PFX_BASE64 != '' }}
         run: |
-          $installer = Get-ChildItem src-tauri/target/release/bundle/nsis/*.exe |
+          $installer = Get-ChildItem -LiteralPath "src-tauri/target/release/bundle/nsis" -Filter "*.exe" |
             Sort-Object LastWriteTime -Descending | Select-Object -First 1
-          if (-not $installer) { throw "NSIS installer not found" }
-          ./scripts/test_windows_installer.ps1 -Installer $installer.FullName
+          if ($null -eq $installer) { throw "NSIS installer not found" }
+          $installerPath = $installer.FullName
+          if ([string]::IsNullOrWhiteSpace($installerPath) -or -not (Test-Path -LiteralPath $installerPath)) {
+            throw "NSIS installer path is empty or missing: $installerPath"
+          }
+          Write-Host "Testing installer: $installerPath"
+          ./scripts/test_windows_installer.ps1 -Installer $installerPath
 
       - name: Package portable zip
         shell: pwsh

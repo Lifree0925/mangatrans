@@ -2,6 +2,7 @@
 # 只在 Windows CI 或 Windows 开发机执行；不会触碰用户默认数据目录。
 param(
   [Parameter(Mandatory = $true)]
+  [ValidateNotNullOrEmpty()]
   [string]$Installer
 )
 
@@ -9,7 +10,10 @@ $ErrorActionPreference = "Stop"
 if (-not $env:CI) {
   throw "该脚本会清理本机安装目录，只允许在 CI 中运行（先设置 CI=true）"
 }
-$installerPath = (Resolve-Path -LiteralPath $Installer).Path
+if ([string]::IsNullOrWhiteSpace($Installer) -or -not (Test-Path -LiteralPath $Installer)) {
+  throw "安装包路径无效：$Installer"
+}
+$installerPath = (Get-Item -LiteralPath $Installer).FullName
 $requireSignature = $env:REQUIRE_SIGNATURE -eq "true"
 $product = "mangatrans"
 $installDir = Join-Path $env:LOCALAPPDATA $product
