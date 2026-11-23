@@ -13,6 +13,7 @@ from app.llm.json_utils import parse_llm_json
 from app.models.document import SourceSegment
 from app.models.knowledge import KnowledgeItem
 from app.models.translation import Translation
+from app.services.term_match import classify_term, enforcement_for
 
 TERM_LOCK_SYSTEM = """You are a terminology editor for an English translation of a Chinese werewolf
 screenplay. For each Chinese term below, decide ONE canonical English rendering.
@@ -94,8 +95,9 @@ async def lock_untranslated_terms(
         ],
         response_schema=TermLockOutput.model_json_schema(),
         temperature=0.2,
-        thinking="enabled",
-        reasoning_effort="low",
+        thinking="disabled",
+        reasoning_effort=None,
+        stage="term_lock",
     )
     try:
         out = TermLockOutput.model_validate(parse_llm_json(resp.content))
@@ -116,6 +118,9 @@ async def lock_untranslated_terms(
             if (data.get("translation") or "").strip():
                 continue  # 并发/重跑保护：已有译名不动
             data["translation"] = name.strip()
+            kind = str(data.get("term_kind") or classify_term(k.canonical_key, data))
+            data["term_kind"] = kind
+            data["enforcement"] = data.get("enforcement") or enforcement_for(k.canonical_key, data)
             live.data_json = json.dumps(data, ensure_ascii=False)
             live.version += 1
             locked += 1

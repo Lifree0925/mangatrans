@@ -58,34 +58,29 @@ jobs:
       - name: Tauri build
         shell: bash
         working-directory: src-tauri
-        run: |
-          set -o pipefail
-          ../frontend/node_modules/.bin/tauri build 2>&1 | tee tauri-build.log
-
-
-      - name: Sign installer (skip if no certificate secrets)
-        shell: pwsh
         env:
           PFX_B64: ${{ secrets.WINDOWS_SIGN_PFX_BASE64 }}
           PFX_PASS: ${{ secrets.WINDOWS_SIGN_PASSWORD }}
+          WINDOWS_SIGN_TIMESTAMP_URL: http://timestamp.digicert.com
         run: |
-          $exe = Get-ChildItem src-tauri/target/release/bundle/nsis/*.exe | Select-Object -First 1
-          if (-not $exe) { throw "NSIS installer not found" }
-          if ($env:PFX_B64 -and $env:PFX_PASS) {
-            $pfx = Join-Path $env:RUNNER_TEMP "sign.pfx"
-            [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:PFX_B64))
-            $kits = Join-Path ${env:ProgramFiles(x86)} "Windows Kits\10\bin"
-            $signtool = Get-ChildItem $kits -Recurse -Filter signtool.exe |
-              Where-Object { $_.FullName -match "x64" } | Sort-Object FullName -Descending | Select-Object -First 1
-            if (-not $signtool) { throw "signtool.exe not found" }
-            & $signtool.FullName sign /f $pfx /p $env:PFX_PASS /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 $exe.FullName
-            # 自签名证书无法通过公共信任链验证，只校验签名者证书存在
-            $check = Get-AuthenticodeSignature $exe.FullName
-            if (-not $check.SignerCertificate) { throw "签名校验失败" }
-            Write-Host "Signed: $($exe.Name) (status: $($check.Status))"
-          } else {
-            Write-Host "No signing secrets configured, skipped"
-          }
+          set -o pipefail
+          # 有证书时让 Tauri 在打包阶段签名主程序、sidecar、卸载器与安装器；
+          # 只签最后的 setup.exe 无法避免已安装 exe 被 Defender/SmartScreen 拦截。
+          if [ -n "$PFX_B64" ] && [ -n "$PFX_PASS" ]; then
+            ../frontend/node_modules/.bin/tauri build --config tauri.signing.conf.json 2>&1 | tee tauri-build.log
+          else
+            ../frontend/node_modules/.bin/tauri build 2>&1 | tee tauri-build.log
+          fi
+
+      - name: Verify installer end-to-end
+        shell: pwsh
+        env:
+          REQUIRE_SIGNATURE: ${{ secrets.WINDOWS_SIGN_PFX_BASE64 != '' }}
+        run: |
+          $installer = Get-ChildItem src-tauri/target/release/bundle/nsis/*.exe |
+            Sort-Object LastWriteTime -Descending | Select-Object -First 1
+          if (-not $installer) { throw "NSIS installer not found" }
+          ./scripts/test_windows_installer.ps1 -Installer $installer.FullName
 
       - name: Package portable zip
         shell: pwsh
@@ -99,7 +94,7 @@ jobs:
           $readme = @(
             "MangaTrans portable test build (v${env:TAG})",
             "解压后直接运行 mangatrans.exe，无需安装。",
-            "默认数据目录：%LOCALAPPDATA%\com.mangatrans.desktop",
+            "默认数据目录：%APPDATA%\com.mangatrans.desktop",
             "隔离测试数据可设置环境变量 MT_DATA_DIR 指向任意目录。"
           )
           Set-Content -Encoding UTF8 -Path portable/README.txt -Value $readme
@@ -109,7 +104,18 @@ jobs:
         shell: pwsh
         run: |
           Get-FileHash src-tauri/target/release/bundle/nsis/*.exe, mangatrans_*_portable_x64.zip -Algorithm SHA256 `
-            | ForEach-Object { "$($_.Hash)  $($_.Path)" } > checksums.txt
+            | ForEach-Object { "$($_.Hash.ToLower())  $(Split-Path $_.Path -Leaf)" } > checksums.txt
+          Get-Content checksums.txt
+
+      - name: Upload build logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-build-failure-logs
+          path: |
+            src-tauri/tauri-build.log
+            backend/dist
+          if-no-files-found: ignore
 
       - name: Release
         uses: softprops/action-gh-release@v2

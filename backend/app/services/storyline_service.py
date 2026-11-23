@@ -40,6 +40,7 @@ async def generate_storyline(
         messages=[{"role": "user", "content": PROMPT.format(text=text)}],
         response_schema=StorylineModel.model_json_schema(),
         temperature=0.2,
+        stage="storyline",
     )
     data = parse_llm_json(resp.content)
     return StorylineModel.model_validate(data)

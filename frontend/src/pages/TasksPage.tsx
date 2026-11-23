@@ -19,7 +19,7 @@ const statusColor: Record<string, string> = {
 const taskTypeLabel: Record<string, string> = {
   express: "一键直出",
   translate: "全文翻译",
-  trial: "试译",
+  trial: "自动风格基线",
   knowledge: "知识提取",
   parse: "解析",
   dialogue: "台词本抽取",
@@ -42,11 +42,11 @@ const EXPRESS_STEPS = [
   { key: "profiles", label: "角色档案" },
   { key: "storylines", label: "章节剧情卡" },
   { key: "dialogue", label: "台词本抽取" },
-  { key: "trial", label: "试译与风格基线" },
+  { key: "trial", label: "自动风格基线" },
   { key: "translation", label: "全文翻译" },
   { key: "dialogue_align", label: "台词对齐" },
-  { key: "qa", label: "质量检查" },
-  { key: "approve", label: "批准定稿" },
+  { key: "qa", label: "自动质量检查" },
+  { key: "approve", label: "自动定稿" },
 ];
 
 function fmtSecs(secs?: number): string {
@@ -100,7 +100,7 @@ function stepDetail(key: string, step: Record<string, unknown> | undefined): str
     }
     case "trial": {
       const s = step as { windows?: number; style_guide_id?: string };
-      return s.windows != null ? `已试译 ${s.windows} 个窗口${s.style_guide_id ? " · 风格基线已建立" : ""}` : "";
+      return s.windows != null ? `已生成 ${s.windows} 个窗口样本${s.style_guide_id ? " · 风格基线已建立" : ""}` : "";
     }
     case "translation": {
       const s = step as { done?: number; total?: number; phase?: string; draft_done?: number };
@@ -113,7 +113,7 @@ function stepDetail(key: string, step: Record<string, unknown> | undefined): str
       return `润色情境化 ${s.done ?? 0} / ${s.total} 个窗口（${pct}%）`;
     }
     case "qa": {
-      const s = step as { done?: number; total?: number; issues?: number; needs_review?: number; blocked?: number; severity_counts?: Record<string, number>; semantic_done?: number; semantic_total?: number };
+      const s = step as { done?: number; total?: number; issues?: number; needs_review?: number; blocked?: number; failed?: number; severity_counts?: Record<string, number>; semantic_done?: number; semantic_total?: number; gate_passed?: boolean };
       const sem = s.semantic_total ? `语义质检 ${s.semantic_done ?? 0} / ${s.semantic_total}` : "";
       const base = s.total != null ? `已检查 ${s.done ?? 0} / ${s.total} 个窗口` : "";
       const sc = s.severity_counts ?? {};
@@ -126,14 +126,14 @@ function stepDetail(key: string, step: Record<string, unknown> | undefined): str
       const extra = [
         s.issues ? `发现问题 ${s.issues} 条` : "未发现问题",
         sevParts.length ? sevParts.join(" / ") : "",
-        s.needs_review ? `待复核 ${s.needs_review} 窗` : "",
+        s.needs_review ? `未解决 ${s.needs_review} 窗` : "",
         s.blocked ? `拦截 ${s.blocked} 窗` : "",
       ].filter(Boolean).join(" · ");
       return [sem, base, extra].filter(Boolean).join(" · ");
     }
     case "approve": {
       const s = step as { approved?: number };
-      return s.approved != null ? `已批准 ${s.approved} 条译文` : "";
+      return s.approved != null ? `已自动定稿 ${s.approved} 条译文` : "";
     }
   }
   return "";
@@ -483,6 +483,47 @@ export default function TasksPage() {
                     失败原因：{t.error_message}
                   </p>
                 )}
+                {t.usage && (t.usage.requests ?? 0) > 0 && (
+                  <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 rounded-lg bg-(--color-panel2) px-3 py-2 text-xs text-(--color-muted)">
+                    <span>模型请求 {t.usage.requests ?? 0}</span>
+                    <span>输入 {(t.usage.prompt_tokens ?? 0).toLocaleString()} tokens</span>
+                    <span>输出 {(t.usage.completion_tokens ?? 0).toLocaleString()} tokens</span>
+                    <span>API 总用量 {(t.usage.api_total_tokens ?? 0).toLocaleString()} tokens</span>
+                    {(t.usage.cache_hits ?? 0) > 0 && <span className="text-emerald-600">缓存命中 {t.usage.cache_hits}</span>}
+                    {(t.usage.failed_requests ?? 0) > 0 && <span className="text-red-600">失败请求 {t.usage.failed_requests}</span>}
+                    {(t.usage.latency_ms ?? 0) > 0 && <span>模型耗时 {(t.usage.latency_ms! / 1000).toFixed(0)} 秒</span>}
+                    {t.usage.by_stage && Object.keys(t.usage.by_stage).length > 0 && (
+                      <span className="basis-full">
+                        阶段：{Object.entries(t.usage.by_stage).map(([stage, s]) => `${({
+                          knowledge: "知识", profile: "角色", storyline: "剧情", trial: "风格",
+                          draft: "初翻", polish: "润色", qa: "质检", repair: "修复", term_lock: "术语",
+                          dialogue_extract: "台词抽取", dialogue_align: "台词对齐", style_guide: "风格",
+                        } as Record<string, string>)[stage] ?? stage} ${s.requests ?? 0}`).join(" · ")}
+                      </span>
+                    )}
+                  </div>
+                )}
+                {(() => {
+                  const quality = (t.progress as {
+                    quality?: {
+                      gate?: string; reason?: string; coverage_rate?: number;
+                      qa_coverage_rate?: number; term_consistency_rate?: number;
+                    };
+                  }).quality;
+                  if (!quality?.gate) return null;
+                  const metrics = [
+                    quality.coverage_rate != null ? `覆盖 ${quality.coverage_rate}%` : "",
+                    quality.qa_coverage_rate != null ? `质检覆盖 ${quality.qa_coverage_rate}%` : "",
+                    quality.term_consistency_rate != null ? `术语 ${quality.term_consistency_rate}%` : "",
+                  ].filter(Boolean).join(" · ");
+                  return (
+                    <div className={`mt-2 rounded-lg px-3 py-2 text-xs ${quality.gate === "passed" ? "bg-emerald-50 text-emerald-700" : "bg-amber-50 text-amber-700"}`}>
+                      自动质量门禁：{quality.gate === "passed" ? "通过" : "未通过"}
+                      {metrics ? ` · ${metrics}` : ""}
+                      {quality.reason ? ` · ${quality.reason}` : ""}
+                    </div>
+                  );
+                })()}
                 {t.task_type === "parse" && (() => {
                   const p = t.progress as {
                     coverage_ok?: boolean; total_chars?: number; covered_chars?: number;
@@ -510,11 +551,6 @@ export default function TasksPage() {
                   );
                 })()}
 
-                {t.error_message && (
-                  <div className="mt-2 rounded-lg bg-red-50 px-3 py-2 text-xs leading-5 text-red-600">
-                    出错：{t.error_message}
-                  </div>
-                )}
               </div>
             );
           })}

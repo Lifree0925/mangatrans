@@ -9,6 +9,7 @@ from app.models.storyline import ChapterStoryline
 from app.models.task import Task, TaskItem
 from app.models.dialogue import DialogueLine
 from app.models.translation import ProviderConfig, StyleGuide, Translation
+from app.models.usage import LLMCall
 
 __all__ = [
     "Project",
@@ -30,4 +31,5 @@ __all__ = [
     "ProviderConfig",
     "StyleGuide",
     "DialogueLine",
+    "LLMCall",
 ]

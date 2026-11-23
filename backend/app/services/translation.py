@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+import re
 
 from app.llm.json_utils import parse_llm_json
 from typing import Literal
@@ -10,69 +11,78 @@ from pydantic import BaseModel, Field, ValidationError
 
 from app.llm.protocol import LLMError, LLMProvider
 from app.services.context_builder import ContextResult
+from app.services.term_match import expected_speakers, normalize
 
-PROMPT_VERSION = "v1"
+PROMPT_VERSION = "v2"
 
 DRAFT_SYSTEM = """You are a professional Chinese-to-English screenplay translator.
 This is the FAITHFUL DRAFT pass. Translate ONLY the supplied source segments.
-Rules:
-- Lock all facts: characters, relationships, actions, negation, conditions, causality, chronology, quantities must match the source exactly.
-- Word-for-word literalness is ACCEPTABLE at this stage; naturalness is handled in a later pass.
-- Do not invent, infer, explain, or add facts.
-- EXISTING ENGLISH TITLE: if a source segment is the screenplay title and already contains English,
-  copy that English title verbatim. Do not translate, normalize, or rewrite it.
-- If a reference is genuinely ambiguous, preserve the ambiguity and note it in the ambiguity field.
-- Preserve all stage directions and emotional details.
-- TERM & PLACE CONSISTENCY: a place, character title or proper noun must use the SAME standard
-  translation given in the knowledge/term list throughout the script (exact casing included,
-  e.g. always "Wolf King", never "wolf king" or "werewolf king"). Different Chinese names for the
-  same place must map to the SAME English name.
-- LOCALIZE MARKS: 画外音 / （OS）/ O.S. / (OS) must be rendered as "(voice-over)"; 内景/外景 as INT./EXT.
-- PERSON & NUMBER: keep the source's person and number. Third-person references like
-  「姐姐带你走」 must stay third person (e.g. "Big sister will take you"), never switch to "I".
-- STRICT LINE COVERAGE: every non-empty line of each source segment (stage directions,
-  sound-effect lines, scene labels, action lines) MUST appear in your translation —
-  one line for one line. Never merge or omit a line; omitting one line shifts all
-  following segments and corrupts the whole script.
-- End with a "carry_over" summary of the story state at the END of this window:
-  forms_of_address (how characters currently address each other), ongoing_state (one
-  sentence describing the current situation), open_threads (unresolved threads started
-  in or before this window), active_expressions (recurring phrasings/mannerisms in use).
-  This state is handed to the next window so the whole script stays continuous.
-- Return ONLY the required JSON. No commentary."""
 
-POLISH_SYSTEM = """You are a professional Chinese-to-English screenplay translator.
-This is the POLISH pass. Rewrite the provided faithful draft into natural, idiomatic English suitable for screen dialogue.
-Hard constraints:
-- You MUST NOT change any fact, information point, emotional intensity, or speaker intent relative to the draft.
-- EXISTING ENGLISH TITLE: if a source segment is the screenplay title and already contains English,
-  copy that English title verbatim. Do not translate, normalize, or rewrite it.
-- You may only change wording, sentence structure, register, and naturalness.
-- USE PROJECT KNOWLEDGE (critical): CHARACTER PROFILES define each speaker's personality,
-  speech style, emotional range and forms of address. Reflect them in word choice, sentence
-  length, register and emotional intensity. Never copy profile text into the output.
-- CONTINUITY: use CHAPTER STORYLINE and CARRY-OVER STATE to keep events, relationships,
-  prior dependencies and unresolved threads continuous. Never reveal FORESHADOWING or
-  SPOILER GUARD facts before their proper time.
-- USE approved character names, NAME-FORM MAP and terminology as given. Translate the
-  specific form used in the source: a nickname stays a nickname, a formal name stays formal;
-  never replace every alias with the canonical formal name.
-- If the draft flagged ambiguity, keep the ambiguity.
-- TERM & PLACE CONSISTENCY: use the standard translation from the term list with exact casing
-  (e.g. "Wolf King", "Anti-magic Handcuffs"); the same place must keep the same English name
-  across the whole script — never introduce a second rendering.
+FACT RULES:
+- Lock every fact: characters, speaker, relationships, actions, negation, conditions, causality,
+  chronology, quantities, and emotional cues must match the source exactly.
+- Never invent, infer, explain, soften, intensify, or add information. Literalness is acceptable
+  here only where needed to preserve facts; do not paraphrase away details.
+- Preserve ambiguity; record it in the ambiguity field instead of guessing.
+- EXISTING ENGLISH TITLE: copy an existing English title verbatim; never rewrite it.
+- PERSON & NUMBER: preserve the source's person and number. 「姐姐带你走」 must remain third
+  person ("Big sister will take you"), never become "I".
+
+STRUCTURAL RULES:
+- Translate each segment independently and keep its exact segment_id. NEVER move content from
+  one segment_id to another.
+- Keep every non-empty source line as one corresponding output line. Never merge/drop lines.
+  Preserve speaker tags, scene numbers, △ action markers, 【】 sound-effect lines, and (OS) cues.
+- 画外音 / （OS）/ O.S. / (OS) → "(voice-over)"; 内景/外景 → INT./EXT.
+
+TERMINOLOGY:
+- FORCED TERMS are approved proper names/titles/place names: use them exactly, with exact casing.
+- CONTEXTUAL TERMS are preferred vocabulary only: translate them naturally for the current line;
+  never force a location-like phrase where the Chinese word is a generic common noun.
+- The same named place/person must keep one English name across the whole script.
+
+Finally return carry_over: forms_of_address, ongoing_state, open_threads, active_expressions.
+Return ONLY the required JSON. No commentary or explanation."""
+
+POLISH_SYSTEM = """You are a professional Chinese-to-English screenplay translator and dialogue editor.
+This is the POLISH pass. Rewrite the faithful draft into natural, idiomatic screen English.
+
+MEANING FIRST:
+- Never change facts, information points, speaker intent, emotional intensity, relationship,
+  chronology, or ambiguity. Wording, syntax, register and naturalness are the only allowed changes.
+- Do not add lines, beats, explanations, emotions, backstory, or stage directions.
+- EXISTING ENGLISH TITLE: copy it verbatim.
+- Keep the exact segment_id and output one line per source line. Never move content between IDs.
+- Preserve speaker labels, scene numbers, △ markers, 【】 sound-effect lines and (OS) cues.
+- 画外音 / （OS）/ O.S. / (OS) → "(voice-over)".
 - PERSON & NUMBER: keep the source's person and number (「姐姐」 stays third person, never "I").
-- LOCALIZE MARKS: 画外音/（OS）/O.S. → "(voice-over)".
-- Choose precise, natural English idioms for physical actions; avoid awkward literal renderings.
-- STYLE (hard rules for short-form drama): spoken dialogue must be colloquial and fragmented
-  like real speech; keep any single spoken sentence under 18 words; never use bookish
-  connectives such as thus/therefore/nevertheless/moreover in dialogue; map Chinese profanity
-  by INTENSITY to the matching English register (mild → "damn", strong → "fuck", keep insults
-  character-appropriate), never soften or inflate the original force.
-- STRICT LINE COVERAGE: your output must keep EVERY non-empty line of the source segment
-  (stage directions, sound-effect lines, scene labels, action lines) — never drop or
-  merge a line from the draft.
-- Return ONLY the required JSON. No commentary."""
+
+VOICE AND ENGLISH:
+- SPEAKER VOICE & LOCAL PERFORMANCE overrides general style. Match the speaker's personality,
+  speech habits and the immediate parenthetical/stage direction. Local emotion wins over profile.
+- Write natural spoken English: contractions, phrasal verbs, interruptions, false starts, and
+  short punchy lines where appropriate. Do not translate Chinese word order or idioms literally.
+- No bookish connectives in dialogue (thus/therefore/nevertheless/moreover). Do not over-explain.
+  Do not "improve" the plot or add dramatic flourishes that are not in the source.
+- Map Chinese profanity by intensity to equivalent English strength; keep each character's register.
+- Use precise physical-action verbs and idiomatic English, not dictionary glosses.
+- Preserve subtext, emotional beat, threats, insults and power dynamics; never flatten or
+  rationalize what a character is really doing with the line.
+
+CONTINUITY AND TERMINOLOGY:
+- Use approved character names and name forms. A nickname stays a nickname; a formal name stays
+  formal. Never replace every alias with the canonical name.
+- Use CHAPTER STORYLINE and CARRY-OVER for continuity; never reveal foreshadowing early.
+- FORCED TERMS (proper names/titles/places) must use exact canonical spelling/casing.
+- CONTEXTUAL TERMS are only preferred vocabulary; adapt them to context. Never force a generic
+  common noun into a specific location name.
+- The same named place/person must have exactly one English rendering across the script.
+- Before finalizing, silently audit each line for translationese: unnatural word order,
+  literal idiom, repeated sentence openers, or wrong register. Revise only the wording;
+  never add or remove facts.
+
+Return ONLY the required JSON. No commentary."""
+
 
 
 class TranslationEntry(BaseModel):
@@ -111,12 +121,12 @@ class RepairOutput(BaseModel):
 async def _chat_json_validate(
     provider: LLMProvider, model: str, system: str, user: str, schema: dict,
     out_model: type, thinking: str | None = "disabled", reasoning_effort: str | None = None,
-    max_tokens: int | None = None,
+    max_tokens: int | None = None, stage: str = "translate",
 ):
     """调用 + 解析 + Pydantic 校验；校验失败带修复提示重试一次（思考模式输出易带瑕疵）。"""
     data = await _chat_json(
         provider, model, system, user, schema, thinking=thinking,
-        reasoning_effort=reasoning_effort, max_tokens=max_tokens,
+        reasoning_effort=reasoning_effort, max_tokens=max_tokens, stage=stage,
     )
     try:
         return out_model.model_validate(data)
@@ -127,7 +137,7 @@ async def _chat_json_validate(
         )
         data = await _chat_json(
             provider, model, system, user_fixed, schema,
-            thinking=thinking, reasoning_effort=reasoning_effort,
+            thinking=thinking, reasoning_effort=reasoning_effort, stage=stage,
         )
         try:
             return out_model.model_validate(data)
@@ -135,7 +145,7 @@ async def _chat_json_validate(
             # 兜底：思考模式输出持续不合格时退到非思考再试一次，保证窗口完成
             if thinking == "enabled":
                 data = await _chat_json(
-                    provider, model, system, user_fixed, schema, thinking="disabled"
+                    provider, model, system, user_fixed, schema, thinking="disabled", stage=stage
                 )
                 return out_model.model_validate(data)
             raise
@@ -150,7 +160,7 @@ def _usage_note(resp) -> str:
 async def _chat_json(
     provider: LLMProvider, model: str, system: str, user: str, schema: dict,
     thinking: str | None = "disabled", reasoning_effort: str | None = None,
-    max_tokens: int | None = None,
+    max_tokens: int | None = None, stage: str = "translate",
 ):
     """调用并解析 JSON；输出格式瑕疵时重试一次（带修复提示）。
 
@@ -166,6 +176,7 @@ async def _chat_json(
         thinking=thinking,
         reasoning_effort=reasoning_effort,
         max_tokens=max_tokens,
+        stage=stage,
     )
     if resp.finish_reason == "length":
         if thinking == "enabled" or thinking is None:
@@ -177,6 +188,7 @@ async def _chat_json(
                 thinking="disabled",
                 reasoning_effort=None,
                 max_tokens=max(max_tokens or 0, 16384),
+                stage=stage,
             )
             if resp.finish_reason != "length":
                 try:
@@ -203,6 +215,7 @@ async def _chat_json(
             temperature=0.2,
             thinking=thinking,
             reasoning_effort=reasoning_effort,
+            stage=stage,
         )
         if resp.finish_reason == "length":
             if thinking == "enabled" or thinking is None:
@@ -215,6 +228,7 @@ async def _chat_json(
                     thinking="disabled",
                     reasoning_effort=None,
                     max_tokens=max(max_tokens or 0, 16384),
+                    stage=stage,
                 )
                 if resp.finish_reason != "length":
                     try:
@@ -259,6 +273,7 @@ async def translate_window_draft(
         provider, model, DRAFT_SYSTEM, context.prompt_text,
         DraftOutput.model_json_schema(), DraftOutput, thinking="disabled",
         max_tokens=min(8192, estimate_window_output_tokens(source_chars or 2048)),
+        stage="draft",
     )
     return [t.model_dump() for t in draft.translations], (
         draft.carry_over.model_dump() if draft.carry_over else None
@@ -289,8 +304,19 @@ async def translate_window_polish(
         max_tokens=(
             None if use_thinking else min(8192, estimate_window_output_tokens(src_chars))
         ),
+        stage="polish",
     )
     polish_list = [t.model_dump() for t in polish.translations]
+    seg_by_id = {s["segment_id"]: s for s in (segments or [])}
+    for entry in polish_list:
+        text = localize_screenplay_marks(entry.get("target_text") or "")
+        seg = seg_by_id.get(entry.get("segment_id", ""))
+        if seg and seg.get("segment_type") == "heading":
+            src_text = (seg.get("source_text") or "").rstrip()
+            # 章节/场景标题不是句子：模型常自作主张加句号，统一去掉。
+            if src_text and src_text[-1] not in "。！？!?." and text.endswith("."):
+                text = text[:-1].rstrip()
+        entry["target_text"] = text
     # 完整性复查：译文显著短于原文的段判定为漏译（截断），单段重译一次
     seg_map = {s["segment_id"]: s for s in (segments or [])}
     ids = {x["segment_id"] for x in draft}
@@ -379,12 +405,100 @@ async def repair_window(
     polish = await _chat_json_validate(
         provider, model, fix_system, context.prompt_text + draft_block,
         PolishOutput.model_json_schema(), PolishOutput, thinking="enabled", reasoning_effort="low",
+        stage="repair",
     )
     return [t.model_dump() for t in polish.translations], polish.carry_over.model_dump()
 
 
-def validate_window(segments: list[dict], translations: list[dict]) -> list[str]:
-    """校验：segment_id 完整、唯一、顺序。返回错误列表。"""
+def localize_screenplay_marks(text: str) -> str:
+    """确定性本地化画外音标记，避免同一稿里 OS / voice-over 混用。"""
+    out = text or ""
+    out = re.sub(r"[（(]\s*O\.?\s*S\.?\s*[）)]", "(voice-over)", out, flags=re.IGNORECASE)
+    out = out.replace("（画外音）", "(voice-over)").replace("(画外音)", "(voice-over)")
+    return out
+
+
+_SCENE_NO_RE = re.compile(r"^\s*(\d+)\s*[-–]\s*(\d+)")
+_DIALOGUE_SRC_RE = re.compile(r"^\s*([^（(：:]+?)\s*(?:[（(][^）)]*[）)])?\s*[:：]\s*(.+)$")
+_DIALOGUE_TGT_RE = re.compile(r"^\s*([A-Za-z][A-Za-z0-9 .'’&-]*?)\s*(?:\([^)]*\))?\s*[:：]\s*(.+)$")
+
+
+def _has_wrong_known_speaker(
+    target_role: str, expected: set[str], speaker_map: dict[str, str] | None,
+) -> bool:
+    """只在译文明确用了另一个已知角色名时判错，避免把意译称呼误判为错位。"""
+    if not expected or not speaker_map:
+        return False
+    role = normalize(target_role)
+    expected_norm = {normalize(name) for name in expected if name}
+    known_norm = {normalize(name) for name in speaker_map.values() if name}
+    matched_known = {name for name in known_norm if name and name in role}
+    if not matched_known:
+        return False
+    return not expected_norm.issubset(matched_known)
+
+
+def _anchor_errors(src: dict, tgt_lines: list[str], speaker_map: dict[str, str] | None) -> list[str]:
+    """校验跨语言仍必须保持的结构锚点：说话人、场次号、舞台标记。"""
+    errors: list[str] = []
+    sid = src.get("segment_id")
+    src_lines = [x.strip() for x in src.get("source_text", "").strip().split("\n") if x.strip()]
+    if not src_lines:
+        return errors
+
+    segment_type = src.get("segment_type") or ""
+    # 场景标题必须保留相同的场次号，避免标题/动作整体挪到相邻段。
+    m_scene = _SCENE_NO_RE.match(src_lines[0])
+    if segment_type == "heading" and m_scene:
+        scene_no = f"{m_scene.group(1)}-{m_scene.group(2)}"
+        if not tgt_lines or not _SCENE_NO_RE.match(tgt_lines[0]):
+            errors.append(f"场景号丢失: {sid} source={scene_no}")
+        elif f"{_SCENE_NO_RE.match(tgt_lines[0]).group(1)}-{_SCENE_NO_RE.match(tgt_lines[0]).group(2)}" != scene_no:
+            errors.append(f"场景号错位: {sid} source={scene_no} target={tgt_lines[0][:40]}")
+
+    # 对白：每条原文对白行都必须保留角色标签；知识库中有角色名时校验是否换了人。
+    if segment_type == "dialogue":
+        src_speaker = str(src.get("speaker_name") or "").strip()
+        expected = expected_speakers(src_speaker, speaker_map or {}) if speaker_map else set()
+        for idx, sl in enumerate(src_lines):
+            sm = _DIALOGUE_SRC_RE.match(sl)
+            if not sm:
+                continue
+            if idx >= len(tgt_lines):
+                break
+            tm = _DIALOGUE_TGT_RE.match(tgt_lines[idx])
+            if not tm:
+                errors.append(f"对白缺少角色标签: {sid} 第{idx + 1}行")
+                continue
+            if expected and _has_wrong_known_speaker(tm.group(1), expected, speaker_map):
+                errors.append(
+                    f"说话人错位: {sid} 原文={src_speaker or sm.group(1).strip()} "
+                    f"预期={sorted(expected)} 译文={tm.group(1).strip()}"
+                )
+
+    # 舞台标记：△/括号音效行不能整体丢失，否则会改变剧本动作语义。
+    def _count_marker(lines: list[str], marker: str) -> int:
+        return sum(1 for line in lines if line.startswith(marker))
+
+    if _count_marker(src_lines, "△") != _count_marker(tgt_lines, "△"):
+        errors.append(
+            f"动作标记数量不一致: {sid} 原文△{_count_marker(src_lines, '△')} / 译文△{_count_marker(tgt_lines, '△')}"
+        )
+    src_bracket = sum(1 for line in src_lines if line.startswith("【"))
+    tgt_bracket = sum(1 for line in tgt_lines if line.startswith(("【", "[")))
+    if src_bracket != tgt_bracket:
+        errors.append(f"音效/方括号标记数量不一致: {sid} 原文{src_bracket} / 译文{tgt_bracket}")
+    return errors
+
+
+def validate_window(
+    segments: list[dict], translations: list[dict],
+    speaker_map: dict[str, str] | None = None,
+) -> list[str]:
+    """校验 segment 完整性，并校验跨语言锚点（说话人/场次/标记）。
+
+    仅校验结构锚点，不做语义改写判断；语义问题交给 QA 定点检查。
+    """
     errors: list[str] = []
     expect = [s["segment_id"] for s in segments]
     got = [t.get("segment_id") for t in translations]
@@ -403,8 +517,9 @@ def validate_window(segments: list[dict], translations: list[dict]) -> list[str]
     for t in translations:
         if not t.get("target_text", "").strip():
             errors.append(f"空译文: {t.get('segment_id')}")
-    # 窗口内重复译文校验：相邻段译文完全相同是「台词重复+丢失」的根因
-    for sid in sorted(duplicate_segment_ids(translations)):
+    # 窗口内重复译文校验：只在“原文确实不同且不是人物表/标题”时判错，
+    # 避免合法的重复台词、相同人物列表触发整窗重试。
+    for sid in sorted(duplicate_segment_ids(translations, segments)):
         errors.append(f"重复译文: {sid}")
     # 多行段行数校验：译文缺行会让后续段整体错位（历史漏译/标签错位的根因）
     src_by_id = {s["segment_id"]: s for s in segments}
@@ -421,26 +536,54 @@ def validate_window(segments: list[dict], translations: list[dict]) -> list[str]
             errors.append(
                 f"段内缺行: {t.get('segment_id')} 原文 {len(src_lines)} 行 / 译文 {len(tgt_lines)} 行"
             )
+        errors.extend(_anchor_errors(src, tgt_lines, speaker_map))
     return errors
 
 
-def duplicate_segment_ids(translations: list[dict]) -> set[str]:
-    """返回译文内容重复（长度>40）的段 id 集合。"""
+def duplicate_segment_ids(
+    translations: list[dict], segments: list[dict] | None = None,
+) -> set[str]:
+    """返回疑似错位的重复译文段 id。
+
+    只有原文内容不同、且不属于人物表/标题的段，才把相同译文视为串段；
+    相同原文的重复台词与重复人物列表是剧本合法现象。
+    """
+    src_by_id = {s.get("segment_id"): s for s in (segments or [])}
+    meta_prefix = re.compile(r"^\s*(?:人物列表|人物|角色|编剧|作者|类型|集数)\s*[：:]")
     seen: dict[str, str] = {}
     dup: set[str] = set()
     for t in translations:
         text = (t.get("target_text") or "").strip()
-        if len(text) > 40 and text in seen:
-            dup.add(t.get("segment_id") or "")
-            dup.add(seen[text])
-        else:
-            seen[text] = t.get("segment_id") or ""
+        sid = t.get("segment_id") or ""
+        if len(text) <= 40:
+            continue
+        if text not in seen:
+            seen[text] = sid
+            continue
+        other_id = seen[text]
+        src_a = src_by_id.get(sid) or {}
+        src_b = src_by_id.get(other_id) or {}
+        text_a = (src_a.get("source_text") or "").strip()
+        text_b = (src_b.get("source_text") or "").strip()
+        if normalize(text_a) == normalize(text_b):
+            continue
+        if any(
+            str(x.get("segment_type") or "") == "heading"
+            or meta_prefix.match(str(x.get("source_text") or ""))
+            for x in (src_a, src_b)
+        ):
+            continue
+        dup.add(sid)
+        dup.add(other_id)
     dup.discard("")
     return dup
 
 
-def locate_problem_segments(segments: list[dict], translations: list[dict]) -> set[str]:
-    """整窗校验失败后定位问题段：缺失 / 空译文 / 段内缺行 / 重复译文。"""
+def locate_problem_segments(
+    segments: list[dict], translations: list[dict],
+    speaker_map: dict[str, str] | None = None,
+) -> set[str]:
+    """整窗校验失败后定位问题段：缺失 / 空译文 / 段内缺行 / 重复译文 / 锚点错位。"""
     bad: set[str] = set()
     got = {t.get("segment_id") for t in translations}
     for s in segments:
@@ -452,13 +595,16 @@ def locate_problem_segments(segments: list[dict], translations: list[dict]) -> s
         if validate_window(
             [{
                 "segment_id": sid,
+                "segment_type": s.get("segment_type", ""),
+                "speaker_name": s.get("speaker_name"),
                 "source_text": s["source_text"],
                 "line_count_optional": s.get("line_count_optional", False),
             }],
             one,
+            speaker_map=speaker_map,
         ):
             bad.add(sid)
-    bad |= duplicate_segment_ids(translations)
+    bad |= duplicate_segment_ids(translations, segments)
     return bad
 
 
@@ -501,10 +647,10 @@ async def repair_segments(
     )
     out = await _chat_json_validate(
         provider, model, system, user, RepairOutput.model_json_schema(), RepairOutput,
-        thinking="enabled", reasoning_effort="low", max_tokens=None,
+        thinking="enabled", reasoning_effort="low", max_tokens=None, stage="repair",
     )
     return {
-        e.segment_id: e.target_text
+        e.segment_id: localize_screenplay_marks(e.target_text)
         for e in out.translations
         if e.segment_id in target and e.target_text.strip()
     }

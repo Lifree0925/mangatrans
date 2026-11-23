@@ -29,18 +29,17 @@ def _setup(client, wait_task):
 
 def _fake() -> FakeProvider:
     from app.schemas.knowledge import SceneCardModel
+    from conftest import fake_translation_entries
 
     f = FakeProvider()
 
     def translate_h(messages):
-        ids = re.findall(r"\[([a-f0-9]{32})\]", messages[-1]["content"])
+        content = messages[-1]["content"]
         if "FAITHFUL DRAFT" in messages[0]["content"]:
-            return {"window_id": "W", "translations": [
-                {"segment_id": i, "target_text": "D", "notes": [], "ambiguity": []} for i in ids]}
+            return {"window_id": "W", "translations": fake_translation_entries(content, "Draft", stage="draft")}
         if "POLISH" in messages[0]["content"]:
-            return {"window_id": "W", "translations": [
-                {"segment_id": i, "target_text": "P", "notes": [], "ambiguity": []} for i in ids],
-                "carry_over": {}}
+            return {"window_id": "W", "translations": fake_translation_entries(content, "Polish", stage="polished"),
+                    "carry_over": {}}
         return None
 
     def other_h(messages):
@@ -52,7 +51,7 @@ def _fake() -> FakeProvider:
         if "风格总监" in c:
             return {"character_voices": [], "dialogue_register": "", "action_description_style": "",
                     "cultural_strategy": "", "capitalization_rules": "", "examples": []}
-        if "剧本翻译 QA" in c:
+        if "终审 QA" in c:
             return {"issues": []}
         return None
 
@@ -79,12 +78,16 @@ def test_thinking_mode_layered(client, wait_task) -> None:
     r = client.post(f"/api/v1/projects/{pid}/translation/express", json={})
     assert r.status_code == 200
     tid = r.json()["task_id"]
-    assert _wait(tid) == "completed", "express 未完成"
+    wait_task(client, tid)
+    with dbmod.SessionLocal() as db:
+        from app.models.task import Task
+        task = db.get(Task, tid)
+        assert task.status == "completed", f"{task.status}: {task.error_message}\n{task.progress_json}"
 
     calls = f.calls
     draft_calls = [c for c in calls if "FAITHFUL DRAFT" in (c["messages"][0]["content"] or "")]
     polish_calls = [c for c in calls if "POLISH pass" in (c["messages"][0]["content"] or "")]
-    qa_calls = [c for c in calls if "剧本翻译 QA" in (c["messages"][-1]["content"] or "")]
+    qa_calls = [c for c in calls if "终审 QA" in (c["messages"][-1]["content"] or "")]
 
     assert draft_calls, "应有 Draft 调用"
     assert polish_calls, "应有 Polish 调用"
@@ -92,6 +95,5 @@ def test_thinking_mode_layered(client, wait_task) -> None:
     assert all(c["thinking"] == "disabled" for c in draft_calls)
     assert all(c["thinking"] == "enabled" for c in polish_calls)
     assert all(c.get("thinking") == "disabled" for c in calls if c not in polish_calls and c not in qa_calls)
-    # QA 语义调用开启思考（本测试无风险窗口，语义 QA 可能不触发；仅校验若有则 enabled）
-    if qa_calls:
-        assert all(c["thinking"] == "enabled" for c in qa_calls)
+    assert qa_calls, "每个翻译窗口都应执行一次语义质量检查"
+    assert all(c["thinking"] == "enabled" for c in qa_calls)

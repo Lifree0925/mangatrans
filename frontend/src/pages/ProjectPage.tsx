@@ -840,7 +840,7 @@ export default function ProjectPage() {
                   >
                     中英对照
                     <span className="mt-0.5 block text-[11px] font-normal text-(--color-muted)">
-                      便于人工校对
+                      中英对照
                     </span>
                   </button>
                   <button

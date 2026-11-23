@@ -193,6 +193,7 @@ async def run_trial(
         ],
         response_schema=StyleGuideModel.model_json_schema(),
         temperature=0.3,
+        stage="style_guide",
     )
     guide = StyleGuideModel.model_validate(parse_llm_json(resp.content))
     with db_factory() as db:

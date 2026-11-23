@@ -6,8 +6,15 @@
 
 import hashlib
 import json
+import re
 from dataclasses import dataclass, field
 
+from app.services.term_match import (
+    build_speaker_map,
+    build_term_records,
+    normalize,
+    select_source_matches,
+)
 from app.utils.token_budget import estimate_tokens
 
 DEFAULT_BUDGET = 6000
@@ -100,7 +107,15 @@ def build_context(
         return key in window_speakers
 
     chars = [k for k in knowledge if k.get("item_type") == "character" and _mentioned(k)]
-    terms = [k for k in knowledge if k.get("item_type") == "term" and _mentioned(k)]
+    term_records = build_term_records(knowledge)
+    term_matches = select_source_matches(term_records, window_text)
+    matched_term_ids = {m["record_id"] for m in term_matches}
+    term_records_by_id = {r.id: r for r in term_records}
+    terms = [
+        k for k in knowledge
+        if k.get("item_type") == "term"
+        and str(k.get("id") or k.get("canonical_key")) in matched_term_ids
+    ]
 
     # 规则/关系不是全局灌入：必须命中窗口文本，或与本窗口人物/术语有关。
     focus_names = set(window_speakers)
@@ -202,24 +217,93 @@ def build_context(
         ]
         if profiles:
             blocks.append(_json_block("CHARACTER PROFILES (personality & speech style)", profiles))
+
+        # 说话人声音卡：只放窗口内真实说话的人，避免模型拿到无关角色档案后乱套。
+        speaker_candidates: dict[str, list[dict]] = {}
+        for c in chars:
+            for form in [c.get("canonical_key", ""), *(c.get("aliases") or [])]:
+                form = str(form or "").strip()
+                if form:
+                    speaker_candidates.setdefault(normalize(form), []).append(c)
+        speaker_index: dict[str, dict] = {}
+        for form, candidates in speaker_candidates.items():
+            unique = {c.get("id") or c.get("canonical_key"): c for c in candidates}
+            if len(unique) == 1:
+                speaker_index[form] = next(iter(unique.values()))
+        speaker_rows: list[dict] = []
+        for speaker in sorted(window_speakers):
+            parts = [p.strip() for p in str(speaker).replace("/", "、").split("、") if p.strip()]
+            matched_chars: list[dict] = []
+            for part in parts or [str(speaker)]:
+                c = speaker_index.get(normalize(part))
+                if c is not None and c not in matched_chars:
+                    matched_chars.append(c)
+            for c in matched_chars:
+                data = c.get("data", {}) or {}
+                cues: list[str] = []
+                speaker_forms = {
+                    normalize(c.get("canonical_key", "")),
+                    *(normalize(a) for a in (c.get("aliases") or [])),
+                }
+                for seg in segments:
+                    if normalize(seg.get("speaker_name") or "") not in speaker_forms:
+                        continue
+                    for cue in re.findall(r"[（(]([^）)]{1,48})[）)]", seg.get("source_text", "")):
+                        cue = cue.strip()
+                        if cue and cue not in cues:
+                            cues.append(cue)
+                    if len(cues) >= 3:
+                        break
+                row = {
+                    "speaker": c.get("canonical_key", ""),
+                    "en_name": data.get("translation") or c.get("canonical_key", ""),
+                    "personality": data.get("personality", ""),
+                    "speech_style": data.get("speech_style", ""),
+                    "emotional_range": data.get("emotional_range", ""),
+                    "local_emotional_cues": cues,
+                }
+                if any(row.get(k) for k in ("personality", "speech_style", "emotional_range", "local_emotional_cues")):
+                    speaker_rows.append(row)
+        if speaker_rows:
+            blocks.append(_json_block(
+                "SPEAKER VOICE & LOCAL PERFORMANCE (highest priority for dialogue)",
+                speaker_rows,
+            ))
+
         report["matched_characters"] = [c["canonical_key"] for c in chars]
         snapshot["knowledge_ids"] += [c["id"] for c in chars]
 
     if terms:
-        forced_terms = [
-            {
-                "term": t["canonical_key"],
-                "translation": t.get("data", {}).get("translation"),
-                "variants": t.get("data", {}).get("variants") or [],
+        forced_term_ids = {
+            m["record_id"] for m in term_matches
+            if m.get("policy") == "exact" and m.get("force") and m.get("en")
+        }
+        forced_terms: list[dict] = []
+        contextual_terms: list[dict] = []
+        for t in terms:
+            rec = term_records_by_id.get(str(t.get("id")))
+            if rec is None:
+                continue
+            row = {
+                "term": rec.canonical,
+                "translation": rec.en,
+                "variants": rec.variants,
             }
-            for t in terms
-            if t.get("data", {}).get("translation")
-        ]
-        ref_terms = [t["canonical_key"] for t in terms if not t.get("data", {}).get("translation")]
+            if rec.id in forced_term_ids:
+                forced_terms.append(row)
+            else:
+                row["note"] = (
+                    "context-sensitive name form/common noun; translate the form used "
+                    "in the source naturally, do not force the canonical wording"
+                )
+                contextual_terms.append(row)
         if forced_terms:
-            blocks.append(_json_block("FORCED TERMS", forced_terms))
-        if ref_terms:
-            blocks.append(_json_block("REFERENCE TERMS (background, not mandatory)", ref_terms))
+            blocks.append(_json_block("FORCED TERMS (proper names / titles only)", forced_terms))
+        if contextual_terms:
+            blocks.append(_json_block(
+                "CONTEXTUAL TERMS (preferred vocabulary, not mandatory)",
+                contextual_terms,
+            ))
         report["matched_terms"] = [t["canonical_key"] for t in terms]
         snapshot["knowledge_ids"] += [t["id"] for t in terms]
 
@@ -252,6 +336,36 @@ def build_context(
         else:
             report["trimmed"].append(name)
 
+    # 真正执行上下文总预算。当前原文永远保留；超预算时按低优先级逐块裁剪，
+    # 而不是把整库知识、规则或相邻原文无限塞给模型。
+    trim_order = [
+        ("RELEVANT RULES", "rules"),
+        ("CONTEXTUAL TERMS", "contextual_terms"),
+        ("CHARACTER PROFILES", "character_profiles"),
+        ("APPROVED CHARACTERS", "approved_characters"),
+        ("NAME-FORM MAP", "name_form_map"),
+        ("STYLE GUIDE", "style_guide"),
+        ("CHAPTER STORYLINE", "storyline"),
+        ("FORESHADOWING", "foreshadowing"),
+    ]
+    while total > budget:
+        removed = False
+        for prefix, label in trim_order:
+            for idx in range(len(blocks) - 1, -1, -1):
+                block = blocks[idx]
+                if block.startswith("SOURCE SEGMENTS"):
+                    continue
+                if "[" + prefix in block:
+                    total -= estimate_tokens(block)
+                    blocks.pop(idx)
+                    report["trimmed"].append(label)
+                    removed = True
+                    break
+            if removed:
+                break
+        if not removed:
+            break
+
     prompt_text = "\n".join(blocks)
     return ContextResult(
         prompt_text=prompt_text,
@@ -259,3 +373,79 @@ def build_context(
         snapshot=snapshot,
         total_tokens=total,
     )
+
+
+def build_qa_reference(
+    *,
+    segments: list[dict],
+    knowledge: list[dict],
+    storyline: dict | None = None,
+    max_chars: int = 2600,
+) -> str:
+    """构建语义 QA 的紧凑事实基准。
+
+    只包含本窗口相关角色、专名与当前章节剧情；不包含整库知识，也不要求逐字措辞。
+    """
+    window_text = "".join(seg.get("source_text", "") for seg in segments)
+    speakers = {str(seg.get("speaker_name") or "").strip() for seg in segments}
+    speaker_map = build_speaker_map(knowledge)
+    records = build_term_records(knowledge)
+    matches = select_source_matches(records, window_text)
+
+    characters: list[dict] = []
+    for item in knowledge:
+        if item.get("item_type") != "character":
+            continue
+        names = [item.get("canonical_key", ""), *(item.get("aliases") or [])]
+        mentioned = any(name and name in window_text for name in names)
+        is_speaker = any(normalize(sp) in {normalize(n) for n in names if n} for sp in speakers)
+        if not mentioned and not is_speaker:
+            continue
+        data = item.get("data", {}) or {}
+        characters.append({
+            "source_name": item.get("canonical_key", ""),
+            "english_name": data.get("translation") or speaker_map.get(normalize(item.get("canonical_key", "")), ""),
+            "aliases": item.get("aliases", []),
+            "forms_of_address": data.get("forms_of_address") or [],
+        })
+
+    terms = [
+        {
+            "source": m["source_form"],
+            "canonical": m["canonical"],
+            "english": m["en"],
+            "exact": m["policy"] == "exact" and bool(m.get("force")),
+        }
+        for m in matches
+        if m.get("en")
+    ]
+    # 同一词形/译名只保留一条。
+    dedup_terms: list[dict] = []
+    seen_terms: set[tuple[str, str]] = set()
+    for term in terms:
+        key = (normalize(term["source"]), normalize(term["english"]))
+        if key not in seen_terms:
+            seen_terms.add(key)
+            dedup_terms.append(term)
+
+    story = {}
+    if storyline:
+        story = {
+            "summary": storyline.get("summary", ""),
+            "key_events": storyline.get("key_events", [])[:10],
+            "prior_deps": storyline.get("prior_deps", [])[:8],
+            "character_states": storyline.get("character_states", {}),
+            "foreshadowing": storyline.get("foreshadowing", [])[:6],
+        }
+    payload = {
+        "characters": characters[:16],
+        "terms": dedup_terms[:30],
+        "chapter_storyline": story,
+    }
+    text = json.dumps(payload, ensure_ascii=False, indent=2)
+    if len(text) > max_chars:
+        # 优先保留角色和专名；剧情卡只保留摘要与前情依赖。
+        story = {k: story.get(k) for k in ("summary", "prior_deps") if story.get(k)}
+        payload["chapter_storyline"] = story
+        text = json.dumps(payload, ensure_ascii=False, indent=2)
+    return text[:max_chars]

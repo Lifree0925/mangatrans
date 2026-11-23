@@ -14,11 +14,12 @@ from app.services.translation_batch import _forced_terms_for_text, insert_transl
 
 
 def test_target_hits_term_word_boundary():
-    # werewolves 不再误判为缺 werewolf；连字符拼接（werewolf-hunter）也视为独立词命中
-    assert target_hits_term("The werewolves attacked", "werewolf") == ""
+    # 自动补齐合法复数；真正拼在别的词里（werewolfish）不能误命中。
+    assert target_hits_term("The werewolves attacked", "werewolf") == "werewolves"
     assert target_hits_term("A werewolf attacked", "werewolf") == "werewolf"
     assert target_hits_term("He is a werewolf-hunter", "werewolf") == "werewolf"
     assert target_hits_term("the werewolf's den", "werewolf") == "werewolf"
+    assert target_hits_term("werewolfish creature", "werewolf") == ""
 
 
 def test_target_hits_term_case_insensitive():
@@ -64,19 +65,13 @@ def test_deterministic_qa_plural_not_false_positive(client, wait_task):
                                                    "variants": ["werewolves"]})))
         db.commit()
         forced = _forced_terms_for_text(db, pid, "狼人冲了过来")
-        assert forced["狼人"]["en"] == "werewolf"
-        assert forced["狼人"]["variants"] == ["werewolves"]
+        # 「狼人」是普通群体词，只可作为情境词汇，不能全文逐字强制成 Werewolf。
+        assert forced == {}
 
         tr = _FakeTr()
         tr.target_text = "The werewolves charged forward"
         issues = deterministic_qa(db, seg, tr, forced)
-        # 复数变体命中：不再误报 high forced_term（历史 70% 误报根因）
         assert not any(i["issue_type"] == "forced_term" for i in issues)
-
-        tr.target_text = "The werefox charged forward"  # 完全没命中
-        issues = deterministic_qa(db, seg, tr, forced)
-        assert any(i["issue_type"] == "forced_term" and i["severity"] == "high"
-                   for i in issues)
 
         db.add(KnowledgeItem(id="k2", project_id=pid, item_type="term",
                              canonical_key="狼王", status="approved",

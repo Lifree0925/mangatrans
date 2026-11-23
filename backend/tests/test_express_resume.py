@@ -53,17 +53,17 @@ def _fake() -> FakeProvider:
 
     from app.schemas.knowledge import SceneCardModel
 
+    from conftest import fake_translation_entries
+
     f = FakeProvider()
 
     def translate_h(messages):
-        ids = _re.findall(r"\[([a-f0-9]{32})\]", messages[-1]["content"])
+        content = messages[-1]["content"]
         if "FAITHFUL DRAFT" in messages[0]["content"]:
-            return {"window_id": "W", "translations": [
-                {"segment_id": i, "target_text": "D", "notes": [], "ambiguity": []} for i in ids]}
+            return {"window_id": "W", "translations": fake_translation_entries(content, "Draft", stage="draft")}
         if "POLISH" in messages[0]["content"]:
-            return {"window_id": "W", "translations": [
-                {"segment_id": i, "target_text": "P", "notes": [], "ambiguity": []} for i in ids],
-                "carry_over": {}}
+            return {"window_id": "W", "translations": fake_translation_entries(content, "Polish", stage="polished"),
+                    "carry_over": {}}
         return None
 
     def other_h(messages):

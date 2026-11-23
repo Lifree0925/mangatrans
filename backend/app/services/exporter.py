@@ -66,7 +66,11 @@ def _load(db: Session, project: Project):
         for s in db.scalars(select(Scene).where(Scene.project_id == project.id))
     }
     trans = _current_polished(db, [s.id for s in segs])
-    issues = list(db.scalars(select(QAIssue).where(QAIssue.project_id == project.id)))
+    current_ids = {t.id for t in trans.values()}
+    issues = [
+        i for i in db.scalars(select(QAIssue).where(QAIssue.project_id == project.id))
+        if i.translation_id in current_ids
+    ]
     return segs, chapters, scenes, trans, issues
 
 
@@ -329,6 +333,10 @@ def export_project(
     delivery=True：交付版（剧本交付模板.md，中文场景/动作/音效 + 英文台词）；
     delivery=False：常规导出（中英对照 / 纯英文 × md / txt / docx）。
     """
+    # 先清理旧版本术语误报，导出报告只反映当前规则下的真实问题。
+    from app.services.qa_service import refresh_forced_term_issues
+
+    refresh_forced_term_issues(db, project.id)
     segs, chapters, scenes, trans, issues = _load(db, project)
     report = _report(segs, trans, issues)
     source_title = detect_source_title(segs)

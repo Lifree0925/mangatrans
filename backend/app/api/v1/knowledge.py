@@ -230,6 +230,9 @@ def delete_knowledge(project_id: str, item_id: str, db: Session = Depends(get_db
     db.execute(delete(KnowledgeEvidence).where(KnowledgeEvidence.knowledge_id == item_id))
     db.delete(item)
     db.commit()
+    from app.services.context_cache import invalidate_project_knowledge
+
+    invalidate_project_knowledge(project_id)
 
 
 @router.delete("/knowledge", status_code=204)
@@ -263,6 +266,29 @@ def add_knowledge(project_id: str, payload: dict, db: Session = Depends(get_db))
         raise HTTPException(status_code=400, detail="条目名称不能为空")
     translation = str(payload.get("translation", "")).strip()
     data = {"translation": translation} if translation else {}
+    if item_type == "term" and data:
+        from app.services.term_match import classify_term, enforcement_for
+
+        data["term_kind"] = data.get("term_kind") or classify_term(key, data)
+        data["enforcement"] = data.get("enforcement") or enforcement_for(key, data)
+    existing = db.scalar(
+        select(KnowledgeItem).where(
+            KnowledgeItem.project_id == project_id,
+            KnowledgeItem.item_type == item_type,
+            KnowledgeItem.canonical_key == key,
+        ).limit(1)
+    )
+    if existing is not None:
+        merged = json.loads(existing.data_json or "{}")
+        merged.update(data)
+        existing.data_json = json.dumps(merged, ensure_ascii=False)
+        existing.status = payload.get("status", existing.status)
+        existing.version += 1
+        item = existing
+        db.commit()
+        db.refresh(item)
+        return {"id": item.id, "item_type": item.item_type, "canonical_key": item.canonical_key,
+                "status": item.status, "data_json": item.data_json, "updated": True}
     item = KnowledgeItem(
         project_id=project_id,
         item_type=item_type,

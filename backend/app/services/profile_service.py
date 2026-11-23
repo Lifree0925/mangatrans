@@ -11,17 +11,22 @@ from app.llm.protocol import LLMProvider
 from app.models.document import SourceSegment
 from app.models.knowledge import KnowledgeItem
 
-PROMPT = """你是剧本角色分析专家。根据提供的角色名单与各角色的台词样本，为每个主要角色建立角色档案，用于英文翻译时保持说话风格一致。
-直接输出 JSON（不要任何解释、不要推理过程）。
+PROMPT = """你是剧本角色分析专家。根据角色名单和跨全剧抽取的台词样本，为每个主要角色建立英文翻译用的角色声音档案。
+直接输出 JSON（不要解释、不要推理过程）。
 
 对每个角色输出：
-1. personality：性格特征（依据台词，不编造）。
-2. speech_style：说话方式（用词、句长、口头禅、语域、情绪强度、是否爱用反问/命令等）。
-3. forms_of_address：对他人/被称呼的方式（从原文摘取）。
-4. emotional_range：常见情绪区间。
-5. notes：翻译时应注意的其它事项（可空）。
+1. personality：稳定的性格特征，必须有台词/行为依据，不写空泛形容词。
+2. speech_style：具体说话方式，包括句长、语域（粗俗/克制/古雅等）、常用句式、反问/命令倾向、口头禅和省略习惯。
+3. forms_of_address：角色对他人使用的称呼，以及别人如何称呼该角色（只摘原文）。
+4. emotional_range：常见情绪区间，以及情绪爆发时的表达特点。
+5. notes：翻译时的具体约束，例如是否用缩略语、是否避免文雅词、是否保留粗口强度、是否常用短句。
 
-只依据提供的原文；不确定的留空。
+硬性要求：
+- 只依据提供的原文；不要根据名字猜测性格，不得补写剧情。
+- 样本跨全剧分布时，要提炼稳定特征，不要只按第一场戏定型。
+- 不要复述台词原文，不要编写台词。
+- 同一角色不要拆成多个档案。
+
 角色名单与台词样本：
 {text}"""
 
@@ -39,19 +44,43 @@ class CharacterProfiles(BaseModel):
     profiles: list[CharacterProfile] = Field(default_factory=list)
 
 
-def _build_sample_text(characters: list[str], segs: list[SourceSegment], max_dialogue_chars: int = 400) -> str:
-    """组装：角色名单 + 各角色台词样本。"""
+def _evenly_spaced(items: list[SourceSegment], limit: int = 6) -> list[SourceSegment]:
+    """跨全剧均匀取样，避免只拿开场台词导致角色声音定型错误。"""
+    if len(items) <= limit:
+        return items
+    if limit <= 1:
+        return [items[0]]
+    indexes = {round(i * (len(items) - 1) / (limit - 1)) for i in range(limit)}
+    return [items[i] for i in sorted(indexes)]
+
+
+def _build_sample_text(
+    characters: list[str], segs: list[SourceSegment],
+    alias_to_canonical: dict[str, str] | None = None,
+    max_dialogue_chars: int = 760,
+) -> str:
+    """组装：角色名单 + 跨全剧均布台词样本（含局部动作/情绪提示）。"""
+    alias_to_canonical = alias_to_canonical or {}
     parts = ["角色名单：" + "、".join(characters)]
-    samples: dict[str, list[str]] = {c: [] for c in characters}
+    samples: dict[str, list[SourceSegment]] = {c: [] for c in characters}
     for seg in segs:
-        name = seg.speaker_name or ""
-        if name in samples and len(samples[name]) < 3:
-            samples[name].append(seg.source_text.strip())
-    parts.append("台词样本：")
+        raw = (seg.speaker_name or "").strip()
+        canonical = alias_to_canonical.get(raw, raw)
+        if canonical in samples and seg.segment_type == "dialogue":
+            samples[canonical].append(seg)
+    parts.append("跨全剧台词样本（按时间顺序均匀抽样）：")
     for c in characters:
-        lines = samples[c]
-        if lines:
-            parts.append(f"「{c}」: " + " / ".join(lines)[:max_dialogue_chars])
+        picked = _evenly_spaced(samples[c], 6)
+        if picked:
+            lines = []
+            for seg in picked:
+                text = " / ".join(x.strip() for x in seg.source_text.splitlines() if x.strip())
+                if text:
+                    lines.append(text)
+            joined = " || ".join(lines)
+            parts.append(f"「{c}」: {joined[:max_dialogue_chars]}")
+        else:
+            parts.append(f"「{c}」: （无直接台词样本）")
     return "\n".join(parts)
 
 
@@ -74,18 +103,43 @@ async def extract_profiles(
                 )
             )
         )
-    # 按台词出现频次取主要角色
-    counts = Counter(s.speaker_name for s in segs if s.speaker_name)
-    character_names = [c for c, _ in counts.most_common(top_n)]
-    if not character_names:
-        return {"profiles": 0, "note": "未识别出角色台词"}
+        from app.models.knowledge import KnowledgeAlias
 
-    text = _build_sample_text(character_names, segs)
+        alias_rows = list(
+            db.scalars(
+                select(KnowledgeAlias).where(
+                    KnowledgeAlias.knowledge_id.in_([k.id for k in knowledge])
+                )
+            )
+        ) if knowledge else []
+    alias_to_canonical: dict[str, str] = {}
+    for k in knowledge:
+        alias_to_canonical[k.canonical_key] = k.canonical_key
+    for a in alias_rows:
+        owner = next((k for k in knowledge if k.id == a.knowledge_id), None)
+        if owner is not None:
+            alias_to_canonical[a.alias] = owner.canonical_key
+
+    # 按台词出现频次取主要角色（先归并别名）
+    counts = Counter(
+        alias_to_canonical.get((s.speaker_name or "").strip(), (s.speaker_name or "").strip())
+        for s in segs if s.speaker_name
+    )
+    known_names = set(alias_to_canonical.values())
+    character_names = [
+        c for c, _ in counts.most_common()
+        if c in known_names and c not in {"未知", "旁白"}
+    ][:top_n]
+    if not character_names:
+        return {"profiles": 0, "note": "未识别出知识库中的角色台词"}
+
+    text = _build_sample_text(character_names, segs, alias_to_canonical)
     resp = await provider.chat(
         model=model,
         messages=[{"role": "user", "content": PROMPT.format(text=text)}],
         response_schema=CharacterProfiles.model_json_schema(),
         temperature=0.2,
+        stage="profile",
     )
     data = parse_llm_json(resp.content)
     try:

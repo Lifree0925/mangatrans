@@ -12,6 +12,7 @@ from app.models.task import Task, TaskItem
 from app.models.translation import ProviderConfig
 from app.pipeline.runner import launch as launch_task
 from app.services.provider_service import set_default_from_db, test_provider
+from app.services.usage_service import summarize_one, summarize_task_usage
 
 router = APIRouter(tags=["settings"])
 
@@ -139,6 +140,21 @@ def patch_provider(pid: str, payload: dict, db: Session = Depends(get_db)) -> di
     return {"id": cfg.id, "config_version": cfg.config_version}
 
 
+def _reset_quality_steps_for_retry(task: Task) -> None:
+    """质量门禁失败后重试时，清掉 QA 完成标记，让自动质检真正重跑。"""
+    if task.error_code not in ("quality_gate", "qa_incomplete"):
+        return
+    try:
+        progress = json.loads(task.progress_json or "{}")
+    except json.JSONDecodeError:
+        return
+    steps = progress.get("steps")
+    if isinstance(steps, dict):
+        steps.pop("qa", None)
+        steps.pop("approve", None)
+        progress["steps"] = steps
+        task.progress_json = json.dumps(progress, ensure_ascii=False)
+
 @router.get("/tasks/{task_id}")
 def get_task(task_id: str, db: Session = Depends(get_db)) -> dict:
     task = db.get(Task, task_id)
@@ -150,8 +166,10 @@ def get_task(task_id: str, db: Session = Depends(get_db)) -> dict:
         "status": task.status,
         "progress": json.loads(task.progress_json or "{}"),
         "error_message": task.error_message,
+        "error_code": task.error_code,
         "created_at": _iso_utc(task.created_at),
         "model": json.loads(task.config_snapshot_json or "{}").get("model", ""),
+        "usage": summarize_one(db, task.id),
     }
 
 
@@ -197,6 +215,7 @@ def resume_task(task_id: str, db: Session = Depends(get_db)) -> dict:
     else:
         if task.status not in ("paused", "failed"):
             return {"id": task.id, "status": task.status}
+    _reset_quality_steps_for_retry(task)
     task.status = "running"
     db.commit()
     if has_items is None:
@@ -235,6 +254,7 @@ def retry_task(task_id: str, db: Session = Depends(get_db)) -> dict:
             .where(TaskItem.task_id == task_id, TaskItem.status == "failed")
             .values(status="pending")
         )
+    _reset_quality_steps_for_retry(task)
     task.status = "running"
     db.commit()
     if failed_items is None:
@@ -266,6 +286,11 @@ def delete_task(task_id: str, db: Session = Depends(get_db)) -> None:
         raise HTTPException(status_code=404, detail="任务不存在")
     if task.status in ("running", "queued"):
         raise HTTPException(status_code=409, detail="任务正在执行，无法删除")
+    from app.models.qa import WindowQuality
+    from app.models.usage import LLMCall
+
+    db.execute(sa_delete(LLMCall).where(LLMCall.task_id == task_id))
+    db.execute(sa_delete(WindowQuality).where(WindowQuality.task_id == task_id))
     db.execute(sa_delete(TaskItem).where(TaskItem.task_id == task_id))
     db.delete(task)
     db.commit()
@@ -290,6 +315,7 @@ def list_all_tasks(db: Session = Depends(get_db), archived: bool = False) -> lis
         p.id: p.name
         for p in db.scalars(select(Project).where(Project.id.in_({t.project_id for t in tasks})))
     }
+    usage = summarize_task_usage(db, [t.id for t in tasks])
     return [
         {
             "id": t.id,
@@ -297,11 +323,13 @@ def list_all_tasks(db: Session = Depends(get_db), archived: bool = False) -> lis
             "status": t.status,
             "progress": json.loads(t.progress_json or "{}"),
             "error_message": t.error_message,
+            "error_code": t.error_code,
             "created_at": _iso_utc(t.created_at),
             "project_id": t.project_id,
             "project_name": names.get(t.project_id, "已删除项目"),
             "model": json.loads(t.config_snapshot_json or "{}").get("model", ""),
             "archived": t.archived,
+            "usage": usage.get(t.id, {}),
         }
         for t in tasks
     ]
@@ -314,6 +342,7 @@ def list_project_tasks(project_id: str, db: Session = Depends(get_db)) -> list[d
     tasks = db.scalars(
         select(Task).where(Task.project_id == project_id).order_by(Task.created_at.desc()).limit(50)
     )
+    usage = summarize_task_usage(db, [t.id for t in tasks])
     return [
         {
             "id": t.id,
@@ -321,9 +350,11 @@ def list_project_tasks(project_id: str, db: Session = Depends(get_db)) -> list[d
             "status": t.status,
             "progress": json.loads(t.progress_json or "{}"),
             "error_message": t.error_message,
+            "error_code": t.error_code,
             "created_at": _iso_utc(t.created_at),
             "project_name": db.get(Project, t.project_id).name if db.get(Project, t.project_id) else "已删除项目",
             "model": json.loads(t.config_snapshot_json or "{}").get("model", ""),
+            "usage": usage.get(t.id, {}),
         }
         for t in tasks
     ]

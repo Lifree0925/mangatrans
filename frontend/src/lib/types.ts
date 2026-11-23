@@ -64,17 +64,31 @@ export interface ParseReport {
   coverage_ok: boolean;
 }
 
+export interface TaskUsage {
+  requests?: number;
+  failed_requests?: number;
+  cache_hits?: number;
+  prompt_tokens?: number;
+  completion_tokens?: number;
+  reasoning_tokens?: number;
+  api_total_tokens?: number;
+  latency_ms?: number;
+  by_stage?: Record<string, { requests?: number; prompt_tokens?: number; completion_tokens?: number; total_tokens?: number; latency_ms?: number }>;
+}
+
 export interface TaskInfo {
   id: string;
   task_type: string;
   status: string;
   progress: Record<string, unknown>;
   error_message: string | null;
+  error_code?: string | null;
   created_at: string | null;
   project_id?: string;
   project_name?: string;
   model?: string;
   archived?: boolean;
+  usage?: TaskUsage;
 }
 
 export interface ProviderInfo {

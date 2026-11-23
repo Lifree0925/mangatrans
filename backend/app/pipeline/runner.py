@@ -40,6 +40,14 @@ def launch(task_id: str) -> None:
 
 
 async def _run(task_id: str) -> None:
+    """带计量上下文的执行入口（线程级任务）。"""
+    from app.llm.usage import usage_context_for_task
+
+    with usage_context_for_task(task_id):
+        await _run_task(task_id)
+
+
+async def _run_task(task_id: str) -> None:
     from datetime import datetime, timezone
 
     with _sess_factory() as db:
@@ -49,6 +57,7 @@ async def _run(task_id: str) -> None:
         task.status = "running"
         task.started_at = datetime.now(timezone.utc)
         task.error_message = None
+        task.error_code = None
         db.commit()
         payload = json.loads(task.config_snapshot_json or "{}")
 
@@ -62,6 +71,11 @@ async def _run(task_id: str) -> None:
                 model=payload.get("model", "fake-model"),
                 mode=payload.get("mode", "guided"),
             )
+            if int(result.get("failed_batches") or 0) > 0:
+                raise RuntimeError(
+                    f"知识提取有 {result['failed_batches']} 个批次失败，已停止后续流程。"
+                    f"请重试；原因：{(result.get('errors') or ['未知错误'])[0]}"
+                )
         elif task.task_type == "express":
             result = await express.run_express(
                 _sess_factory,
@@ -124,7 +138,7 @@ async def _run(task_id: str) -> None:
                 task.error_code = (exc.code or "llm_error")[:32]
                 task.error_message = str(exc)[:2000]
             else:
-                task.error_code = type(exc).__name__[:32]
+                task.error_code = (getattr(exc, "code", None) or type(exc).__name__)[:32]
                 task.error_message = str(exc)[:2000] or type(exc).__name__
             task.started_at = None  # 无执行线程
             db.commit()

@@ -6,6 +6,7 @@
 """
 
 import asyncio
+import os
 import json
 import time
 from datetime import datetime, timedelta, timezone
@@ -19,14 +20,16 @@ from app.services.translation_batch import (
     process_window_polish_item,
     process_window_qa_item,
 )
+from app.llm.usage import usage_context_for_task
 
 LEASE_TIMEOUT_MINUTES = 30
 POLL_SECONDS = 1.0
 WINDOW_TIMEOUT_SECONDS = 240  # 单窗口硬超时：思考模式慢调用兜底（截断已有降级重试，240s 足够）
 QA_TIMEOUT_SECONDS = 600  # QA 定点修复最多 3 轮润色请求：超时只重跑 QA 节点，不碰窗口翻译
-DRAFT_CONCURRENCY = 10
-POLISH_CONCURRENCY = 10
-QA_CONCURRENCY = 10
+WINDOW_CONCURRENCY = max(1, int(os.environ.get("MT_WINDOW_CONCURRENCY", "3")))
+DRAFT_CONCURRENCY = WINDOW_CONCURRENCY
+POLISH_CONCURRENCY = WINDOW_CONCURRENCY
+QA_CONCURRENCY = WINDOW_CONCURRENCY
 
 
 def recover_stale_items(db) -> int:
@@ -168,15 +171,17 @@ def claim_qa_batch(db, limit: int = QA_CONCURRENCY) -> list[TaskItem]:
     return claimed
 
 
-def _mark_failed(factory, task_id: str, item_id: str, code: str) -> None:
-    """失败处理：attempts < 3 时自动回 pending 重试（失败节点续跑），
-    attempts 达上限才标记 failed 并累计任务进度中的 failed 计数。"""
+def _mark_failed(
+    factory, task_id: str, item_id: str, code: str, *, retryable: bool = True
+) -> None:
+    """失败处理：只有瞬时错误才自动回 pending；质量门禁/截断/认证等直接失败。"""
     with factory() as db:
         item = db.get(TaskItem, item_id)
         if item is None:
             return
-        item.error_code = (code or type(Exception).__name__)[:32]
-        if item.attempts < 3:
+        item.error_code = (code or "error")[:32]
+        can_retry = retryable and item.attempts < 3
+        if can_retry:
             item.status = "pending"
             item.finished_at = datetime.now(timezone.utc)
         else:
@@ -289,9 +294,10 @@ async def _maybe_lock_terms(factory) -> int:
         model = payload.get("model", "fake-model")
     if not source_document_id:
         return 0
-    result = await lock_untranslated_terms(
-        factory, project_id, source_document_id, get_provider(), model
-    )
+    with usage_context_for_task(tid):
+        result = await lock_untranslated_terms(
+            factory, project_id, source_document_id, get_provider(), model
+        )
     with factory() as db:
         task = db.get(Task, tid)
         if task is not None:
@@ -317,9 +323,11 @@ def _apply_qa_progress(factory, task_id: str, res: dict) -> None:
 
 
 def _mark_task_completed(factory, task_id: str) -> None:
-    """全部窗口 polished 成功且无 draft 遗留 → 任务 completed。"""
+    """只有全部节点成功且项目自动质量门禁通过时，任务才允许 completed。"""
+    from app.services.quality_service import auto_approve_project, project_quality_report
+
     with factory() as db:
-        remaining = db.scalar(
+        active = db.scalar(
             select(func.count())
             .select_from(TaskItem)
             .where(
@@ -327,10 +335,56 @@ def _mark_task_completed(factory, task_id: str) -> None:
                 TaskItem.status.in_(["pending", "running"]),
             )
         )
-        if remaining == 0:
-            task = db.get(Task, task_id)
-            task.status = "completed"
+        if active:
+            return
+        failed_codes = list(
+            db.scalars(
+                select(TaskItem.error_code).where(
+                    TaskItem.task_id == task_id, TaskItem.status == "failed"
+                )
+            )
+        )
+        failed = len(failed_codes)
+        task = db.get(Task, task_id)
+        if task is None:
+            return
+        if failed:
+            task.status = "failed"
+            if any(code in ("qa_incomplete", "quality_gate") for code in failed_codes):
+                task.error_code = "quality_gate"
+                task.error_message = (
+                    f"自动质检未通过：{failed} 个质检节点失败或仍有严重问题，请重试。"
+                )
+            else:
+                task.error_code = "items_failed"
+                task.error_message = f"有 {failed} 个执行节点失败，请重试失败节点。"
             db.commit()
+            return
+        report = project_quality_report(db, task.project_id)
+        if report.get("gate") != "passed":
+            task.status = "failed"
+            task.error_code = "quality_gate"
+            task.error_message = "自动质检未通过：" + str(report.get("reason") or "存在未解决问题")
+            progress = json.loads(task.progress_json or "{}")
+            progress["quality"] = report
+            task.progress_json = json.dumps(progress, ensure_ascii=False)
+            db.commit()
+            return
+        approved = auto_approve_project(db, task.project_id)
+        progress = json.loads(task.progress_json or "{}")
+        progress["quality"] = report
+        progress["approve"] = approved
+        task.progress_json = json.dumps(progress, ensure_ascii=False)
+        task.status = "completed"
+        task.error_code = None
+        task.error_message = None
+        db.commit()
+
+
+async def _within_usage(task_id: str, awaitable, timeout: float):
+    """为单个窗口任务绑定 LLM 计量上下文。"""
+    with usage_context_for_task(task_id):
+        return await asyncio.wait_for(awaitable, timeout=timeout)
 
 
 async def run_once(db_factory=None) -> int:
@@ -344,9 +398,10 @@ async def run_once(db_factory=None) -> int:
     if drafts:
         results = await asyncio.gather(
             *[
-                asyncio.wait_for(
+                _within_usage(
+                    tid,
                     process_window_draft_item(factory, tid, iid, model),
-                    timeout=WINDOW_TIMEOUT_SECONDS,
+                    WINDOW_TIMEOUT_SECONDS,
                 )
                 for tid, iid, model in jobs
             ],
@@ -354,9 +409,15 @@ async def run_once(db_factory=None) -> int:
         )
         for (tid, iid, _model), res in zip(jobs, results):
             if isinstance(res, BaseException):
-                _mark_failed(factory, tid, iid, type(res).__name__)
+                from app.llm.protocol import LLMError
+                code = res.code if isinstance(res, LLMError) else type(res).__name__
+                retryable = res.retryable if isinstance(res, LLMError) else True
+                _mark_failed(factory, tid, iid, code, retryable=retryable)
             elif isinstance(res, dict) and "error" in res:
-                _mark_failed(factory, tid, iid, res["error"])
+                _mark_failed(
+                    factory, tid, iid, res.get("error_code") or res["error"],
+                    retryable=bool(res.get("retryable", True)),
+                )
         for tid in {tid for tid, _i, _m in jobs}:
             _apply_draft_carry(factory, tid, results)
         return len(drafts)
@@ -369,9 +430,10 @@ async def run_once(db_factory=None) -> int:
     if jobs:
         results = await asyncio.gather(
             *[
-                asyncio.wait_for(
+                _within_usage(
+                    tid,
                     process_window_polish_item(factory, tid, iid, model),
-                    timeout=WINDOW_TIMEOUT_SECONDS,
+                    WINDOW_TIMEOUT_SECONDS,
                 )
                 for tid, iid, model in jobs
             ],
@@ -381,9 +443,15 @@ async def run_once(db_factory=None) -> int:
         for (tid, iid, _model), res in zip(jobs, results):
             touched_tasks.add(tid)
             if isinstance(res, BaseException):
-                _mark_failed(factory, tid, iid, type(res).__name__)
+                from app.llm.protocol import LLMError
+                code = res.code if isinstance(res, LLMError) else type(res).__name__
+                retryable = res.retryable if isinstance(res, LLMError) else True
+                _mark_failed(factory, tid, iid, code, retryable=retryable)
             elif isinstance(res, dict) and "error" in res:
-                _mark_failed(factory, tid, iid, res["error"])
+                _mark_failed(
+                    factory, tid, iid, res.get("error_code") or res["error"],
+                    retryable=bool(res.get("retryable", True)),
+                )
             else:
                 _apply_polish_progress(factory, tid, res)
         for tid in touched_tasks:
@@ -398,9 +466,10 @@ async def run_once(db_factory=None) -> int:
         return 0
     qa_results = await asyncio.gather(
         *[
-            asyncio.wait_for(
+            _within_usage(
+                tid,
                 process_window_qa_item(factory, tid, iid, model),
-                timeout=QA_TIMEOUT_SECONDS,
+                QA_TIMEOUT_SECONDS,
             )
             for tid, iid, model in qa_jobs
         ],
@@ -408,9 +477,15 @@ async def run_once(db_factory=None) -> int:
     )
     for (tid, iid, _model), res in zip(qa_jobs, qa_results):
         if isinstance(res, BaseException):
-            _mark_failed(factory, tid, iid, type(res).__name__)
+            from app.llm.protocol import LLMError
+            code = res.code if isinstance(res, LLMError) else type(res).__name__
+            retryable = res.retryable if isinstance(res, LLMError) else True
+            _mark_failed(factory, tid, iid, code, retryable=retryable)
         elif isinstance(res, dict) and "error" in res:
-            _mark_failed(factory, tid, iid, res["error"])
+            _mark_failed(
+                factory, tid, iid, res.get("error_code") or res["error"],
+                retryable=bool(res.get("retryable", True)),
+            )
         else:
             _apply_qa_progress(factory, tid, res)
     for tid in {t for t, _i, _m in qa_jobs}:
@@ -458,9 +533,36 @@ def finalize_stale_tasks(db) -> int:
             )
         )
         if pending == 0:
+            from app.services.quality_service import auto_approve_project, project_quality_report
+
+            failed = db.scalar(
+                select(func.count())
+                .select_from(TaskItem)
+                .where(TaskItem.task_id == tid, TaskItem.status == "failed")
+            )
             t = db.get(Task, tid)
-            t.status = "completed"
-            t.error_message = None
+            if failed:
+                t.status = "failed"
+                t.error_code = "items_failed"
+                t.error_message = f"有 {failed} 个执行节点失败，请重试。"
+            else:
+                quality = project_quality_report(db, t.project_id)
+                progress = json.loads(t.progress_json or "{}")
+                progress["quality"] = quality
+                t.progress_json = json.dumps(progress, ensure_ascii=False)
+                if quality.get("gate") == "passed":
+                    t.progress_json = json.dumps(
+                        {**progress, "approve": auto_approve_project(db, t.project_id)},
+                        ensure_ascii=False,
+                    )
+                    t.status = "completed"
+                    t.error_message = None
+                else:
+                    t.status = "failed"
+                    t.error_code = "quality_gate"
+                    t.error_message = "自动质检未通过：" + str(
+                        quality.get("reason") or "存在未解决问题"
+                    )
             fixed += 1
     db.commit()
     return fixed

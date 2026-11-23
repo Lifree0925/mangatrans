@@ -9,6 +9,7 @@ import app.core.database as dbmod
 from app.llm.fake import FakeProvider
 from app.llm.registry import set_provider
 from app.models.task import Task
+from conftest import fake_translation_entries
 
 
 def _add_verified_provider() -> None:
@@ -100,19 +101,12 @@ def _universal_fake(client: TestClient, pid: str) -> FakeProvider:
         content = messages[-1]["content"]
         system = messages[0]["content"] if messages else ""
         if "translate only these" in content or "FAITHFUL DRAFT" in content:
-            ids = re.findall(r"\[([0-9a-f]{32})\]", content)
             natural = "POLISH pass" in system
             out = {
                 "window_id": "W",
-                "translations": [
-                    {
-                        "segment_id": sid,
-                        "target_text": f"Hello {sid[:8]}",
-                        "notes": [],
-                        "ambiguity": [],
-                    }
-                    for sid in dict.fromkeys(ids)
-                ],
+                "translations": fake_translation_entries(
+                    content, "Hello", stage="polished" if natural else "draft"
+                ),
             }
             if natural:
                 out["carry_over"] = {
@@ -125,7 +119,7 @@ def _universal_fake(client: TestClient, pid: str) -> FakeProvider:
         return None
 
     def qa_h(messages):
-        if "剧本翻译 QA" in messages[-1]["content"]:
+        if "终审 QA" in messages[-1]["content"]:
             return {"issues": []}
         return None
 
@@ -169,7 +163,12 @@ def test_express_end_to_end(client: TestClient, wait_task) -> None:
             )
         )
     assert rows
-    assert all(t.review_status == "approved" for t in rows)
+    latest_by_segment = {}
+    for t in rows:
+        current = latest_by_segment.get(t.segment_id)
+        if current is None or t.version > current.version:
+            latest_by_segment[t.segment_id] = t
+    assert all(t.review_status == "approved" for t in latest_by_segment.values())
 
     # 导出双语 Markdown（常规导出：中英对照保留）
     r = client.post(f"/api/v1/projects/{pid}/export", json={"delivery": False, "bilingual": True})

@@ -41,6 +41,7 @@ class FakeProvider:
         thinking: str | None = "disabled",
         reasoning_effort: str | None = None,
         max_tokens: int | None = None,
+        stage: str = "llm",
     ) -> LLMResponse:
         self.calls.append({"messages": messages, "schema": response_schema, "thinking": thinking})
         result = None

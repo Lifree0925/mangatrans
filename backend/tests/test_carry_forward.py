@@ -12,6 +12,7 @@ from app.llm.registry import set_provider
 from app.models.document import SourceSegment
 from app.models.task import Task
 from app.services.window_planner import build_windows
+from conftest import fake_translation_entries
 
 
 def _script_text() -> str:
@@ -84,15 +85,9 @@ def test_draft_carry_forwarded_to_polish(client, wait_task) -> None:
                         errors.append(f"{wi} 窗口 carry 未取到前一窗口 Draft 状态: {prev_mark}")
             out = {
                 "window_id": "W",
-                "translations": [
-                    {
-                        "segment_id": sid,
-                        "target_text": f"EN {sid[:8]}",
-                        "notes": [],
-                        "ambiguity": [],
-                    }
-                    for sid in ids
-                ],
+                "translations": fake_translation_entries(
+                    content, "EN", stage="polished" if natural else "draft"
+                ),
             }
             if not natural and ids:
                 # Draft 输出 carry-over（前置链路）
@@ -141,15 +136,9 @@ def test_worker_concurrent_polish_draft_carry_map(client, wait_task) -> None:
             natural = "POLISH pass" in system
             out = {
                 "window_id": "W",
-                "translations": [
-                    {
-                        "segment_id": sid,
-                        "target_text": f"EN {sid[:8]}" + ("-p" if natural else "-d"),
-                        "notes": [],
-                        "ambiguity": [],
-                    }
-                    for sid in ids
-                ],
+                "translations": fake_translation_entries(
+                    content, "EN", stage="polished" if natural else "draft"
+                ),
             }
             if not natural and ids:
                 out["carry_over"] = {

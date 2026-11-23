@@ -53,3 +53,48 @@ def client(tmp_path: Path):
     c.headers["x-auth-token"] = token
     yield c
     test_engine.dispose()
+
+
+def fake_translation_entries(content: str, tag: str, *, stage: str = "") -> list[dict]:
+    """从翻译 Prompt 中读取 [segment_id] 原文，生成结构合法的假译文。
+
+    假译文保留说话人/场景号/△/【】锚点，供管线级测试验证结构校验，
+    而不是绕过真实生产约束。
+    """
+    import re as _re
+
+    pattern = _re.compile(
+        r"^\[([0-9a-f]{32})\]\s(.*?)(?=^\[[0-9a-f]{32}\]\s|\Z)",
+        _re.MULTILINE | _re.DOTALL,
+    )
+    dialogue = _re.compile(
+        r"^\s*([^（(：:]+?)\s*(?:[（(]([^）)]*)[）)])?\s*[:：]\s*(.+)$"
+    )
+    entries: list[dict] = []
+    for sid, source in pattern.findall(content):
+        target_lines: list[str] = []
+        for line in [x.strip() for x in source.splitlines() if x.strip()]:
+            m = dialogue.match(line)
+            if m:
+                cue = m.group(2) or ""
+                cue_part = f" ({cue})" if cue else ""
+                target_lines.append(f"Speaker{cue_part}: {tag} {sid[:8]} {stage}".strip())
+                continue
+            scene = _re.match(r"^(\d+)\s*[-–]\s*(\d+)", line)
+            if scene:
+                target_lines.append(f"{scene.group(1)}-{scene.group(2)} {tag} {sid[:8]} {stage}".strip())
+                continue
+            if line.startswith("△"):
+                target_lines.append(f"△ {tag} {sid[:8]} {stage}".strip())
+                continue
+            if line.startswith("【"):
+                target_lines.append(f"[Sound effect: {tag} {sid[:8]} {stage}]".strip())
+                continue
+            target_lines.append(f"{tag} {sid[:8]} {stage}".strip())
+        entries.append({
+            "segment_id": sid,
+            "target_text": "\n".join(target_lines),
+            "notes": [],
+            "ambiguity": [],
+        })
+    return entries

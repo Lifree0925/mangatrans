@@ -1,8 +1,8 @@
-"""台词本服务：LLM 抽取章节→场景→角色纯对白流水，编辑回写主线片段。
+"""台词本服务：从解析器产出的 dialogue 片段生成纯对白流水。
 
-- 抽取发生在解析后（Express 准备阶段），分批并发；
-- 台词必须是片段原文的连续子串（不允许改写原文）；
-- 说话人归一化对照知识库角色档案，原文称呼存 speaker_alias；
+- 抽取不再调用 LLM，直接复用 segment_type/speaker_name/章节/场景；
+- 台词必须是片段原文的连续子串；
+- 只有多行对白无法按行数一一对应时，才让模型做歧义对齐；
 - 编辑回写：在所属片段 source_text 中替换原台词，触发该段译文 stale。
 """
 
@@ -16,7 +16,7 @@ from app.llm.json_utils import parse_llm_json
 from app.llm.protocol import LLMProvider
 from app.models.dialogue import DialogueLine
 from app.models.document import SourceSegment
-from app.models.knowledge import KnowledgeItem
+from app.models.knowledge import KnowledgeAlias, KnowledgeItem
 from app.models.translation import Translation
 
 BATCH_SEGMENTS = 10
@@ -96,6 +96,7 @@ async def _extract_batch(provider: LLMProvider, model: str, segs, characters) ->
         messages=[{"role": "system", "content": SYSTEM}, {"role": "user", "content": user}],
         response_schema={"type": "object"},
         temperature=0.1,
+        stage="dialogue_extract",
     )
     data = parse_llm_json(resp.content)
     return data.get("lines", []) if isinstance(data, dict) else []
@@ -105,7 +106,13 @@ async def extract_dialogue_lines(
     db_factory, project_id: str, source_document_id: str, provider: LLMProvider,
     model: str, progress_cb=None,
 ) -> dict:
-    """全量抽取并落库（幂等：先删旧行）。progress_cb 每批回调用于实时进度。"""
+    """台词本抽取：直接复用解析器的 dialogue 类型与 speaker_name，不再调用模型。
+
+    解析器已经把对白和非对白分开；再让模型重新识别只会增加成本并引入
+    重复台词、丢句和章节错乱。
+    """
+    import re as _re
+
     with db_factory() as db:
         segs = list(
             db.scalars(
@@ -117,114 +124,86 @@ async def extract_dialogue_lines(
                 .order_by(SourceSegment.segment_no)
             )
         )
-        characters = _characters(project_id, db)
-    if not segs:
-        return {"extracted": 0, "discarded": 0, "batches": 0, "failed_batches": 0}
-
-    batches = [segs[i : i + BATCH_SEGMENTS] for i in range(0, len(segs), BATCH_SEGMENTS)]
-    seg_by_id = {s.id: s for s in segs}
-    sem = asyncio.Semaphore(CONCURRENCY)
-
-    async def one(batch, hold_sem: bool = True):
-        """单批抽取：限流退避重试；仍失败则拆半递归（长思考耗爆预算的批次变小后可成功）。"""
-        async def call():
-            for attempt in range(3):
-                try:
-                    return await _extract_batch(provider, model, batch, characters)
-                except Exception:  # noqa: BLE001
-                    if attempt == 2:
-                        if len(batch) <= 2:
-                            return []
-                        mid = len(batch) // 2
-                        left = await one(batch[:mid], hold_sem=False)
-                        right = await one(batch[mid:], hold_sem=False)
-                        return left + right
-                    await asyncio.sleep(4 * (attempt + 1))
-
-        if hold_sem:
-            async with sem:
-                return await call()
-        return await call()
-
-    tasks = [asyncio.create_task(one(b)) for b in batches]
-    lines: list[dict] = []
-    discarded = 0
-    failed_batches = 0
-    done = 0
-    for fut in asyncio.as_completed(tasks):
-        batch_lines = await fut
-        done += 1
-        if not batch_lines:
-            failed_batches += 1
-        for item in batch_lines:
-            sid = item.get("segment_id")
-            seg = seg_by_id.get(sid)
-            if seg is None:
-                discarded += 1
-                continue
-            text = (item.get("text") or "").strip()
-            if not _is_verbatim(seg.source_text, text):
-                discarded += 1
-                continue
-            speaker = (item.get("speaker_name") or item.get("speaker") or "").strip()[:64] or "未知"
-            # 归一化检查：speaker 若恰是知识库别名，替换为 canonical
-            for c in characters:
-                if speaker in c["aliases"]:
-                    speaker = c["canonical"]
-                    break
-            lines.append(
-                {
-                    "segment_id": sid,
-                    "speaker_name": speaker,
-                    "speaker_alias": (item.get("speaker_alias") or None),
-                    "text": text,
-                }
+        char_rows = list(
+            db.scalars(
+                select(KnowledgeItem).where(
+                    KnowledgeItem.project_id == project_id,
+                    KnowledgeItem.item_type == "character",
+                    KnowledgeItem.status.in_(["approved", "auto_approved"]),
+                )
             )
-        if progress_cb:
-            progress_cb(
-                {
-                    "done_batches": done,
-                    "total_batches": len(batches),
-                    "lines": len(lines),
-                    "discarded": discarded,
-                    "failed_batches": failed_batches,
-                }
+        )
+    alias_to_canonical: dict[str, str] = {}
+    for c in char_rows:
+        alias_to_canonical[c.canonical_key] = c.canonical_key
+    if char_rows:
+        with db_factory() as db:
+            aliases = list(
+                db.scalars(
+                    select(KnowledgeAlias).where(
+                        KnowledgeAlias.knowledge_id.in_([c.id for c in char_rows])
+                    )
+                )
             )
+        owner = {c.id: c.canonical_key for c in char_rows}
+        for a in aliases:
+            if a.knowledge_id in owner:
+                alias_to_canonical[a.alias] = owner[a.knowledge_id]
 
-    # 开始前清空旧行（幂等）；随后每批增量入库，中断时已有批次不丢失
     with db_factory() as db:
         db.query(DialogueLine).filter(
             DialogueLine.source_document_id == source_document_id
         ).delete()
         db.commit()
-    line_no_by_scene: dict[str, int] = {}
-    for ln in lines:
-        seg = seg_by_id[ln["segment_id"]]
-        scene_key = seg.scene_id or seg.chapter_id or "-"
-        line_no = line_no_by_scene.get(scene_key, 0) + 1
-        line_no_by_scene[scene_key] = line_no
-        with db_factory() as db:
-            db.add(
-                DialogueLine(
-                    project_id=project_id,
-                    source_document_id=source_document_id,
-                    chapter_id=seg.chapter_id,
-                    scene_id=seg.scene_id,
-                    segment_id=seg.id,
-                    speaker_name=ln["speaker_name"],
-                    speaker_alias=ln["speaker_alias"],
-                    line_no=line_no,
-                    source_text=ln["text"],
-                )
-            )
-            db.commit()
-    return {
-        "extracted": len(lines),
-        "discarded": discarded,
-        "batches": len(batches),
-        "failed_batches": failed_batches,
-    }
 
+    line_no_by_scene: dict[str, int] = {}
+    inserted = 0
+    for seg in segs:
+        speaker = (seg.speaker_name or "未知").strip()
+        speaker = alias_to_canonical.get(speaker, speaker)
+        raw_lines = [x.strip() for x in (seg.source_text or "").splitlines() if x.strip()]
+        for raw in raw_lines:
+            # 保留原文连续子串；若行首带「角色：」，只去掉角色标签作为台词内容。
+            text = raw
+            m = _re.match(r"^\s*([^：:]{1,24})\s*[：:]\s*(.*)$", raw)
+            if m:
+                text = m.group(2).strip() or m.group(1).strip()
+            if not text or text not in raw:
+                continue
+            key = seg.scene_id or seg.chapter_id or "-"
+            line_no = line_no_by_scene.get(key, 0) + 1
+            line_no_by_scene[key] = line_no
+            with db_factory() as db:
+                db.add(
+                    DialogueLine(
+                        project_id=project_id,
+                        source_document_id=source_document_id,
+                        chapter_id=seg.chapter_id,
+                        scene_id=seg.scene_id,
+                        segment_id=seg.id,
+                        speaker_name=speaker,
+                        speaker_alias=None,
+                        line_no=line_no,
+                        source_text=text,
+                    )
+                )
+                db.commit()
+            inserted += 1
+    result = {
+        "extracted": inserted,
+        "discarded": 0,
+        "batches": 1 if segs else 0,
+        "failed_batches": 0,
+    }
+    if progress_cb:
+        progress_cb({
+            "done_batches": 1 if segs else 0,
+            "total_batches": 1 if segs else 0,
+            "lines": inserted,
+            "discarded": 0,
+            "failed_batches": 0,
+        })
+    return result
 
 def list_dialogue_lines(db, project_id: str) -> list[dict]:
     """按章节→场景→行号排序返回台词行（含所属片段当前译文，供聚合展示）。"""
@@ -373,6 +352,7 @@ async def _align_one(provider: LLMProvider, model: str, payload: dict):
         ],
         response_schema={"type": "object"},
         temperature=0.1,
+        stage="dialogue_align",
     )
     data = parse_llm_json(resp.content)
     return payload, data.get("alignments", []) if isinstance(data, dict) else []
@@ -441,6 +421,13 @@ async def align_dialogue_translations(
         if len(seg_lines) == 1:
             seg_lines[0].target_text = tr.target_text.strip()
             single += 1
+            continue
+        tgt_lines = [x.strip() for x in (tr.target_text or "").splitlines() if x.strip()]
+        if len(tgt_lines) == len(seg_lines):
+            # 行数完全一致时按行号确定性对齐，零模型调用。
+            for ln, text in zip(seg_lines, tgt_lines):
+                ln.target_text = text
+            single += len(seg_lines)
             continue
         jobs.append(
             {

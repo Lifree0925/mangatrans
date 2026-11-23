@@ -28,6 +28,7 @@ class Task(Base):
     config_snapshot_json: Mapped[str] = mapped_column(Text, default="{}")
     last_checkpoint: Mapped[str | None] = mapped_column(String(32), nullable=True)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    error_code: Mapped[str | None] = mapped_column(String(32), nullable=True)
     # 线程型任务的实际开始时间：用于僵尸检测与崩溃恢复（约束：started_at 超时回收）
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     # 归档：成功后归档，任务中心隐藏、历史记录查看

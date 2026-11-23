@@ -88,24 +88,18 @@ def _universal_fake() -> FakeProvider:
         return None
 
     def translate_h(messages):
-        import re
+        from conftest import fake_translation_entries
 
-        ids = re.findall(r"\[([a-f0-9]{32})\]", messages[-1]["content"])
+        content = messages[-1]["content"]
         if "FAITHFUL DRAFT" in messages[0]["content"]:
             return {
                 "window_id": "W",
-                "translations": [
-                    {"segment_id": i, "target_text": "Draft " + i[:4], "notes": [], "ambiguity": []}
-                    for i in ids
-                ],
+                "translations": fake_translation_entries(content, "Draft", stage="draft"),
             }
         if "POLISH" in messages[0]["content"]:
             return {
                 "window_id": "W",
-                "translations": [
-                    {"segment_id": i, "target_text": "Polished " + i[:4], "notes": [], "ambiguity": []}
-                    for i in ids
-                ],
+                "translations": fake_translation_entries(content, "Polish", stage="polished"),
                 "carry_over": {},
             }
         return None

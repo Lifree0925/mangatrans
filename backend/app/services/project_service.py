@@ -17,6 +17,7 @@ from app.models.task import Task, TaskItem
 from app.models.audit import AuditLog
 from app.models.storyline import ChapterStoryline
 from app.models.translation import StyleGuide, Translation
+from app.models.usage import LLMCall
 
 
 def delete_project_cascade(db: Session, project_id: str) -> bool:
@@ -26,6 +27,7 @@ def delete_project_cascade(db: Session, project_id: str) -> bool:
         return False
 
     task_ids = db.query(Task.id).filter(Task.project_id == project_id).subquery()
+    db.execute(delete(LLMCall).where(LLMCall.task_id.in_(task_ids)))
     db.execute(delete(TaskItem).where(TaskItem.task_id.in_(task_ids)))
     db.execute(delete(WindowQuality).where(WindowQuality.task_id.in_(task_ids)))
     db.execute(delete(QAIssue).where(QAIssue.project_id == project_id))

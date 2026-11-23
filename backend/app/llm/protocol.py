@@ -13,6 +13,7 @@ class LLMResponse:
     usage: dict = field(default_factory=dict)
     finish_reason: str | None = None
     latency_ms: float = 0.0
+    cache_hit: bool = False
 
 
 @dataclass
@@ -48,6 +49,7 @@ class LLMProvider(Protocol):
         thinking: str | None = "disabled",
         reasoning_effort: str | None = None,
         max_tokens: int | None = None,
+        stage: str = "llm",
     ) -> LLMResponse: ...
 
     async def test_connection(self) -> ProviderTestResult: ...

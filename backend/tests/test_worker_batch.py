@@ -18,6 +18,7 @@ from app.models.task import Task, TaskItem
 from app.models.translation import Translation
 from app.pipeline.worker import recover_stale_items, run_once
 from app.services.window_planner import build_windows
+from conftest import fake_translation_entries
 
 
 def _add_verified_provider() -> None:
@@ -130,15 +131,9 @@ def test_batch_translation_end_to_end(client: TestClient, wait_task) -> None:
             natural = "POLISH pass" in system
             out = {
                 "window_id": "W",
-                "translations": [
-                    {
-                        "segment_id": sid,
-                        "target_text": f"EN-{sid}-" + ("polished" if natural else "draft"),
-                        "notes": [],
-                        "ambiguity": [],
-                    }
-                    for sid in dict.fromkeys(ids)
-                ],
+                "translations": fake_translation_entries(
+                    content, "EN", stage="polished" if natural else "draft"
+                ),
             }
             if natural:
                 out["carry_over"] = {
@@ -234,15 +229,9 @@ def test_qa_items_are_independent_nodes(client, wait_task) -> None:
             natural = "POLISH pass" in system
             out = {
                 "window_id": "W",
-                "translations": [
-                    {
-                        "segment_id": sid,
-                        "target_text": f"EN-{sid}-" + ("polished" if natural else "draft"),
-                        "notes": [],
-                        "ambiguity": [],
-                    }
-                    for sid in dict.fromkeys(ids)
-                ],
+                "translations": fake_translation_entries(
+                    content, "EN", stage="polished" if natural else "draft"
+                ),
             }
             if natural:
                 out["carry_over"] = {
@@ -289,15 +278,9 @@ def test_qa_retry_does_not_restart_windows(client, wait_task) -> None:
             natural = "POLISH pass" in system
             out = {
                 "window_id": "W",
-                "translations": [
-                    {
-                        "segment_id": sid,
-                        "target_text": f"EN-{sid}-" + ("polished" if natural else "draft"),
-                        "notes": [],
-                        "ambiguity": [],
-                    }
-                    for sid in dict.fromkeys(ids)
-                ],
+                "translations": fake_translation_entries(
+                    content, "EN", stage="polished" if natural else "draft"
+                ),
             }
             if natural:
                 out["carry_over"] = {
@@ -400,15 +383,9 @@ def test_polish_prompt_contains_project_knowledge(client: TestClient, wait_task)
             natural = "POLISH pass" in system
             out = {
                 "window_id": "W",
-                "translations": [
-                    {
-                        "segment_id": sid,
-                        "target_text": f"EN-{sid[:8]}-" + ("polished" if natural else "draft"),
-                        "notes": [],
-                        "ambiguity": [],
-                    }
-                    for sid in dict.fromkeys(ids)
-                ],
+                "translations": fake_translation_entries(
+                    content, "EN", stage="polished" if natural else "draft"
+                ),
                 "carry_over": {
                     "forms_of_address": ["直呼其名"],
                     "ongoing_state": "旧案重逢后的紧张",
@@ -436,3 +413,41 @@ def test_polish_prompt_contains_project_knowledge(client: TestClient, wait_task)
     assert any("两人上一集不欢而散" in p for p in polish_prompts)
     assert any("CARRY-OVER STATE (previous window)" in p for p in polish_prompts)
     assert any("旧案重逢后的紧张" in p for p in polish_prompts)
+
+
+def test_worker_qa_failure_blocks_success(client, wait_task) -> None:
+    """Worker 路径同样必须遵守自动质量门禁：语义 QA 不可用 → 任务失败。"""
+    pid = _setup_script(client, wait_task)
+    f = FakeProvider()
+
+    def h(messages):
+        content = messages[-1]["content"]
+        system = messages[0]["content"] if messages else ""
+        if "终审 QA" in content:
+            raise RuntimeError("模拟语义 QA 不可用")
+        if "translate only these" in content or "FAITHFUL DRAFT" in content:
+            natural = "POLISH pass" in system
+            out = {
+                "window_id": "W",
+                "translations": fake_translation_entries(
+                    content, "EN", stage="polished" if natural else "draft"
+                ),
+            }
+            if natural:
+                out["carry_over"] = {
+                    "forms_of_address": [],
+                    "ongoing_state": "",
+                    "open_threads": [],
+                    "active_expressions": [],
+                }
+            return out
+        return None
+
+    set_provider(f.on(h))
+    task_id = client.post(f"/api/v1/projects/{pid}/translation/start", json={}).json()["task_id"]
+    assert _drive_worker(task_id) == "failed"
+    with dbmod.SessionLocal() as db:
+        task = db.get(Task, task_id)
+        assert "自动质检未通过" in (task.error_message or "") or "质检" in (task.error_message or "")
+        approved = db.query(Translation).filter(Translation.review_status == "approved").count()
+        assert approved == 0

@@ -16,7 +16,8 @@ def build_provider(cfg: ProviderConfig) -> OpenAICompatProvider:
         base_url=cfg.base_url,
         api_key=key,
         model=cfg.model_name,
-        max_retries=cfg.max_retries,
+        # 由用户配置决定；默认 2 次，禁止无限放大重试成本。
+        max_retries=max(0, min(int(cfg.max_retries or 0), 3)),
     )
 
 

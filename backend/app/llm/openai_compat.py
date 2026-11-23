@@ -92,6 +92,58 @@ class OpenAICompatProvider:
         thinking: str | None = "disabled",
         reasoning_effort: str | None = None,
         max_tokens: int | None = None,
+        stage: str = "llm",
+    ) -> LLMResponse:
+        """公开入口：统一记录每个阶段的真实 usage 与失败。"""
+        from app.llm.usage import record_usage
+
+        selected_model = model or self.model
+        try:
+            resp = await self._chat(
+                model=model,
+                messages=messages,
+                response_schema=response_schema,
+                temperature=temperature,
+                timeout=timeout,
+                request_id=request_id,
+                thinking=thinking,
+                reasoning_effort=reasoning_effort,
+                max_tokens=max_tokens,
+            )
+        except Exception as exc:  # noqa: BLE001 失败也记账，随后原样抛出
+            code = getattr(exc, "code", type(exc).__name__)
+            record_usage(
+                stage=stage,
+                model_name=selected_model,
+                provider_id="openai_compat",
+                success=False,
+                error_code=str(code)[:64],
+            )
+            raise
+        record_usage(
+            stage=stage,
+            model_name=selected_model,
+            provider_id=resp.provider_id,
+            usage=resp.usage,
+            cache_hit=resp.cache_hit,
+            latency_ms=resp.latency_ms,
+            finish_reason=resp.finish_reason,
+            success=True,
+        )
+        return resp
+
+    async def _chat(
+        self,
+        *,
+        model: str | None = None,
+        messages: list[dict],
+        response_schema: dict | None = None,
+        temperature: float | None = None,
+        timeout: float = 120,
+        request_id: str | None = None,
+        thinking: str | None = "disabled",
+        reasoning_effort: str | None = None,
+        max_tokens: int | None = None,
     ) -> LLMResponse:
         model = model or self.model
         # 输出预算：思考模式下 reasoning 与 content 共享 completion 预算（DeepSeek 官方语义），
@@ -157,6 +209,7 @@ class OpenAICompatProvider:
                     usage=cached.get("usage", {}),
                     finish_reason=cached.get("finish_reason"),
                     latency_ms=0.0,
+                    cache_hit=True,
                 )
 
         # 自动重试：网络抖动/超时/限流/5xx 按 max_retries 指数退避。

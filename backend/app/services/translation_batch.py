@@ -6,17 +6,24 @@ from sqlalchemy import func, select, text
 from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.orm import Session
 
+from app.llm.protocol import LLMError
 from app.llm.registry import get_provider
 from app.models.document import SourceDocument, SourceSegment
-from app.models.knowledge import KnowledgeAlias, KnowledgeItem
 from app.models.task import Task, TaskItem
 from app.models.translation import StyleGuide, Translation
-from app.services.context_builder import ContextResult, build_context
+from app.services.context_builder import ContextResult, build_context, build_qa_reference
+from app.services.context_cache import get_project_knowledge
 from app.services.importer import sha256
+from app.services.term_match import (
+    build_speaker_map,
+    build_term_records,
+    canonicalize_exact_terms,
+    forced_term_specs,
+)
 from app.services.title_service import preserved_title_for_segment
 from app.services.translation import (
-    PROMPT_VERSION, translate_window, translate_window_draft, translate_window_polish,
-    validate_window,
+    PROMPT_VERSION, localize_screenplay_marks, translate_window,
+    translate_window_draft, translate_window_polish, validate_window,
 )
 from app.services.window_planner import build_windows
 
@@ -70,82 +77,48 @@ def _load_window_context(db: Session, project_id: str, window: list[SourceSegmen
     if storyline is not None:
         storyline["id"] = story_row.id
 
-    items = [
-        {
-            "id": k.id,
-            "item_type": k.item_type,
-            "canonical_key": k.canonical_key,
-            "data": json.loads(k.data_json or "{}"),
-            "aliases": [],
-        }
-        for k in db.scalars(
-            select(KnowledgeItem).where(
-                KnowledgeItem.project_id == project_id,
-                KnowledgeItem.status.in_(["approved", "auto_approved"]),
-            )
-        )
-    ]
-    # 别名（如 允→王允、玄德→刘备）：翻译时统一为正式名
-    from app.models.knowledge import KnowledgeAlias
-
-    alias_rows = list(
-        db.scalars(
-            select(KnowledgeAlias).where(
-                KnowledgeAlias.knowledge_id.in_([i["id"] for i in items])
-            )
-        )
-    )
-    for i in items:
-        i["aliases"] = [a.alias for a in alias_rows if a.knowledge_id == i["id"]]
+    items = get_project_knowledge(db, project_id)
     return card, items, storyline
 
 
+def _approved_knowledge_entries(
+    db: Session, project_id: str, *, item_types: tuple[str, ...] = ("term", "character")
+) -> list[dict]:
+    """一次读取项目知识及别名，避免逐术语 N+1 查询。"""
+    return [
+        item for item in get_project_knowledge(db, project_id)
+        if item.get("item_type") in item_types
+    ]
+
+
 def _forced_terms_for_text(db: Session, project_id: str, text: str) -> dict[str, dict]:
-    """文本命中的强制术语（含别名）：{中文称呼: {"en": 标准译名, "variants": [...]}}。
+    """文本命中的“精确执行术语”。
 
-    同一实体的多种中文称呼（如「边缘酒吧」「荒原边缘酒吧」）全部映射到同一译名，
-    场景名/专有名词强制复用首次确定的译名，杜绝同一地点多种译名。
-    variants 声明译名合法变体（复数、时态等），词边界匹配不再误伤 werewolves。
+    只返回专名/头衔/具名实体；普通名词与情境词不会进入强制表。
+    多词形重叠时最长匹配优先，歧义别名由 term_match 自动丢弃。
     """
-    forced: dict[str, dict] = {}
-    for k in db.scalars(
-        select(KnowledgeItem).where(
-            KnowledgeItem.project_id == project_id,
-            KnowledgeItem.item_type == "term",
-            KnowledgeItem.status.in_(["approved", "auto_approved"]),
-        )
-    ):
-        data = json.loads(k.data_json or "{}")
-        translation = (data.get("translation") or "").strip()
-        if not translation or translation == k.canonical_key:
-            continue
-        variants = [
-            v.strip() for v in (data.get("variants") or [])
-            if isinstance(v, str) and v.strip()
-        ]
-        keys = [k.canonical_key]
-        for a in db.scalars(
-            select(KnowledgeAlias.alias).where(KnowledgeAlias.knowledge_id == k.id)
-        ):
-            if a and a != k.canonical_key and a not in keys:
-                keys.append(a)
-        for key in keys:
-            if key in text:
-                forced[key] = {"en": translation, "variants": variants}
-    return forced
+    entries = _approved_knowledge_entries(db, project_id, item_types=("term",))
+    records = build_term_records(entries)
+    return forced_term_specs(records, text)
 
 
-def _window_forced_terms(db: Session, project_id: str, window: list[SourceSegment]) -> dict[str, str]:
-    """窗口内命中的强制术语：{术语中文: 必须出现的英文}。"""
+def _speaker_map_for_project(db: Session, project_id: str) -> dict[str, str]:
+    """角色名 -> 英文正式名，用于译文说话人锚点校验。"""
+    entries = _approved_knowledge_entries(db, project_id, item_types=("character",))
+    return build_speaker_map(entries)
+
+
+def _window_forced_terms(db: Session, project_id: str, window: list[SourceSegment]) -> dict[str, dict]:
+    """窗口内命中的精确术语：{原文词形: {en, variants, ...}}。"""
     win_text = "".join(s.source_text for s in window)
     return _forced_terms_for_text(db, project_id, win_text)
 
 
 async def process_window_qa_item(db_factory, task_id: str, item_id: str, model: str) -> dict:
-    """独立 QA 任务节点：定点查询（确定性 QA 定位问题段）+ 定点修改（润色模型只重译问题段）。
+    """独立 QA 节点：确定性 + 语义质检 → 最多 3 轮定点修复 → 自动质量门禁。
 
-    与窗口翻译解耦：QA 打回绝不重启初翻/润色任务，本节点失败/超时也只重跑自身。
-    最多 3 轮修复；仍未修复的段标 needs_review 转人工，不再自动重译。
+    QA 未完成、无法定位严重问题或修复 3 轮仍残留严重问题时，本节点失败，
+    任务不得标记成功。修复只写问题段，不重启初翻/润色窗口。
     """
     from app.services import qa_service
     from app.services.translation import repair_segments
@@ -159,74 +132,150 @@ async def process_window_qa_item(db_factory, task_id: str, item_id: str, model: 
         window = list(db.scalars(select(SourceSegment).where(SourceSegment.id.in_(seg_ids))))
         window.sort(key=lambda s: seg_ids.index(s.id))
         project_id = task.project_id
-        # 本窗口最新 polished（QA 只检查/修改润色层，初翻不参与）
-        rows = list(
-            db.scalars(
-                select(Translation).where(
-                    Translation.segment_id.in_([s.id for s in window]),
-                    Translation.stage == "polished",
-                ).order_by(Translation.version.desc())
-            )
-        )
-        polished: dict[str, dict] = {}
+        rows = list(db.scalars(
+            select(Translation).where(
+                Translation.segment_id.in_([s.id for s in window]),
+                Translation.stage == "polished",
+            ).order_by(Translation.version.desc())
+        ))
+        source_hashes = {s.id: s.source_hash for s in window}
+        polished: dict[str, Translation] = {}
         for t in rows:
+            if t.source_hash != source_hashes.get(t.segment_id):
+                continue
+            if t.freshness_status != "current":
+                continue
             polished.setdefault(t.segment_id, t)
-        forced = _window_forced_terms(db, project_id, window)
-        draft_rows = list(
-            db.scalars(
-                select(Translation).where(
-                    Translation.segment_id.in_([s.id for s in window]),
-                    Translation.stage == "draft",
-                ).order_by(Translation.version.desc())
-            )
-        )
+        draft_rows = list(db.scalars(
+            select(Translation).where(
+                Translation.segment_id.in_([s.id for s in window]),
+                Translation.stage == "draft",
+            ).order_by(Translation.version.desc())
+        ))
         draft_latest: dict[str, Translation] = {}
         for t in draft_rows:
             draft_latest.setdefault(t.segment_id, t)
+        forced = _window_forced_terms(db, project_id, window)
+        speaker_map = _speaker_map_for_project(db, project_id)
+        _card, knowledge, storyline = _load_window_context(db, project_id, window)
+        qa_reference = build_qa_reference(
+            segments=[{
+                "segment_id": s.id,
+                "segment_type": s.segment_type,
+                "speaker_name": s.speaker_name,
+                "source_text": s.source_text,
+            } for s in window],
+            knowledge=knowledge,
+            storyline=storyline,
+        )
+
+    if len(polished) != len(window):
+        return {
+            "error": "质检缺少当前润色译文，请重跑该窗口翻译",
+            "error_code": "qa_missing_translation",
+            "retryable": False,
+        }
 
     seg_by_id = {s.id: s for s in window}
-    provider = get_provider()
-    issues_total = 0
-    repaired = 0
+    source_block = "\n".join(f"[{s.id}] {s.source_text}" for s in window)
+    target_block = "\n".join(f"[{s.id}] {polished[s.id].target_text}" for s in window)
+    semantic = await qa_service.semantic_qa(
+        get_provider(), model, source_block, target_block, reference=qa_reference
+    )
+    if not semantic.ok:
+        with db_factory() as db:
+            qa_service.replace_window_quality(
+                db, task_id, item.window_id or item.id, "blocked",
+                {
+                    "semantic_ok": False,
+                    "semantic_error": semantic.error[:500],
+                    "issues": 0,
+                    "unresolved": 0,
+                },
+            )
+            db.commit()
+        return {
+            "error": f"语义质检未完成：{semantic.error or '未知错误'}",
+            "error_code": "qa_incomplete",
+            "retryable": False,
+        }
+
+    def _resolve(issue: dict) -> str:
+        known = set(seg_by_id)
+        sid = str(issue.get("segment_id") or "")
+        if sid in known:
+            return sid
+        from app.services.term_match import normalize
+        for field in ("source_quote", "target_quote"):
+            quote = normalize(str(issue.get(field) or ""))
+            if not quote:
+                continue
+            for seg in window:
+                if quote and (quote in normalize(seg.source_text) or quote in normalize(polished[seg.id].target_text)):
+                    return seg.id
+        return ""
+
+    semantic_by_seg: dict[str, list[dict]] = {}
+    unlocated_severe = 0
+    for issue in semantic.issues:
+        sid = _resolve(issue)
+        if sid:
+            issue["segment_id"] = sid
+            semantic_by_seg.setdefault(sid, []).append(issue)
+        elif qa_service.should_repair(issue):
+            unlocated_severe += 1
+
+    det_total = 0
+    with db_factory() as db:
+        qa_service.clear_issues_for_segments(db, project_id, [s.id for s in window])
+        forced = _window_forced_terms(db, project_id, window)
+        for seg in window:
+            det = qa_service.deterministic_qa(db, seg, polished[seg.id], forced)
+            det_total += len(det)
+            all_issues = det + semantic_by_seg.get(seg.id, [])
+            if all_issues:
+                qa_service.persist_issues(db, project_id, polished[seg.id].id, all_issues)
+        db.commit()
+
+    issues_total = unlocated_severe + det_total + sum(len(v) for v in semantic_by_seg.values())
+    repaired_ids: set[str] = set()
     leftover: list[str] = []
-    for _ in range(3):
+    rounds = 0
+    for round_no in range(1, 4):
+        rounds = round_no
         with db_factory() as db:
             forced = _window_forced_terms(db, project_id, window)
             seg_fix: dict[str, list[dict]] = {}
             for seg in window:
-                tr = polished.get(seg.id)
-                if tr is None:
-                    continue
-                det = qa_service.deterministic_qa(db, seg, tr, forced)
-                need_fix = [i for i in det if qa_service.should_repair(i)]
-                if need_fix:
-                    seg_fix[seg.id] = need_fix
-                issues_total += len(det)
+                det = qa_service.deterministic_qa(db, seg, polished[seg.id], forced)
+                need = [i for i in det if qa_service.should_repair(i)]
+                if need:
+                    seg_fix[seg.id] = need
+            if round_no == 1:
+                for sid, issues in semantic_by_seg.items():
+                    need = [i for i in issues if qa_service.should_repair(i)]
+                    if need:
+                        seg_fix.setdefault(sid, []).extend(need)
         if not seg_fix:
             break
-        # 定点修改：润色模型只重译问题段（窗口其余段保持不变，初翻不参与）
         target = sorted(seg_fix)
-        context = ContextResult(
-            prompt_text=(
-                "SOURCE SEGMENTS (translate only these, one translation per segment_id):\n"
-                + "\n".join(f"[{s.id}] {s.source_text}" for s in window if s.id in target)
-            )
-        )
+        target_window = [s for s in window if s.id in target]
+        _sd, context, _sg, _card = await _window_material(db_factory, project_id, target_window, None)
         draft = [
             {"segment_id": s.id, "target_text": draft_latest[s.id].target_text}
             for s in window if s.id in target and s.id in draft_latest
         ]
         try:
             fixed_map = await repair_segments(
-                provider=provider, model=model, window_id=f"QA-{item.window_id}",
+                provider=get_provider(), model=model, window_id=f"QA-{item.window_id}",
                 context=context, draft=draft,
                 issues=[i for lst in seg_fix.values() for i in lst],
                 seg_ids=target,
             )
-        except Exception:  # noqa: BLE001 定点修复异常：保留原译文，不阻塞
+        except Exception:  # noqa: BLE001 修复失败：保留问题并阻断成功
             fixed_map = {}
         if not fixed_map:
-            leftover = [sid for sid in target]
+            leftover = target
             break
         fixed_ok: dict[str, str] = {}
         for sid in target:
@@ -235,13 +284,19 @@ async def process_window_qa_item(db_factory, task_id: str, item_id: str, model: 
             if not text or seg is None:
                 continue
             if validate_window(
-                [{"segment_id": sid, "source_text": seg.source_text}],
+                [{
+                    "segment_id": sid,
+                    "segment_type": seg.segment_type,
+                    "speaker_name": seg.speaker_name,
+                    "source_text": seg.source_text,
+                }],
                 [{"segment_id": sid, "target_text": text}],
+                speaker_map=speaker_map,
             ):
-                continue  # 校验不通过：不写库
+                continue
             fixed_ok[sid] = text
         if not fixed_ok:
-            leftover = [sid for sid in target]
+            leftover = target
             break
         with db_factory() as db:
             for sid, text in fixed_ok.items():
@@ -250,49 +305,121 @@ async def process_window_qa_item(db_factory, task_id: str, item_id: str, model: 
                     review_status="unreviewed", freshness_status="current",
                     notes_json="[]", ambiguity_json="[]",
                     model_name=model, provider_id="default",
-                    prompt_version=PROMPT_VERSION, context_snapshot_json="{}",
+                    prompt_version=PROMPT_VERSION,
+                    context_snapshot_json=json.dumps(context.snapshot, ensure_ascii=False),
                     source_hash=sha256(seg_by_id[sid].source_text),
                 )
+                polished[sid].target_text = text
             db.commit()
-        repaired += len(fixed_ok)
-        # 修复段替换进内存，供下一轮重检
-        for sid, text in fixed_ok.items():
-            t = polished.get(sid)
-            if t is not None:
-                t.target_text = text
-        # 重检修复段：仍有应修问题的进入下一轮
+        repaired_ids.update(fixed_ok)
         still_bad: list[str] = []
         with db_factory() as db:
             forced = _window_forced_terms(db, project_id, window)
             for sid in fixed_ok:
-                seg = seg_by_id[sid]
-                det = qa_service.deterministic_qa(db, seg, polished[sid], forced)
+                det = qa_service.deterministic_qa(db, seg_by_id[sid], polished[sid], forced)
                 if any(qa_service.should_repair(i) for i in det):
                     still_bad.append(sid)
-        if not still_bad:
-            break
         leftover = still_bad
-    # 超限未修复段：标 needs_review 转人工（不触发任何任务重跑）
-    if leftover:
+        if not leftover:
+            break
+
+    # 语义问题被修复后，再对修复段做一次聚焦语义复检；避免“改过但没人再看”。
+    semantic_after_ok = True
+    if repaired_ids and semantic_by_seg:
         with db_factory() as db:
-            for sid in leftover:
-                t = db.scalar(
+            latest = {
+                t.segment_id: t for t in db.scalars(
                     select(Translation).where(
-                        Translation.segment_id == sid, Translation.stage == "polished"
-                    ).order_by(Translation.version.desc()).limit(1)
+                        Translation.segment_id.in_(sorted(repaired_ids)),
+                        Translation.stage == "polished",
+                    ).order_by(Translation.version.desc())
                 )
-                if t is not None:
-                    t.review_status = "needs_review"
-            db.commit()
+            }
+            target_segs = [s for s in window if s.id in repaired_ids]
+            source_block = "\n".join(f"[{s.id}] {s.source_text}" for s in target_segs)
+            target_block = "\n".join(
+                f"[{s.id}] {latest[s.id].target_text}" for s in target_segs if s.id in latest
+            )
+        if source_block and target_block:
+            recheck = await qa_service.semantic_qa(
+                get_provider(), model, source_block, target_block, reference=qa_reference
+            )
+            if not recheck.ok:
+                semantic_after_ok = False
+            else:
+                for issue in recheck.issues:
+                    sid = str(issue.get("segment_id") or "")
+                    if sid not in repaired_ids:
+                        continue
+                    issue["segment_id"] = sid
+                    if qa_service.should_repair(issue):
+                        leftover.append(sid)
+                        with db_factory() as db:
+                            row = db.scalar(
+                                select(Translation).where(
+                                    Translation.segment_id == sid,
+                                    Translation.stage == "polished",
+                                ).order_by(Translation.version.desc()).limit(1)
+                            )
+                            if row is not None:
+                                qa_service.persist_issues(db, project_id, row.id, [issue])
+            leftover = sorted(set(leftover))
+
+    gate = "blocked" if (not semantic_after_ok or unlocated_severe) else (
+        "needs_review" if leftover else "passed"
+    )
+    with db_factory() as db:
+        latest_rows = list(db.scalars(
+            select(Translation).where(
+                Translation.segment_id.in_([s.id for s in window]),
+                Translation.stage == "polished",
+            ).order_by(Translation.version.desc())
+        ))
+        latest_ids: list[str] = []
+        seen: set[str] = set()
+        for row in latest_rows:
+            if row.segment_id not in seen:
+                seen.add(row.segment_id)
+                latest_ids.append(row.id)
+        qa_service.replace_window_quality(
+            db, task_id, item.window_id or item.id, gate,
+            {
+                "semantic_ok": semantic_after_ok,
+                "semantic_error": "" if semantic_after_ok else "语义复检未完成",
+                "issues": issues_total,
+                "unresolved": len(leftover) + unlocated_severe,
+                "rounds": rounds,
+                "translation_ids": latest_ids,
+            },
+        )
+        db.commit()
+
+    if gate != "passed":
+        return {
+            "error": (
+                "自动质检未通过：语义质检未完成"
+                if not semantic_after_ok
+                else f"自动质检未通过：{len(leftover) + unlocated_severe} 个严重问题未解决"
+            ),
+            "error_code": "quality_gate",
+            "retryable": False,
+            "qa_issues": issues_total,
+            "gate": gate,
+        }
 
     with db_factory() as db:
         item = db.get(TaskItem, item_id)
-        item.status = "succeeded"
-        item.finished_at = func.now()
-        db.commit()
-    return {"done": 1, "window_id": item.window_id, "qa_issues": issues_total,
-            "repaired": repaired}
-
+        if item is not None:
+            item.status = "succeeded"
+            item.finished_at = func.now()
+            db.commit()
+    return {
+        "done": 1,
+        "window_id": item.window_id if item else None,
+        "qa_issues": issues_total,
+        "repaired": len(repaired_ids),
+        "gate": gate,
+    }
 
 def insert_translation_row(db: Session, *, segment_id: str, **kw) -> Translation:
     """并发安全的译文插入。
@@ -450,31 +577,89 @@ async def _window_material(
     return seg_dicts, context, style_guide, _card
 
 
-async def translate_window_draft_direct(
-    db_factory, project_id: str, window: list[SourceSegment], model: str
-) -> tuple[list[dict], ContextResult]:
-    """Draft 阶段（可并发）：不依赖 carry-over。返回 (draft, draft_carry, context)。"""
-    seg_dicts, context, _sg, _card = await _window_material(db_factory, project_id, window, None)
-    draft, carry = await translate_window_draft(
-        provider=get_provider(), model=model, window_id="DRAFT", context=context,
-        source_chars=sum(len(s["source_text"]) for s in seg_dicts),
+def _merge_split_contexts(parts: list[ContextResult]) -> ContextResult:
+    """合并拆分窗口的上下文快照，保证译文可追溯。"""
+    if len(parts) == 1:
+        return parts[0]
+    snapshot: dict = {"knowledge_ids": [], "scene_card_id": None, "carry_over_hash": None}
+    for ctx in parts:
+        for key, value in (ctx.snapshot or {}).items():
+            if key == "knowledge_ids" and isinstance(value, list):
+                snapshot[key] = list(dict.fromkeys([*(snapshot.get(key) or []), *value]))
+            elif snapshot.get(key) in (None, "", [], {}):
+                snapshot[key] = value
+    return ContextResult(
+        prompt_text="\n\n".join(c.prompt_text for c in parts),
+        report={"split_window": len(parts)},
+        snapshot=snapshot,
+        total_tokens=sum(c.total_tokens for c in parts),
     )
-    return draft, carry, context
+
+
+async def translate_window_draft_direct(
+    db_factory, project_id: str, window: list[SourceSegment], model: str,
+    *, _depth: int = 0,
+) -> tuple[list[dict], dict | None, ContextResult]:
+    """Draft 阶段（可并发）；输出截断时自动拆半重跑，避免整窗永久卡死。"""
+    try:
+        seg_dicts, context, _sg, _card = await _window_material(db_factory, project_id, window, None)
+        draft, carry = await translate_window_draft(
+            provider=get_provider(), model=model, window_id="DRAFT", context=context,
+            source_chars=sum(len(s["source_text"]) for s in seg_dicts),
+        )
+        return draft, carry, context
+    except LLMError as exc:
+        if getattr(exc, "code", "") != "output_truncated" or len(window) <= 1 or _depth >= 3:
+            raise
+        mid = len(window) // 2
+        left, _left_carry, ctx_a = await translate_window_draft_direct(
+            db_factory, project_id, window[:mid], model, _depth=_depth + 1
+        )
+        right, carry, ctx_b = await translate_window_draft_direct(
+            db_factory, project_id, window[mid:], model, _depth=_depth + 1
+        )
+        return [*left, *right], carry, _merge_split_contexts([ctx_a, ctx_b])
 
 
 async def translate_window_polish_direct(
     db_factory, project_id: str, window: list[SourceSegment], draft: list[dict],
-    carry_over: dict | None, model: str,
+    carry_over: dict | None, model: str, *, _depth: int = 0,
 ) -> tuple[list[dict], dict]:
-    """Polish 阶段（串行）：carry-over 入上下文，生成 polished + 新 carry。"""
-    seg_dicts, context, _sg, _card = await _window_material(
-        db_factory, project_id, window, carry_over
-    )
-    polished, carry = await translate_window_polish(
-        provider=get_provider(), model=model, window_id="POLISH",
-        context=context, draft=draft, carry_over=carry_over, segments=seg_dicts,
-    )
-    return polished, carry
+    """Polish 阶段；输出截断时自动拆半并把左半 carry 传给右半。"""
+    try:
+        seg_dicts, context, _sg, _card = await _window_material(
+            db_factory, project_id, window, carry_over
+        )
+        polished, carry = await translate_window_polish(
+            provider=get_provider(), model=model, window_id="POLISH",
+            context=context, draft=draft, carry_over=carry_over, segments=seg_dicts,
+        )
+        # 专名大小写确定性归一（只改 exact 术语，不碰普通名词/事实/风格）。
+        with db_factory() as db:
+            forced = _window_forced_terms(db, project_id, window)
+        for entry in polished:
+            text = entry.get("target_text") or ""
+            if forced:
+                text = canonicalize_exact_terms(text, forced)
+            entry["target_text"] = localize_screenplay_marks(text)
+        return polished, carry
+    except LLMError as exc:
+        if getattr(exc, "code", "") != "output_truncated" or len(window) <= 1 or _depth >= 3:
+            raise
+        mid = len(window) // 2
+        left_window, right_window = window[:mid], window[mid:]
+        left_ids = {s.id for s in left_window}
+        left_draft = [e for e in draft if e.get("segment_id") in left_ids]
+        right_draft = [e for e in draft if e.get("segment_id") not in left_ids]
+        left, middle_carry = await translate_window_polish_direct(
+            db_factory, project_id, left_window, left_draft, carry_over, model,
+            _depth=_depth + 1,
+        )
+        right, carry = await translate_window_polish_direct(
+            db_factory, project_id, right_window, right_draft, middle_carry, model,
+            _depth=_depth + 1,
+        )
+        return [*left, *right], carry
 
 
 async def process_window_draft_item(db_factory, task_id: str, item_id: str, model: str) -> dict:
@@ -488,18 +673,22 @@ async def process_window_draft_item(db_factory, task_id: str, item_id: str, mode
         window = list(db.scalars(select(SourceSegment).where(SourceSegment.id.in_(seg_ids))))
         window.sort(key=lambda s: seg_ids.index(s.id))
         project_id = task.project_id
+        speaker_map = _speaker_map_for_project(db, project_id)
 
     draft, carry, context = await translate_window_draft_direct(db_factory, project_id, window, model)
     errors = validate_window(
         [
             {
                 "segment_id": s.id,
+                "segment_type": s.segment_type,
+                "speaker_name": s.speaker_name,
                 "source_text": s.source_text,
                 "line_count_optional": bool(preserved_title_for_segment(s)),
             }
             for s in window
         ],
         draft,
+        speaker_map=speaker_map,
     )
     if errors:
         # 段缺失/顺序错位/重复：拒绝按序回填（历史串段根因），整窗重试
@@ -526,6 +715,7 @@ async def process_window_polish_item(db_factory, task_id: str, item_id: str, mod
         window.sort(key=lambda s: seg_ids.index(s.id))
         progress = json.loads(task.progress_json or "{}")
         project_id = task.project_id
+        speaker_map = _speaker_map_for_project(db, project_id)
         # carry-over 前置：取前一窗口 Draft 生成的 carry（Polish 并发的前提）；
         # 旧任务无 draft carry 时回退 polish 输出链（串行兼容）。
         win_idx = int(item.window_id.split("_")[1])
@@ -547,10 +737,19 @@ async def process_window_polish_item(db_factory, task_id: str, item_id: str, mod
             )
         )
         latest_draft: dict[str, Translation] = {}
+        source_hashes = {s.id: s.source_hash for s in window}
         for t in draft_rows:
+            if t.source_hash != source_hashes.get(t.segment_id):
+                continue
+            if t.freshness_status != "current":
+                continue
             latest_draft.setdefault(t.segment_id, t)
         if len(latest_draft) != len(window):
-            return {"error": "draft 缺失，窗口需重新执行 draft 阶段"}
+            return {
+                "error": "draft 缺失，窗口需重新执行 draft 阶段",
+                "error_code": "draft_missing",
+                "retryable": False,
+            }
         draft = [
             {"segment_id": s.id, "target_text": latest_draft[s.id].target_text,
              "notes": json.loads(latest_draft[s.id].notes_json or "[]"),
@@ -569,9 +768,14 @@ async def process_window_polish_item(db_factory, task_id: str, item_id: str, mod
             for s in window
         ],
         polished,
+        speaker_map=speaker_map,
     )
     if errors:
-        return {"error": "; ".join(errors)}
+        return {
+            "error": "; ".join(errors),
+            "error_code": "window_validation",
+            "retryable": False,
+        }
 
     # polished 整窗先落库一次（QA 定点修复由独立 QA 节点追加新版本）
     seg_dicts, context, _sg, _card = await _window_material(
