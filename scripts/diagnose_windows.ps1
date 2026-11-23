@@ -96,7 +96,8 @@ if ($lockPath) {
   Write-Host "数据目录：未找到 backend.lock，后端可能从未成功启动"
 }
 
-$checkLog = Join-Path $TEMP "mangatrans-install-check.log"
+$tempDir = if ($env:TEMP) { $env:TEMP } else { [System.IO.Path]::GetTempPath() }
+$checkLog = Join-Path $tempDir "mangatrans-install-check.log"
 Write-Host "安装自检日志：$checkLog"
 if (Test-Path $checkLog) { Get-Content $checkLog -Raw | Write-Host }
 

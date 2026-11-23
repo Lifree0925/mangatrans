@@ -22,7 +22,7 @@ $workDir = Join-Path $tempRoot ("mangatrans-installer-smoke-" + [guid]::NewGuid(
 $dataDir = Join-Path $workDir "data"
 $installerLog = Join-Path $workDir "installer.log"
 $archiveLog = Join-Path $workDir "archive.log"
-$selfCheckLog = Join-Path $TEMP "mangatrans-install-check.log"
+$selfCheckLog = Join-Path $tempRoot "mangatrans-install-check.log"
 New-Item -ItemType Directory -Force -Path $workDir, $dataDir | Out-Null
 
 function Get-SidecarLogTail {
