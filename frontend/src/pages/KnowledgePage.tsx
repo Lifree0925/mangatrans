@@ -1,12 +1,13 @@
 /** 知识库：角色档案（性格/说话方式）与章节剧情卡（情节/伏笔）。修改均通过浮层完成。 */
 
 import { startTransition, useEffect, useRef, useState } from "react";
+import { Link, useParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Check, ChevronLeft, ChevronRight, Pencil, Plus, Trash2, X } from "lucide-react";
 import { api } from "../lib/api";
 import { chapterLabel, characterDisplayName } from "../lib/format";
 import { confirmAction, toast } from "../lib/feedback";
-import type { ChapterStoryline, DialogueLineInfo, DialogueLinesResponse, KnowledgeEntry, Project } from "../lib/types";
+import type { ChapterStoryline, DialogueLineInfo, DialogueLinesResponse, DocInfo, KnowledgeEntry, Project } from "../lib/types";
 
 type StoryCard = {
   summary: string;
@@ -25,9 +26,8 @@ const STORY_FIELDS = [
 
 export default function KnowledgePage() {
   const qc = useQueryClient();
-  const [projectId, setProjectId] = useState<string | null>(
-    () => localStorage.getItem("mt-knowledge-project") || null
-  );
+  // 项目由路由显式指定（/knowledge/:projectId），不再使用下拉切换
+  const { projectId } = useParams<{ projectId: string }>();
   const [tab, setTab] = useState<"profiles" | "storylines" | "dialogue">("profiles");
   const [adding, setAdding] = useState(false);
   const [addForm, setAddForm] = useState({ canonical_key: "", translation: "" });
@@ -59,15 +59,20 @@ export default function KnowledgePage() {
   const [storyActiveChapter, setStoryActiveChapter] = useState<string | null>(null);
   const storyBodyRef = useRef<HTMLDivElement | null>(null);
 
-  const projects = useQuery({ queryKey: ["projects"], queryFn: () => api<Project[]>("/projects") });
-  // 默认不展示内容：未选择项目时显示"请选择项目"
-  const active = projectId;
-
-  const chooseProject = (id: string) => {
-    setProjectId(id || null);
-    if (id) localStorage.setItem("mt-knowledge-project", id);
-    else localStorage.removeItem("mt-knowledge-project");
-  };
+  const active = projectId ?? null;
+  const project = useQuery({
+    queryKey: ["project", active],
+    queryFn: () => api<Project>(`/projects/${active}`),
+    enabled: !!active,
+  });
+  const documents = useQuery({
+    queryKey: ["documents", active],
+    queryFn: () => api<DocInfo[]>(`/projects/${active}/documents`),
+    enabled: !!active,
+    staleTime: 60_000,
+  });
+  const currentDoc =
+    documents.data?.find((d) => d.status === "active") ?? documents.data?.[0];
 
   const characters = useQuery({
     queryKey: ["knowledge", active],
@@ -263,18 +268,24 @@ export default function KnowledgePage() {
 
   return (
     <div className="flex h-full flex-col">
-      <div className="flex items-center gap-3 border-b border-(--color-border) px-6 py-4">
-        <h1 className="text-lg font-semibold">知识库</h1>
-        <select
-          value={active ?? ""}
-          onChange={(e) => chooseProject(e.target.value)}
-          className="rounded-lg border border-(--color-border) bg-(--color-bg) px-2 py-1 text-sm outline-none focus:border-(--color-accent)"
+      <div className="flex items-center gap-2 border-b border-(--color-border) px-6 py-4">
+        <Link
+          to="/knowledge"
+          title="返回知识库"
+          className="rounded-lg p-1.5 text-(--color-muted) transition-colors hover:bg-(--color-panel2) hover:text-(--color-text)"
         >
-          <option value="">请选择项目</option>
-          {(projects.data ?? []).map((p) => (
-            <option key={p.id} value={p.id}>{p.name}</option>
-          ))}
-        </select>
+          <ChevronLeft size={18} />
+        </Link>
+        <h1 className="text-lg font-semibold">知识库</h1>
+        <span className="text-(--color-muted)">/</span>
+        <span className="max-w-[200px] truncate text-sm font-medium">
+          {project.data?.name ?? "…"}
+        </span>
+        {currentDoc && (
+          <span className="max-w-[220px] truncate text-xs text-(--color-muted)">
+            {currentDoc.filename}
+          </span>
+        )}
         <div className="ml-2 flex items-center gap-1.5">
           <button
             onClick={() => setTab("profiles")}

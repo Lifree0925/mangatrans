@@ -129,6 +129,7 @@ def create_app() -> FastAPI:
 
     app.include_router(projects.router, prefix="/api/v1")
     app.include_router(documents.router, prefix="/api/v1")
+    app.include_router(knowledge.overview_router, prefix="/api/v1")
     app.include_router(knowledge.router, prefix="/api/v1")
     app.include_router(translation.router, prefix="/api/v1")
     app.include_router(qa.router, prefix="/api/v1")

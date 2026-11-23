@@ -42,6 +42,12 @@
     },
     "externalBin": [
       "binaries/mangatrans-backend"
-    ]
+    ],
+    "windows": {
+      "nsis": {
+        "installerIcon": "icons/icon.ico",
+        "uninstallerIcon": "icons/icon.ico"
+      }
+    }
   }
 }

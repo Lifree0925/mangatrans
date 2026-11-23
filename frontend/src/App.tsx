@@ -18,6 +18,7 @@ import { APP_VERSION } from "./lib/version";
 import ProjectsPage from "./pages/ProjectsPage";
 import ProjectPage from "./pages/ProjectPage";
 import KnowledgePage from "./pages/KnowledgePage";
+import KnowledgeOverviewPage from "./pages/KnowledgeOverviewPage";
 import TasksPage from "./pages/TasksPage";
 import SettingsPage from "./pages/SettingsPage";
 
@@ -93,7 +94,8 @@ export default function App() {
         <Routes>
           <Route path="/" element={<ProjectsPage />} />
           <Route path="/projects/:id" element={<ProjectPage />} />
-          <Route path="/knowledge" element={<KnowledgePage />} />
+          <Route path="/knowledge" element={<KnowledgeOverviewPage />} />
+          <Route path="/knowledge/:projectId" element={<KnowledgePage />} />
           <Route path="/tasks" element={<TasksPage />} />
           <Route path="/settings" element={<SettingsPage />} />
         </Routes>

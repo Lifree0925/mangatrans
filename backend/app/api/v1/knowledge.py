@@ -1,18 +1,70 @@
 """知识、场景卡与提取任务 API。"""
 
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy import select
+from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
+from app.models.dialogue import DialogueLine
 from app.models.document import Chapter, SourceDocument
-from app.models.knowledge import KnowledgeItem
+from app.models.knowledge import KnowledgeAlias, KnowledgeEvidence, KnowledgeItem, SceneContextCard
 from app.models.project import Project
+from app.models.storyline import ChapterStoryline
 from app.services.provider_service import default_model_name
 from app.pipeline.runner import create_task, launch
 from app.schemas.knowledge import KnowledgeOut
 
 router = APIRouter(prefix="/projects/{project_id}", tags=["knowledge"])
+overview_router = APIRouter(tags=["knowledge"])
+
+
+@overview_router.get("/knowledge/overview")
+def knowledge_overview(db: Session = Depends(get_db)) -> dict:
+    """知识库总览：仅列出已有知识库数据的项目（一键直出后自动出现）。"""
+    projects = list(db.scalars(select(Project).order_by(Project.updated_at.desc())))
+
+    kind_counts: dict[str, dict[str, int]] = {}
+    for pid, item_type, n in db.execute(
+        select(KnowledgeItem.project_id, KnowledgeItem.item_type, func.count())
+        .group_by(KnowledgeItem.project_id, KnowledgeItem.item_type)
+    ).all():
+        kind_counts.setdefault(pid, {})[item_type or ""] = int(n)
+
+    story_counts = {
+        pid: int(n)
+        for pid, n in db.execute(
+            select(ChapterStoryline.project_id, func.count())
+            .group_by(ChapterStoryline.project_id)
+        ).all()
+    }
+    line_counts = {
+        pid: int(n)
+        for pid, n in db.execute(
+            select(DialogueLine.project_id, func.count()).group_by(DialogueLine.project_id)
+        ).all()
+    }
+    docs = {d.id: d for d in db.scalars(select(SourceDocument))}
+
+    items = []
+    for p in projects:
+        counts = kind_counts.get(p.id, {})
+        storylines = story_counts.get(p.id, 0)
+        dialogue = line_counts.get(p.id, 0)
+        if not counts and not storylines and not dialogue:
+            continue  # 无知识库数据的项目不显示（入口自动生成）
+        doc = docs.get(p.active_source_document_id) if p.active_source_document_id else None
+        items.append({
+            "project_id": p.id,
+            "project_name": p.name,
+            "filename": doc.filename if doc else None,
+            "characters": counts.get("character", 0),
+            "terms": counts.get("term", 0),
+            "rules": counts.get("rule", 0),
+            "storylines": storylines,
+            "dialogue_lines": dialogue,
+            "updated_at": p.updated_at.isoformat() if p.updated_at else None,
+        })
+    return {"items": items}
 
 
 def _project(db: Session, project_id: str) -> Project:
@@ -177,6 +229,23 @@ def delete_knowledge(project_id: str, item_id: str, db: Session = Depends(get_db
     db.execute(delete(KnowledgeAlias).where(KnowledgeAlias.knowledge_id == item_id))
     db.execute(delete(KnowledgeEvidence).where(KnowledgeEvidence.knowledge_id == item_id))
     db.delete(item)
+    db.commit()
+
+
+@router.delete("/knowledge", status_code=204)
+def delete_all_knowledge(project_id: str, db: Session = Depends(get_db)) -> None:
+    """硬删除项目全部知识库数据（角色/术语/规则、别名/证据、场景卡、章节剧情、台词本）。
+
+    保留项目、原文、译文与任务记录；重新一键直出可再次生成。
+    """
+    _project(db, project_id)
+    item_ids = select(KnowledgeItem.id).where(KnowledgeItem.project_id == project_id)
+    db.execute(delete(KnowledgeEvidence).where(KnowledgeEvidence.knowledge_id.in_(item_ids)))
+    db.execute(delete(KnowledgeAlias).where(KnowledgeAlias.knowledge_id.in_(item_ids)))
+    db.execute(delete(KnowledgeItem).where(KnowledgeItem.project_id == project_id))
+    db.execute(delete(SceneContextCard).where(SceneContextCard.project_id == project_id))
+    db.execute(delete(ChapterStoryline).where(ChapterStoryline.project_id == project_id))
+    db.execute(delete(DialogueLine).where(DialogueLine.project_id == project_id))
     db.commit()
 
 

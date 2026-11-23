@@ -2,7 +2,7 @@
 
 import { startTransition, useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { ArrowLeft, Check, ChevronLeft, ChevronRight, Download, FileUp, Loader2, Pencil, X, Zap } from "lucide-react";
+import { ArrowLeft, BookOpen, Check, ChevronLeft, ChevronRight, Download, FileUp, Loader2, Pencil, X, Zap } from "lucide-react";
 import { Link, useParams } from "react-router-dom";
 import { api } from "../lib/api";
 import { chapterLabel } from "../lib/format";
@@ -375,6 +375,14 @@ export default function ProjectPage() {
 
           {/* 3. 检查与交付 */}
           <span className="mx-1 h-5 w-px bg-(--color-border)" />
+
+          <Link
+            to={`/knowledge/${id}`}
+            title="查看项目知识库"
+            className="flex items-center gap-1.5 rounded-lg border border-(--color-border) bg-(--color-bg) px-3 py-1.5 text-sm text-(--color-muted) hover:bg-(--color-panel2) hover:text-(--color-text)"
+          >
+            <BookOpen size={15} /> 知识库
+          </Link>
 
           <button
             onClick={() => setExportOpen(true)}
