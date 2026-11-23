@@ -26,9 +26,9 @@ if _LOCK_FD is None:
     from app.core.single_instance import existing_instance_alive
 
     if existing_instance_alive():
-        print("backend: 已有后端实例在运行，本进程退出", flush=True)
+        print("backend: existing instance is running; this process exits", flush=True)
         sys.exit(0)
-    print("backend: 单实例锁不可用（锁文件异常），继续启动以保证软件可用", flush=True)
+    print("backend: single-instance lock unavailable; continuing startup", flush=True)
 
 ALLOWED_ORIGINS = [
     "http://localhost:5173",
@@ -97,7 +97,7 @@ async def lifespan(_app: FastAPI):
         # 进程重启后无正在执行的窗口：全部 running 项回 pending，Worker 立即续跑
         recovered = recover_all_running(db)
         if recovered:
-            print(f"回收上次进程残留的 {recovered} 个执行中窗口，Worker 将续跑")
+            print(f"backend: recovered {recovered} running windows; worker will resume", flush=True)
 
     worker_task = asyncio.create_task(worker_loop())
     try:

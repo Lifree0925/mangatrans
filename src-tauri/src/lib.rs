@@ -354,7 +354,11 @@ pub fn run() {
                 .env("MT_PORT", port.to_string())
                 .env("MT_AUTH_TOKEN", &token)
                 .env("MT_DATA_DIR", data_dir.to_str().unwrap_or_default())
-                .env("MT_MIGRATE_ON_START", "1");
+                .env("MT_MIGRATE_ON_START", "1")
+                // Windows 管道默认可能是 cp1252，Python 中文日志会直接抛 UnicodeEncodeError。
+                // 强制 UTF-8，保证任何后端诊断输出都不会中断启动/退出流程。
+                .env("PYTHONIOENCODING", "utf-8")
+                .env("PYTHONUTF8", "1");
 
             // sidecar 启动失败时不崩溃：记录日志，窗口照常显示，由前端提示错误
             let child = match sidecar.spawn() {
