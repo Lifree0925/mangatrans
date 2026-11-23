@@ -1,36 +1,75 @@
 # Python
 __pycache__/
-*.pyc
+*.py[cod]
+*$py.class
 backend/.venv/
+backend/.venv-build/
 .pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
 *.egg-info/
+backend/build/
+backend/dist/
 
-# Node
+# Node / 前端构建
+node_modules/
 frontend/node_modules/
 frontend/dist/
+frontend/.vite/
+frontend/coverage/
+frontend/playwright-report/
+frontend/test-results/
+*.tsbuildinfo
 
-# Rust
+# Rust / Tauri 构建
 src-tauri/target/
 src-tauri/gen/
+src-tauri/tauri-build.log
+src-tauri/binaries/*
+!src-tauri/binaries/mangatrans-backend-x86_64-unknown-linux-gnu
 
-# 数据与日志（用户数据不入库）
+# 数据与运行日志（用户数据不入库）
 data/
 *.sqlite
 *.sqlite-wal
 *.sqlite-shm
+*.db
+*.db-wal
+*.db-shm
 logs/
+*.log
+*.pid
 
-# 环境
+# 本地环境与敏感文件
 .env
 .env.local
 *.bak
-backend/dist/
-backend/.venv-build/
-frontend/.vite/
-
-# PyInstaller 构建产物
-backend/build/
-backend/dist/
+*.pfx
+*.p12
+*.cer
+*.key
+*.pem
+*.crt
+config.local.json
 
 # 本地开发文档（不入库）
 docs/
+
+# 构建安装包 / 下载产物
+*.exe
+*.msi
+*.msix
+*.zip
+*.AppImage
+*.deb
+*.rpm
+
+# 编辑器 / 系统文件
+.DS_Store
+Thumbs.db
+desktop.ini
+.idea/
+.vscode/
