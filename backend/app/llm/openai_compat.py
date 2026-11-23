@@ -18,6 +18,41 @@ from app.llm.protocol import (
 )
 
 
+_CONTEXT_LENGTH_MARKERS = (
+    "context length",
+    "context_length",
+    "context window",
+    "context limit",
+    "maximum context",
+    "too many tokens",
+    "token limit",
+    "prompt is too long",
+    "input is too long",
+    "reduce the length",
+    "max_tokens",
+    "上下文长度",
+    "超出上下文",
+    "请求过长",
+)
+
+
+def _response_detail(response) -> str:
+    """提取服务商错误正文（截断），用于把 400 从笼统 bad_request 中细分。"""
+    try:
+        text = response.text or ""
+    except Exception:  # noqa: BLE001 正文不可读不影响错误分类
+        return ""
+    return " ".join(str(text).split())[:400]
+
+
+def _is_context_length_error(status_code: int, detail: str) -> bool:
+    """识别上下文/输出预算超限；413 一律按请求体过大处理。"""
+    if status_code == 413:
+        return True
+    lowered = detail.lower()
+    return any(marker in lowered for marker in _CONTEXT_LENGTH_MARKERS)
+
+
 class _LLMCache:
     """进程级 + 文件持久化的 LLM 响应缓存（重复/重试调用零成本复用）。
 
@@ -226,6 +261,15 @@ class OpenAICompatProvider:
                     # 本地模型（Ollama/vLLM 等）可能不支持 thinking / response_format：
                     # 逐级降级后在同一连接内重试一次（不能移出 with 块，client 已关闭）
                     if r.status_code == 400:
+                        detail = _response_detail(r)
+                        # 上下文/输出预算超限不是参数兼容问题，降级 thinking 也不会恢复；
+                        # 直接抛出专用错误，让窗口层拆窗或压缩上下文。
+                        if _is_context_length_error(r.status_code, detail):
+                            raise LLMError(
+                                f"模型上下文或输出预算超限: {detail[:240]}",
+                                retryable=False,
+                                code="context_length",
+                            )
                         if "thinking" in body:
                             body.pop("thinking", None)
                             body.pop("reasoning_effort", None)
@@ -252,9 +296,23 @@ class OpenAICompatProvider:
                 raise LLMError("认证失败", retryable=False, code="auth")
             if r.status_code == 404:
                 raise LLMError("模型不存在", retryable=False, code="model_not_found")
+            detail = _response_detail(r)
+            if r.status_code in (400, 413, 422) and _is_context_length_error(
+                r.status_code, detail
+            ):
+                # 上下文超限 / 请求体过大：重试同一请求无意义，交由窗口层拆窗。
+                raise LLMError(
+                    f"模型上下文或输出预算超限: {detail[:240]}",
+                    retryable=False,
+                    code="context_length",
+                )
             if r.status_code == 400:
                 # 请求本身有误（含降级后仍被拒）：重试无意义
-                raise LLMError(f"请求被拒绝 {r.status_code}", retryable=False, code="bad_request")
+                raise LLMError(
+                    f"请求被拒绝 {r.status_code}: {detail[:240]}",
+                    retryable=False,
+                    code="bad_request",
+                )
             if r.status_code == 429:
                 last_err = LLMError("限流", retryable=True, code="rate_limit")
             elif r.status_code >= 500:

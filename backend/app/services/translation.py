@@ -12,6 +12,7 @@ from pydantic import BaseModel, Field, ValidationError
 from app.llm.protocol import LLMError, LLMProvider
 from app.services.context_builder import ContextResult
 from app.services.term_match import expected_speakers, normalize
+from app.utils.token_budget import estimate_tokens
 
 PROMPT_VERSION = "v2"
 
@@ -280,6 +281,21 @@ async def translate_window_draft(
     )
 
 
+def draft_prompt_block(draft: list[dict]) -> str:
+    """Polish 只消费 Draft 的事实文本；去掉 notes/ambiguity 等无关字段压缩上下文。"""
+    compact = [
+        {
+            "segment_id": entry.get("segment_id", ""),
+            "target_text": entry.get("target_text", ""),
+        }
+        for entry in draft
+        if entry.get("segment_id")
+    ]
+    return "\n\n[FAITHFUL DRAFT]\n" + json.dumps(
+        compact, ensure_ascii=False, separators=(",", ":")
+    )
+
+
 async def translate_window_polish(
     *,
     provider: LLMProvider,
@@ -289,13 +305,14 @@ async def translate_window_polish(
     draft: list[dict],
     carry_over: dict | None,
     segments: list[dict] | None = None,
+    force_no_thinking: bool = False,
 ) -> tuple[list[dict], dict]:
     """Polish 阶段：情境自然化 + carry-over 生成；单窗口内串行。"""
-    draft_block = "\n\n[FAITHFUL DRAFT]\n" + json.dumps(draft, ensure_ascii=False, indent=2)
+    draft_block = draft_prompt_block(draft)
     # 思考模式：思维链与译文共享 completion 预算，max_tokens 给足（32K，provider 层默认）；
     # 超大窗口关思考翻译，译文预算 8K 兜底，先保证不截断（历史 finish_reason=length 根因）
     src_chars = sum(len(s.get("source_text", "")) for s in (segments or []))
-    use_thinking = _should_think_for_window(src_chars)
+    use_thinking = _should_think_for_window(src_chars) and not force_no_thinking
     polish = await _chat_json_validate(
         provider, model, POLISH_SYSTEM, context.prompt_text + draft_block,
         PolishOutput.model_json_schema(), PolishOutput,
@@ -512,8 +529,8 @@ def validate_window(
             errors.append(f"多余 segment: {sorted(extra)[:5]}")
         if dup:
             errors.append(f"重复 segment: {sorted(set(dup))[:5]}")
-    if not errors and got != expect:
-        errors.append("segment 顺序与原文不一致")
+    # 输出数组顺序不参与结构校验：落库严格按 segment_id 映射，
+    # 顺序不同不会写错段；旧校验会让「内容全对但顺序不同」的窗口永久失败。
     for t in translations:
         if not t.get("target_text", "").strip():
             errors.append(f"空译文: {t.get('segment_id')}")
@@ -645,9 +662,16 @@ async def repair_segments(
         "\n\nYou are REPAIRING only the listed segments flagged by QA. "
         "Fix every issue for those segments while keeping their facts identical to the draft."
     )
+    # 修复通常只涉及少量问题段：给够译文与思考预算，但不固定申请 32K，
+    # 避免小上下文模型因 prompt + max_tokens 超过上限而永久失败。
+    repair_budget = min(
+        16384,
+        max(8192, estimate_tokens(json.dumps(sub_draft, ensure_ascii=False)) * 2 + 2000),
+    )
     out = await _chat_json_validate(
         provider, model, system, user, RepairOutput.model_json_schema(), RepairOutput,
-        thinking="enabled", reasoning_effort="low", max_tokens=None, stage="repair",
+        thinking="enabled", reasoning_effort="low", max_tokens=repair_budget,
+        stage="repair",
     )
     return {
         e.segment_id: localize_screenplay_marks(e.target_text)

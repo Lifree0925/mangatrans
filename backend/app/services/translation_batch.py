@@ -22,10 +22,12 @@ from app.services.term_match import (
 )
 from app.services.title_service import preserved_title_for_segment
 from app.services.translation import (
-    PROMPT_VERSION, localize_screenplay_marks, translate_window,
+    PROMPT_VERSION, draft_prompt_block, localize_screenplay_marks,
+    locate_problem_segments, repair_segments, translate_window,
     translate_window_draft, translate_window_polish, validate_window,
 )
 from app.services.window_planner import build_windows
+from app.utils.token_budget import estimate_tokens
 
 
 def expand_translation_task(
@@ -543,7 +545,8 @@ def _persist_window_translations(
 
 
 async def _window_material(
-    db_factory, project_id: str, window: list[SourceSegment], carry_over: dict | None
+    db_factory, project_id: str, window: list[SourceSegment], carry_over: dict | None,
+    *, reserved_tokens: int = 0,
 ) -> tuple[list[dict], ContextResult, dict | None, dict | None]:
     """窗口公共材料：segment dicts、style guide、场景卡/知识/剧情卡、context。"""
     with db_factory() as db:
@@ -573,6 +576,7 @@ async def _window_material(
         style_guide=style_guide,
         carry_over=carry_over,
         storyline=storyline,
+        reserved_tokens=reserved_tokens,
     )
     return seg_dicts, context, style_guide, _card
 
@@ -596,11 +600,38 @@ def _merge_split_contexts(parts: list[ContextResult]) -> ContextResult:
     )
 
 
+_WINDOW_SPLIT_CODES = {"output_truncated", "context_length"}
+
+
+async def _canonicalize_polished_terms(db_factory, project_id, window, polished):
+    """专名大小写确定性归一（只改 exact 术语，不碰普通名词/事实/风格）。"""
+    with db_factory() as db:
+        forced = _window_forced_terms(db, project_id, window)
+    for entry in polished:
+        text = entry.get("target_text") or ""
+        if forced:
+            text = canonicalize_exact_terms(text, forced)
+        entry["target_text"] = localize_screenplay_marks(text)
+    return polished
+
+
+def _minimal_context(seg_dicts: list[dict]) -> ContextResult:
+    """上下文超限时的单段兜底：只保留原文，不带知识库/剧情/carry。"""
+    return build_context(
+        segments=seg_dicts,
+        scene_card=None,
+        knowledge=[],
+        style_guide=None,
+        carry_over=None,
+        budget=max(1200, estimate_tokens(seg_dicts[0].get("source_text", "")) + 400),
+    )
+
+
 async def translate_window_draft_direct(
     db_factory, project_id: str, window: list[SourceSegment], model: str,
     *, _depth: int = 0,
 ) -> tuple[list[dict], dict | None, ContextResult]:
-    """Draft 阶段（可并发）；输出截断时自动拆半重跑，避免整窗永久卡死。"""
+    """Draft 阶段（可并发）；截断/上下文超限时自动拆半，避免整窗永久卡死。"""
     try:
         seg_dicts, context, _sg, _card = await _window_material(db_factory, project_id, window, None)
         draft, carry = await translate_window_draft(
@@ -609,7 +640,29 @@ async def translate_window_draft_direct(
         )
         return draft, carry, context
     except LLMError as exc:
-        if getattr(exc, "code", "") != "output_truncated" or len(window) <= 1 or _depth >= 3:
+        code = getattr(exc, "code", "")
+        if code not in _WINDOW_SPLIT_CODES:
+            raise
+        if len(window) <= 1 and code == "context_length":
+            seg_dicts = [
+                {
+                    "segment_id": s.id,
+                    "segment_no": s.segment_no,
+                    "segment_type": s.segment_type,
+                    "speaker_name": s.speaker_name,
+                    "source_text": s.source_text,
+                    "line_count_optional": bool(preserved_title_for_segment(s)),
+                }
+                for s in window
+            ]
+            context = _minimal_context(seg_dicts)
+            draft, carry = await translate_window_draft(
+                provider=get_provider(), model=model, window_id="DRAFT-MIN",
+                context=context,
+                source_chars=sum(len(s["source_text"]) for s in seg_dicts),
+            )
+            return draft, carry, context
+        if len(window) <= 1 or _depth >= 3:
             raise
         mid = len(window) // 2
         left, _left_carry, ctx_a = await translate_window_draft_direct(
@@ -625,26 +678,57 @@ async def translate_window_polish_direct(
     db_factory, project_id: str, window: list[SourceSegment], draft: list[dict],
     carry_over: dict | None, model: str, *, _depth: int = 0,
 ) -> tuple[list[dict], dict]:
-    """Polish 阶段；输出截断时自动拆半并把左半 carry 传给右半。"""
+    """Polish 阶段；截断/上下文超限时自动拆半，并把左半 carry 传给右半。"""
     try:
+        # Draft 块在 context.prompt_text 之外追加，构建上下文时必须先预留其预算。
+        reserved = estimate_tokens(draft_prompt_block(draft))
         seg_dicts, context, _sg, _card = await _window_material(
-            db_factory, project_id, window, carry_over
+            db_factory, project_id, window, carry_over, reserved_tokens=reserved
         )
         polished, carry = await translate_window_polish(
             provider=get_provider(), model=model, window_id="POLISH",
             context=context, draft=draft, carry_over=carry_over, segments=seg_dicts,
         )
-        # 专名大小写确定性归一（只改 exact 术语，不碰普通名词/事实/风格）。
-        with db_factory() as db:
-            forced = _window_forced_terms(db, project_id, window)
-        for entry in polished:
-            text = entry.get("target_text") or ""
-            if forced:
-                text = canonicalize_exact_terms(text, forced)
-            entry["target_text"] = localize_screenplay_marks(text)
-        return polished, carry
+        return await _canonicalize_polished_terms(db_factory, project_id, window, polished), carry
     except LLMError as exc:
-        if getattr(exc, "code", "") != "output_truncated" or len(window) <= 1 or _depth >= 3:
+        code = getattr(exc, "code", "")
+        if code not in _WINDOW_SPLIT_CODES:
+            raise
+        if len(window) <= 1:
+            # 单段窗口不能再拆：去掉知识库/剧情/carry 并关闭思考，优先保证完成。
+            if code != "context_length":
+                raise
+            seg_dicts = [
+                {
+                    "segment_id": s.id,
+                    "segment_no": s.segment_no,
+                    "segment_type": s.segment_type,
+                    "speaker_name": s.speaker_name,
+                    "source_text": s.source_text,
+                    "line_count_optional": bool(preserved_title_for_segment(s)),
+                }
+                for s in window
+            ]
+            context = _minimal_context(seg_dicts)
+            try:
+                polished, carry = await translate_window_polish(
+                    provider=get_provider(), model=model, window_id="POLISH-MIN",
+                    context=context, draft=draft, carry_over=None, segments=seg_dicts,
+                    force_no_thinking=True,
+                )
+            except LLMError as retry_exc:
+                if getattr(retry_exc, "code", "") == "context_length":
+                    raise LLMError(
+                        "最后窗口仅剩单段仍超出模型上下文；请缩短该段原文或更换更大上下文的模型",
+                        retryable=False,
+                        code="context_length_single_segment",
+                    ) from retry_exc
+                raise
+            return (
+                await _canonicalize_polished_terms(db_factory, project_id, window, polished),
+                carry,
+            )
+        if _depth >= 3:
             raise
         mid = len(window) // 2
         left_window, right_window = window[:mid], window[mid:]
@@ -760,16 +844,39 @@ async def process_window_polish_item(db_factory, task_id: str, item_id: str, mod
     polished, carry = await translate_window_polish_direct(
         db_factory, project_id, window, draft, carry_over, model
     )
-    errors = validate_window(
-        [
-            {"segment_id": s.id, "segment_no": s.segment_no, "segment_type": s.segment_type,
-             "speaker_name": s.speaker_name, "source_text": s.source_text,
-             "line_count_optional": bool(preserved_title_for_segment(s))}
-            for s in window
-        ],
-        polished,
-        speaker_map=speaker_map,
-    )
+    seg_dicts = [
+        {"segment_id": s.id, "segment_no": s.segment_no, "segment_type": s.segment_type,
+         "speaker_name": s.speaker_name, "source_text": s.source_text,
+         "line_count_optional": bool(preserved_title_for_segment(s))}
+        for s in window
+    ]
+    errors = validate_window(seg_dicts, polished, speaker_map=speaker_map)
+    if errors:
+        # 与 Express 一致：只重译问题段，不整窗重做；修复后仍不合格才失败。
+        bad_ids = locate_problem_segments(seg_dicts, polished, speaker_map=speaker_map)
+        if bad_ids:
+            try:
+                _sd, repair_ctx, _sg, _card = await _window_material(
+                    db_factory, project_id, window, carry_over,
+                    reserved_tokens=estimate_tokens(draft_prompt_block(draft)),
+                )
+                fix_issues = [
+                    {"issue_type": "line_shift", "explanation": e,
+                     "suggested_fix": "补齐缺失行，逐行对应原文"}
+                    for e in errors
+                ]
+                fixed_map = await repair_segments(
+                    provider=get_provider(), model=model,
+                    window_id=f"BATCH-FIX-{window[0].segment_no}",
+                    context=repair_ctx, draft=draft, issues=fix_issues,
+                    seg_ids=sorted(bad_ids),
+                )
+                for entry in polished:
+                    if entry.get("segment_id") in fixed_map:
+                        entry["target_text"] = fixed_map[entry["segment_id"]]
+                errors = validate_window(seg_dicts, polished, speaker_map=speaker_map)
+            except Exception:  # noqa: BLE001 修复失败保留原校验错误
+                pass
     if errors:
         return {
             "error": "; ".join(errors),
@@ -779,7 +886,8 @@ async def process_window_polish_item(db_factory, task_id: str, item_id: str, mod
 
     # polished 整窗先落库一次（QA 定点修复由独立 QA 节点追加新版本）
     seg_dicts, context, _sg, _card = await _window_material(
-        db_factory, project_id, window, carry_over
+        db_factory, project_id, window, carry_over,
+        reserved_tokens=estimate_tokens(draft_prompt_block(draft)),
     )
     with db_factory() as db:
         _persist_stage(db, window, polished, "polished", context, model)

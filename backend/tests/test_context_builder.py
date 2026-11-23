@@ -134,3 +134,22 @@ def test_storyline_is_filtered_to_window_characters() -> None:
     assert "保持警惕" in text
     assert '"王强": "已经离开"' not in text
     assert result.report["filtered_storyline_items"]
+
+
+def test_polish_reserved_tokens_trim_more_context() -> None:
+    """Polish 的 Draft 块必须挤占知识上下文预算，不能突破总预算。"""
+    result = build_context(
+        segments=[{
+            "segment_id": "S1", "segment_no": 1, "segment_type": "narrative",
+            "speaker_name": None, "source_text": "短句" * 4,
+        }],
+        scene_card=None,
+        knowledge=[],
+        style_guide={"dialogue_register": "natural" * 500},
+        carry_over={"ongoing_state": "继续"},
+        budget=1000,
+        reserved_tokens=900,
+    )
+    assert "STYLE GUIDE" not in result.prompt_text
+    assert result.report["effective_budget"] <= 200
+    assert result.total_tokens <= result.report["effective_budget"]

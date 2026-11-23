@@ -483,16 +483,26 @@ export default function TasksPage() {
                     失败原因：{t.error_message}
                   </p>
                 )}
-                {t.usage && (t.usage.requests ?? 0) > 0 && (
+                {t.usage && (t.usage.requests ?? 0) > 0 && (() => {
+                  const requests = t.usage?.requests ?? 0;
+                  const cacheHits = t.usage?.cache_hits ?? 0;
+                  const cacheHitRate = requests > 0
+                    ? Math.min(100, Math.round((cacheHits / requests) * 100))
+                    : 0;
+                  return (
                   <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 rounded-lg bg-(--color-panel2) px-3 py-2 text-xs text-(--color-muted)">
-                    <span>模型请求 {t.usage.requests ?? 0}</span>
-                    <span>输入 {(t.usage.prompt_tokens ?? 0).toLocaleString()} tokens</span>
-                    <span>输出 {(t.usage.completion_tokens ?? 0).toLocaleString()} tokens</span>
-                    <span>API 总用量 {(t.usage.api_total_tokens ?? 0).toLocaleString()} tokens</span>
-                    {(t.usage.cache_hits ?? 0) > 0 && <span className="text-emerald-600">缓存命中 {t.usage.cache_hits}</span>}
+                    <span>模型请求 {requests}</span>
+                    <span>输入 {(t.usage?.prompt_tokens ?? 0).toLocaleString()} tokens</span>
+                    <span>输出 {(t.usage?.completion_tokens ?? 0).toLocaleString()} tokens</span>
+                    <span>API 总用量 {(t.usage?.api_total_tokens ?? 0).toLocaleString()} tokens</span>
+                    {cacheHits > 0 && (
+                      <span className="text-emerald-600">
+                        缓存命中率 {cacheHitRate}%（{cacheHits}/{requests} 次请求）
+                      </span>
+                    )}
                     {(t.usage.failed_requests ?? 0) > 0 && <span className="text-red-600">失败请求 {t.usage.failed_requests}</span>}
                     {(t.usage.latency_ms ?? 0) > 0 && <span>模型耗时 {(t.usage.latency_ms! / 1000).toFixed(0)} 秒</span>}
-                    {t.usage.by_stage && Object.keys(t.usage.by_stage).length > 0 && (
+                    {t.usage?.by_stage && Object.keys(t.usage.by_stage).length > 0 && (
                       <span className="basis-full">
                         阶段：{Object.entries(t.usage.by_stage).map(([stage, s]) => `${({
                           knowledge: "知识", profile: "角色", storyline: "剧情", trial: "风格",
@@ -502,7 +512,8 @@ export default function TasksPage() {
                       </span>
                     )}
                   </div>
-                )}
+                  );
+                })()}
                 {(() => {
                   const quality = (t.progress as {
                     quality?: {

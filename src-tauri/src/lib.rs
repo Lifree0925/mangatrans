@@ -18,6 +18,9 @@ use tauri::{AppHandle, Manager, State};
 use tauri_plugin_shell::process::{CommandChild, CommandEvent};
 use tauri_plugin_shell::ShellExt;
 
+/// 退出清理只执行一次：ExitRequested 与 Exit 会先后触发，重复 taskkill 会闪出多个黑窗。
+static EXIT_CLEANUP_DONE: AtomicBool = AtomicBool::new(false);
+
 /// 后端连接信息（前端通过 invoke 获取）。
 struct BackendState {
     port: u16,
@@ -271,9 +274,13 @@ fn kill_backend_pid(pid: u32) {
     }
     #[cfg(target_os = "windows")]
     {
+        use std::os::windows::process::CommandExt;
         // /T 同时结束 PyInstaller one-file 启动器父进程与真正的 Python 子进程。
+        // CREATE_NO_WINDOW：GUI 应用拉起 taskkill 时不弹出控制台黑窗。
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
         let _ = std::process::Command::new("taskkill")
             .args(["/F", "/T", "/PID", &pid.to_string()])
+            .creation_flags(CREATE_NO_WINDOW)
             .output();
     }
     #[cfg(not(target_os = "windows"))]
@@ -284,11 +291,9 @@ fn kill_backend_pid(pid: u32) {
     }
 }
 
-/// 从 backend.lock 读取实际后端 PID 并结束进程树。
-fn kill_backend_from_lock(data_dir: &str) {
-    if let Some((_port, _token, pid)) = read_backend_lock(Path::new(data_dir)) {
-        kill_backend_pid(pid);
-    }
+/// 从 backend.lock 读取实际后端 PID。
+fn locked_backend_pid(data_dir: &str) -> Option<u32> {
+    read_backend_lock(Path::new(data_dir)).map(|(_port, _token, pid)| pid)
 }
 
 /// 探测既有后端是否存活（最多约 2 秒）。存活则复用其端口、令牌与 pid。
@@ -460,13 +465,25 @@ pub fn run() {
         .run(|app, event| {
             // 退出时回收后端进程：新 spawn 的 child 直接 kill；
             // 复用的孤儿后端按 pid 结束（保证下次启动运行当前版本后端）
-            if let tauri::RunEvent::ExitRequested { .. } | tauri::RunEvent::Exit = event {
+            if matches!(
+                event,
+                tauri::RunEvent::ExitRequested { .. } | tauri::RunEvent::Exit
+            ) {
+                if EXIT_CLEANUP_DONE.swap(true, Ordering::SeqCst) {
+                    return;
+                }
                 if let Some(state) = app.try_state::<BackendState>() {
                     // 先按 backend.lock 中的 Python 进程 PID 结束整棵进程树；
                     // one-file 启动器父进程被 CommandChild.kill() 结束并不保证子进程退出。
-                    kill_backend_from_lock(&state.data_dir);
-                    if let Some(pid) = state.reused_pid {
+                    let lock_pid = locked_backend_pid(&state.data_dir);
+                    if let Some(pid) = lock_pid {
                         kill_backend_pid(pid);
+                    }
+                    // 复用后端时 lock_pid 与 reused_pid 通常相同：只结束一次，避免双 taskkill。
+                    if let Some(pid) = state.reused_pid {
+                        if Some(pid) != lock_pid {
+                            kill_backend_pid(pid);
+                        }
                     }
                     if let Ok(mut guard) = state.child.lock() {
                         if let Some(child) = guard.take() {

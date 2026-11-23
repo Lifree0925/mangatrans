@@ -119,6 +119,31 @@ def test_bad_request_downgrades_thinking_then_succeeds():
     assert resp.content == "after"
 
 
+def test_context_length_400_is_classified_without_retry():
+    """400 正文明确为上下文超限时，必须抛 context_length 而不是 bad_request。"""
+    state = _State([(
+        400,
+        {"error": {"message": "This model's maximum context length is 8192 tokens"}},
+    )])
+    try:
+        _run(state)
+        assert False, "应抛出 LLMError"
+    except LLMError as exc:
+        assert not exc.retryable
+        assert exc.code == "context_length"
+        assert state.calls == 1
+
+
+def test_payload_too_large_413_is_context_length():
+    state = _State([(413, {"error": {"message": "Request entity too large"}})])
+    try:
+        _run(state)
+        assert False, "应抛出 LLMError"
+    except LLMError as exc:
+        assert not exc.retryable
+        assert exc.code == "context_length"
+
+
 def test_bad_request_after_downgrade_no_retry():
     """降级后仍 400（无降级空间）：不可重试。"""
     state = _State([(400, {}), (400, {}), (200, _ok())])

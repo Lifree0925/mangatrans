@@ -76,7 +76,13 @@ def build_context(
     adjacent_prev: str = "",
     adjacent_next: str = "",
     budget: int = DEFAULT_BUDGET,
+    reserved_tokens: int = 0,
 ) -> ContextResult:
+    """组装窗口上下文。
+
+    reserved_tokens 用于 Polish：Draft 块在上下文之外追加，必须先预留其 Token，
+    否则知识块会占满预算，最终请求超过模型上下文。
+    """
     blocks: list[str] = []
     report: dict = {
         "matched_characters": [],
@@ -87,6 +93,7 @@ def build_context(
         "filtered_storyline_items": [],
         "trimmed": [],
         "quality": "complete",
+        "reserved_tokens": max(0, int(reserved_tokens)),
     }
     snapshot: dict = {"knowledge_ids": [], "scene_card_id": None, "carry_over_hash": None}
 
@@ -328,9 +335,13 @@ def build_context(
         optional.append(("adjacent_prev", "[PREV SOURCE (context only, do not translate)]\n" + adjacent_prev))
 
     total = sum(estimate_tokens(b) for b in blocks)
+    # 原文是不可裁剪的硬成本；即使预留 Draft 后预算不足，也只裁知识块。
+    source_tokens = estimate_tokens(blocks[0])
+    effective_budget = max(source_tokens, budget - max(0, int(reserved_tokens)))
+    report["effective_budget"] = effective_budget
     for name, text in optional:
         t = estimate_tokens(text)
-        if total + t <= budget:
+        if total + t <= effective_budget:
             blocks.append(text)
             total += t
         else:
@@ -347,8 +358,9 @@ def build_context(
         ("STYLE GUIDE", "style_guide"),
         ("CHAPTER STORYLINE", "storyline"),
         ("FORESHADOWING", "foreshadowing"),
+        ("CARRY-OVER STATE", "carry_over"),
     ]
-    while total > budget:
+    while total > effective_budget:
         removed = False
         for prefix, label in trim_order:
             for idx in range(len(blocks) - 1, -1, -1):

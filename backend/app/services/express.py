@@ -471,6 +471,37 @@ async def run_express(db_factory, project_id: str, source_document_id: str, mode
                 await _aio.sleep(3 * (attempt + 1))
         return "failed"
 
+    async def _split_repolish(win_idx, window, draft):
+        """结构校验失败时把窗口拆半重润色，避免个别窗口永久卡死。"""
+        if len(window) <= 1:
+            return None
+        mid = len(window) // 2
+        left_window, right_window = window[:mid], window[mid:]
+        left_ids = {s.id for s in left_window}
+        left_draft = [e for e in draft if e.get("segment_id") in left_ids]
+        right_draft = [e for e in draft if e.get("segment_id") not in left_ids]
+        try:
+            async with _sem2:
+                left, middle_carry = await _aio.wait_for(
+                    translate_window_polish_direct(
+                        db_factory, project_id, left_window, left_draft,
+                        _prev_carry(win_idx), model,
+                    ),
+                    timeout=240,
+                )
+            async with _sem2:
+                right, _carry = await _aio.wait_for(
+                    translate_window_polish_direct(
+                        db_factory, project_id, right_window, right_draft,
+                        middle_carry, model,
+                    ),
+                    timeout=240,
+                )
+            return [*left, *right]
+        except Exception as exc:  # noqa: BLE001 拆窗失败保留原错误
+            polish_errors[win_idx] = f"拆窗重试失败：{type(exc).__name__}: {str(exc)[:240]}"
+            return None
+
     polish_jobs = list(zip(range(start_win, total), todo, draft_results))
     polished_results = await _aio.gather(
         *[_polish_one(wi, w, dr[0] if dr else None) for wi, w, dr in polish_jobs]
@@ -492,6 +523,7 @@ async def run_express(db_factory, project_id: str, source_document_id: str, mode
     # 顺序持久化与进度上报（单协程写，无竞争）
     failed_windows = 0
     for idx, (window, dr, pr) in enumerate(zip(todo, draft_results, polished_results)):
+        wi = start_win + idx
         if pr is None:
             if _paused():
                 break  # 暂停：保留进度，resume 续跑
@@ -549,11 +581,18 @@ async def run_express(db_factory, project_id: str, source_document_id: str, mode
                     errors = validate_window(seg_dicts, polished, speaker_map=speaker_map)
                 except Exception:  # noqa: BLE001 修复失败保持原错误，走失败计数
                     pass
+        if errors and len(window) > 1:
+            recovered = await _split_repolish(wi, window, draft)
+            if recovered is not None:
+                polished = recovered
+                errors = validate_window(seg_dicts, polished, speaker_map=speaker_map)
         if errors:
+            polish_errors[wi] = "结构校验失败：" + "; ".join(errors[:3])
             failed_windows += 1
             report["steps"]["translation"]["failed_windows"] = failed_windows
             _sync_progress(db_factory, task_id, report["steps"], "translation")
             continue  # 不落库错误窗口；任务完成前可重试或按章节重译
+        polish_errors.pop(wi, None)
         with db_factory() as db:
             _persist_window_translations(db, window, draft, polished, context, model)
             db.commit()
@@ -567,13 +606,13 @@ async def run_express(db_factory, project_id: str, source_document_id: str, mode
         errors = {
             str(wi): polish_errors.get(wi, "未知错误")
             for pos, (wi, _w, _dr) in enumerate(polish_jobs)
-            if polished_results[pos] == "failed"
+            if polished_results[pos] == "failed" or wi in polish_errors
         }
         report["steps"]["translation"]["failed_window_errors"] = errors
         _sync_progress(db_factory, task_id, report["steps"], "translation")
         raise RuntimeError(
-            f"{failed_windows} 个翻译窗口失败（限流/超时重试后仍失败），请重试任务；"
-            f"示例：{next(iter(errors.values()), '')}"
+            f"{failed_windows} 个翻译窗口失败；示例：{next(iter(errors.values()), '未知错误')}。"
+            "可重试任务；若同一窗口持续失败，请查看任务详情或缩短该段原文。"
         )
 
     # 4b/5. 台词对齐与 QA 并行（都只依赖 polished 译文；写入不同表、进度 key 互不冲突）

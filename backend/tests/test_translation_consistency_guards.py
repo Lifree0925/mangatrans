@@ -225,8 +225,8 @@ def test_semantic_qa_prompt_contains_reference_without_style_noise():
     assert "大小写" in prompt
 
 
-def test_polish_truncation_splits_window_and_preserves_all_segments(client):
-    """完整窗口 polish 截断时，自动拆半重跑；最终仍覆盖所有段且 carry 链不断。"""
+def test_polish_split_errors_retry_and_preserve_all_segments(client):
+    """Polish 截断或上下文超限时自动拆半；最终仍覆盖所有段。"""
     import asyncio
     import re
 
@@ -260,16 +260,16 @@ def test_polish_truncation_splits_window_and_preserves_all_segments(client):
         time.sleep(0.05)
 
     f = FakeProvider()
-    state = {"truncated": False}
+    state = {"raised": False}
 
     def h(messages):
         content = messages[-1]["content"]
         system = messages[0]["content"] if messages else ""
         ids = re.findall(r"\[([0-9a-f]{32})\]", content)
         natural = "POLISH pass" in system
-        if natural and len(set(ids)) > 1 and not state["truncated"]:
-            state["truncated"] = True
-            raise LLMError("模拟输出截断", retryable=False, code="output_truncated")
+        if natural and len(set(ids)) > 1 and not state["raised"]:
+            state["raised"] = True
+            raise LLMError("模拟上下文超限", retryable=False, code="context_length")
         out = {
             "window_id": "W",
             "translations": fake_translation_entries(
@@ -293,7 +293,7 @@ def test_polish_truncation_splits_window_and_preserves_all_segments(client):
             status = db.get(Task, task_id).status
         if status in ("completed", "failed"):
             break
-    assert state["truncated"] is True
+    assert state["raised"] is True
     assert status == "completed"
     with dbmod.SessionLocal() as db:
         rows = list(db.scalars(select(Translation).where(Translation.stage == "polished")))
@@ -400,3 +400,18 @@ def test_refresh_removes_obsolete_generic_term_alerts(client, wait_task):
         left = list(db.scalars(select(QAIssue)))
         assert len(left) == 1
         assert left[0].translation_id == second.id
+
+
+def test_validate_window_accepts_out_of_order_entries():
+    """落库按 segment_id 映射；输出数组顺序不同不应导致窗口永久失败。"""
+    segs = [
+        {"segment_id": "a", "segment_type": "narrative", "speaker_name": None,
+         "source_text": "第一段。"},
+        {"segment_id": "b", "segment_type": "narrative", "speaker_name": None,
+         "source_text": "第二段。"},
+    ]
+    translations = [
+        {"segment_id": "b", "target_text": "Second."},
+        {"segment_id": "a", "target_text": "First."},
+    ]
+    assert validate_window(segs, translations) == []
