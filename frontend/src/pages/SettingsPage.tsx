@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Eye, EyeOff, Plus, Trash2, X } from "lucide-react";
+import { BookOpen, ChevronRight, Cpu, Eye, EyeOff, FolderOpen, Plus, RefreshCw, Trash2, X } from "lucide-react";
 import { api } from "../lib/api";
 import { confirmAction, toast } from "../lib/feedback";
 import { APP_VERSION, checkUpdate, type UpdateInfo } from "../lib/version";
@@ -11,103 +11,83 @@ import type { ProviderInfo } from "../lib/types";
 
 const HELP_SECTIONS: { title: string; items: string[] }[] = [
   {
-    title: "1. 快速开始（一键直出）",
+    title: "第一次使用",
     items: [
-      "打开软件 → 进入「设置」→ 填写模型、Base URL、API Key → 保存。",
-      "回到「项目」→ 输入项目名称 → 创建。",
-      "点击项目进入工作台 → 「导入」选择剧本文件（TXT / Markdown / DOCX）。",
-      "点击「解析」：几秒内完成结构切分与原文覆盖校验。",
-      "点击「一键直出」：系统自动完成知识整理、角色档案、章节剧情卡、风格基线、台词本抽取、全本翻译、QA 与批量接受。",
-      "完成后点击「导出」，下载英文剧本或中英对照 Markdown。",
+      "打开「设置」→「模型服务」，填写模型、Base URL 和 API Key，保存并等待连接测试通过。",
+      "回到「项目」→ 点右上角「创建」，输入项目名称；项目文件夹可选，不选则使用软件默认数据目录。",
+      "进入项目后点「导入」，选择 TXT、Markdown 或 Word 剧本。导入后会自动解析，不需要再点解析。",
+      "等待任务中心的解析完成后，点项目顶部的「一键直出」。系统会自动整理知识、翻译全文并做质量检查。",
+      "完成后点「导出」，选择交付版或常规版，再选择文件类型和保存位置。",
     ],
   },
   {
-    title: "2. 配置模型服务",
+    title: "模型服务",
     items: [
-      "支持兼容 OpenAI Chat Completions 接口的服务商（OpenAI、DeepSeek、Moonshot、本地 vLLM 等）。",
-      "模型：填写服务商提供的模型名，例如 gpt-4o-mini、deepseek-chat。",
-      "Base URL：填写到 /v1 层级，例如 https://api.openai.com/v1。",
-      "API Key：仅保存在本机系统凭据库（Windows Credential Manager），不会写入数据库、日志或导出文件。",
-      "可在项目工作台顶部的「模型」下拉框中切换默认模型。",
+      "支持 OpenAI 兼容接口（OpenAI、DeepSeek、Moonshot、vLLM 等）和本地 Ollama 模型。",
+      "OpenAI、DeepSeek 等服务选「自定义 / 其他兼容接口」；本地模型选「Ollama（本地模型）」。",
+      "Base URL 通常填写到 /v1，例如 https://api.openai.com/v1；模型名按服务商提供的名称填写。",
+      "API Key 只保存在本机系统凭据库，不写入数据库、日志或导出文件。",
+      "保存后软件会自动测试连接。只有测试通过的模型才会出现在项目顶部，并可用于翻译。",
     ],
   },
   {
-    title: "3. 创建项目与导入原文",
+    title: "项目和剧本",
     items: [
-      "支持格式：.txt、.md、.docx；原始文件会保留副本，不修改源文件。",
-      "每次重新导入都会创建新版本，旧版本与旧译文保留，不会静默覆盖。",
-      "建议导入前确认文件编码为 UTF-8；DOCX 会按段落提取文本。",
+      "支持 .txt、.md、.docx，建议使用 UTF-8 编码。",
+      "导入后会自动解析章节、场景、对白和动作；解析进度与结果可在任务中心查看。",
+      "原始剧本只读保存，软件不会修改导入的文件。重新导入会作为新版本保留，旧版本不会被静默覆盖。",
+      "项目名称可以修改；创建时选择的项目文件夹用于导出文件的默认保存位置。",
     ],
   },
   {
-    title: "4. 解析与原文覆盖",
+    title: "一键直出和任务中心",
     items: [
-      "解析只做机械切分（章节标题、角色对白、叙述段落），不做语义猜测。",
-      "解析报告显示字符覆盖率、章节/场景/对白数量与异常清单；覆盖率 100% 才允许继续。",
-      "无法套用格式的段落会标记为 other，仍会参与翻译；解析异常不会阻塞翻译。",
-      "章节/场景边界、角色标签可人工修正；修正只改变结构，不修改原文。",
+      "一键直出会自动完成：人物与术语整理 → 角色档案 → 章节剧情 → 台词整理 → 全文翻译 → 质检与定点修正。",
+      "任务中心会实时显示当前步骤、已完成内容、进度和失败原因。",
+      "任务可以暂停和继续；暂停会等当前片段完成后停下，继续时从断点恢复。",
+      "失败或暂停后点「重试」，系统会从失败节点继续，不会重新执行已经完成的步骤。",
+      "已完成任务可以归档到「历史记录」。历史记录中的任务记录可永久删除，已生成的译文不受影响。",
     ],
   },
   {
-    title: "5. 知识库与章节剧情",
+    title: "知识库与内容修改",
     items: [
-      "人物、别名、术语与关系从原文提取，每条知识都带原文证据。",
-      "精修模式下由你确认/修改/拒绝候选；一键直出模式自动批准高置信度的人名与术语（带证据）。",
-      "角色档案提供性格特征与说话方式，是润色时保持人物风格一致的依据。",
-      "每章自动生成剧情卡（重要情节、伏笔、前情依赖），翻译时按需注入上下文，保证长剧本连续一致。",
+      "一键直出后，左侧「知识库」会出现该项目入口，包含角色档案、章节剧情和台词本。",
+      "角色档案记录性格、说话方式和称呼；章节剧情记录重要情节与伏笔；台词本按章节、场景和角色整理对白。",
+      "角色卡片可以切换主要/次要；点铅笔可在浮层中修改角色资料或章节剧情。",
+      "翻译时只加载与当前章节相关的角色和剧情，帮助长剧本保持人物、称呼和故事连续。",
+      "修改原文或角色档案后，受影响的译文会标记为待更新；点项目顶部的「更新翻译」只补译这些片段。",
+      "修改章节剧情后，建议对相关章节执行「重新翻译」，让新的剧情信息参与翻译。",
+      "在项目正文中把鼠标移到段落上，点铅笔可选择修改「原文」或「译文」。修改原文会触发相关译文待更新；修改译文会新增校对版本，不覆盖历史版本。",
+      "翻译完成后顶部按钮会变为「重新翻译」：可以全部重翻，也可以只选章节重译。全部重翻不会覆盖已手动修改的知识。",
+      "删除知识库会清空该项目的角色、剧情和台词本，但项目、原文和译文都会保留。",
     ],
   },
   {
-    title: "6. 试译与风格基线",
+    title: "导出",
     items: [
-      "系统自动挑选 3–5 个代表性场景试译（人物多、情绪冲突、伏笔、动作密集、普通叙述）。",
-      "从试译结果归纳风格基线：人物口吻、对白语域、动作描述风格、文化表达策略。",
-      "风格基线冻结后作为全本翻译的全局约束，保证跨章节风格一致；试译译文会直接复用为正式译文。",
+      "项目右上角「导出」会打开固定面板，先选择导出类型，再选择文件格式。",
+      "交付版：按《剧本交付模板》生成，场景、动作和音效保留中文，台词输出英文；剧本开头已有英文标题时会自动复用，不重复翻译。",
+      "常规导出：可选「中英对照」或「纯英文」，适合校对或直接使用英文成品。",
+      "交付版和常规版都支持 Markdown、TXT、Word；确认后会打开系统保存窗口，可选择任意磁盘位置。",
     ],
   },
   {
-    title: "7. 批量翻译与恢复",
+    title: "数据位置和软件更新",
     items: [
-      "两段式翻译：Draft 忠实草稿锁死事实 → Polish 基于情境自然化，禁止改变事实。",
-      "窗口按章节/场景边界切分，串行执行并通过 carry-over 传递前文状态，保证连续一致。",
-      "任务可暂停、恢复；中断后已提交窗口不会重复，未完成窗口自动回收重试。",
-      "每段译文都有版本记录，可回溯生成时的模型、Prompt 与上下文快照。",
+      "「数据位置」显示数据库和项目数据的保存目录，可点右侧「更换」。更换后重启软件生效，已有数据不会自动迁移。",
+      "「软件更新」在设置最下方，显示当前版本；点「检查更新」可检查新版本。",
+      "发现新版本后点下载，运行安装包覆盖安装即可，已有项目数据会保留。",
     ],
   },
   {
-    title: "8. QA 与人工修订",
+    title: "常见问题",
     items: [
-      "确定性 QA：空译文、覆盖完整性、强制术语、格式异常等自动检查。",
-      "语义 QA：对高风险窗口检查遗漏、增译、指代、否定条件、因果时序、情绪意图与剧情泄露。",
-      "每个问题都带原文/译文证据；可手动修订，修订会生成新译文版本。",
-      "修改人物或术语后，受影响译文会被标记为 stale（过期），不会自动覆盖。",
-    ],
-  },
-  {
-    title: "9. 导出",
-    items: [
-      "工作台右上角「导出」：默认导出中英对照 Markdown，便于校对。",
-      "导出报告包含段落数、未翻译数、QA 问题统计。",
-      "正式交付建议先完成 QA 审核或批量接受，再导出。",
-    ],
-  },
-  {
-    title: "10. 数据、日志与备份",
-    items: [
-      "项目数据保存在 %LOCALAPPDATA%\\com.mangatrans.desktop（卸载默认保留）。",
-      "运行日志：%LOCALAPPDATA%\\com.mangatrans.desktop\\logs\\sidecar.log。",
-      "覆盖安装或升级不会删除项目数据；数据库升级前会自动备份。",
-      "设置环境变量 MT_DATA_DIR 可让程序使用自定义数据目录（便携测试用）。",
-    ],
-  },
-  {
-    title: "11. 常见问题",
-    items: [
-      "首次运行提示「未知发布者」：安装包未购买受信任证书时会出现，点击「仍要运行」即可。",
-      "显示「本地服务未就绪」：后端服务正在启动，窗口会先进入主界面并自动重试；若持续失败，请查看 logs\\sidecar.log。",
-      "检查更新失败：网络受限或无法访问 GitHub 时会出现，不影响软件正常使用。",
-      "模型调用失败：检查 Base URL 是否以 /v1 结尾、模型名是否存在、API Key 是否有效、余额是否充足。",
-      "长剧本翻译耗时较长：属于正常现象，可暂停/恢复；建议先试译确认风格，再批量执行。",
+      "模型不可用：确认 Base URL 以 /v1 结尾、模型名存在、API Key 有效且余额充足。Ollama 需要先运行 ollama serve 并拉取对应模型。",
+      "首次启动提示「未知发布者」：安装包未使用受信任商业证书时会出现，确认来源后选择继续运行。",
+      "检查更新失败：通常是当前网络无法访问 GitHub，不影响已有项目和翻译。",
+      "长剧本翻译时间较长：保持软件打开，在任务中心查看实时进度；可暂停后继续，不会从头重做。",
+      "本地服务启动失败：启动错误区域会显示后端日志，可复制日志用于排查反馈。",
     ],
   },
 ];
@@ -158,7 +138,8 @@ export default function SettingsPage() {
   const [editingKeyFor, setEditingKeyFor] = useState<string | null>(null);
   const [showEditKey, setShowEditKey] = useState(false);
   const [updateInfo, setUpdateInfo] = useState<UpdateInfo | null>(null);
-  const [showHelp, setShowHelp] = useState(false);
+  const [activePanel, setActivePanel] = useState<"models" | "help" | null>(null);
+  const [checkingUpdate, setCheckingUpdate] = useState(false);
   const [preset, setPreset] = useState("openai");
   const isTauri = !!(
     window as unknown as { __TAURI_INTERNALS__?: unknown }
@@ -175,11 +156,30 @@ export default function SettingsPage() {
   });
 
   const changeDataDir = async () => {
-    const { invoke } = await import("@tauri-apps/api/core");
-    const dir = await invoke<string | null>("choose_data_dir");
-    if (dir) {
-      toast.success(`数据目录已设置为：${dir}（重启应用后生效）`);
-      storage.refetch();
+    try {
+      const { invoke } = await import("@tauri-apps/api/core");
+      const dir = await invoke<string | null>("choose_data_dir");
+      if (dir) {
+        toast.success(`数据目录已设置为：${dir}（重启应用后生效）`);
+        storage.refetch();
+      }
+    } catch (err) {
+      toast.error(`更换数据目录失败：${String(err)}`);
+    }
+  };
+
+  const checkForUpdates = async () => {
+    setCheckingUpdate(true);
+    try {
+      const info = await checkUpdate(true);
+      setUpdateInfo(info);
+      if (info.has_update) toast.success(`发现新版本 v${info.latest}`);
+      else if (info.error) toast.error("检查更新失败，请稍后重试");
+      else toast.success("已是最新版本");
+    } catch (err) {
+      toast.error(`检查更新失败：${String(err)}`);
+    } finally {
+      setCheckingUpdate(false);
     }
   };
 
@@ -265,9 +265,122 @@ export default function SettingsPage() {
       </div>
 
       <div className="flex-1 overflow-auto p-6">
-        <div className="mx-auto max-w-3xl space-y-10">
-          <section>
-            <h2 className="text-sm font-semibold">模型服务</h2>
+        <div className="mx-auto max-w-3xl">
+          <button
+            onClick={() => setActivePanel("help")}
+            className="flex w-full items-center gap-4 border-b border-(--color-border) px-2 py-4 text-left transition-colors hover:bg-(--color-panel)"
+          >
+            <BookOpen size={18} className="shrink-0 text-(--color-muted)" />
+            <span className="min-w-0 flex-1">
+              <span className="block text-sm font-medium">使用说明</span>
+              <span className="mt-0.5 block text-xs text-(--color-muted)">从配置模型到导出成品</span>
+            </span>
+            <ChevronRight size={16} className="shrink-0 text-(--color-muted)" />
+          </button>
+
+          <button
+            onClick={() => setActivePanel("models")}
+            className="flex w-full items-center gap-4 border-b border-(--color-border) px-2 py-4 text-left transition-colors hover:bg-(--color-panel)"
+          >
+            <Cpu size={18} className="shrink-0 text-(--color-muted)" />
+            <span className="min-w-0 flex-1">
+              <span className="block text-sm font-medium">模型服务</span>
+              <span className="mt-0.5 block text-xs text-(--color-muted)">模型、Base URL 与 API Key</span>
+            </span>
+            <ChevronRight size={16} className="shrink-0 text-(--color-muted)" />
+          </button>
+
+          <div className="flex w-full items-center gap-4 border-b border-(--color-border) px-2 py-4">
+            <FolderOpen size={18} className="shrink-0 text-(--color-muted)" />
+            <span className="min-w-0 flex-1">
+              <span className="block text-sm font-medium">数据位置</span>
+              <span className="mt-0.5 block text-xs text-(--color-muted)">项目与数据库保存目录</span>
+            </span>
+            <div className="flex min-w-0 max-w-[52%] items-center justify-end gap-2">
+              <span
+                className="truncate font-mono text-xs text-(--color-muted)"
+                title={isTauri ? storage.data?.data_dir : "由 MT_DATA_DIR 控制"}
+              >
+                {isTauri ? storage.data?.data_dir ?? "读取中…" : "由 MT_DATA_DIR 控制"}
+              </span>
+              {isTauri && (
+                <button
+                  onClick={changeDataDir}
+                  className="shrink-0 rounded-lg border border-(--color-border) bg-(--color-bg) px-3 py-1 text-xs hover:bg-(--color-panel2)"
+                >
+                  更换
+                </button>
+              )}
+            </div>
+          </div>
+
+          <div className="flex w-full items-center gap-4 border-b border-(--color-border) px-2 py-4">
+            <RefreshCw size={18} className="shrink-0 text-(--color-muted)" />
+            <span className="min-w-0 flex-1">
+              <span className="block text-sm font-medium">软件更新</span>
+              <span className="mt-0.5 block text-xs text-(--color-muted)">检查并安装新版本</span>
+            </span>
+            <div className="flex shrink-0 flex-col items-end gap-1">
+              <div className="flex items-center gap-2">
+                {updateInfo?.has_update && (updateInfo.download_url || updateInfo.installer_url) && (
+                  <button
+                    onClick={() => openExternal(updateInfo.installer_url || updateInfo.download_url || "")}
+                    className="rounded-lg bg-(--color-accent) px-3 py-1 text-xs font-medium text-white hover:bg-(--color-accent-hover)"
+                  >
+                    下载 v{updateInfo.latest}
+                  </button>
+                )}
+                <span className="font-mono text-xs text-(--color-muted)">v{APP_VERSION}</span>
+                <button
+                  onClick={checkForUpdates}
+                  disabled={checkingUpdate}
+                  className="rounded-lg border border-(--color-border) bg-(--color-bg) px-3 py-1 text-xs hover:bg-(--color-panel2) disabled:opacity-40"
+                >
+                  {checkingUpdate ? "检查中…" : "检查更新"}
+                </button>
+              </div>
+              {updateInfo && (
+                <span
+                  className={`text-[11px] ${
+                    updateInfo.has_update ? "text-amber-600" : updateInfo.error ? "text-red-600" : "text-emerald-600"
+                  }`}
+                >
+                  {updateInfo.has_update
+                    ? `发现新版本 v${updateInfo.latest}`
+                    : updateInfo.error
+                      ? "检查失败，请稍后重试"
+                      : "已是最新版本"}
+                </span>
+              )}
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {activePanel && (
+        <div
+          className="fixed inset-0 z-[60] flex items-center justify-center bg-black/30 p-6"
+          onClick={() => setActivePanel(null)}
+        >
+          <div
+            className="flex h-[600px] max-h-[calc(100vh-3rem)] w-full max-w-2xl flex-col rounded-2xl bg-(--color-bg) shadow-2xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between border-b border-(--color-border) px-6 py-4">
+              <h3 className="text-base font-semibold">
+                {activePanel === "models" ? "模型服务" : "使用说明"}
+              </h3>
+              <button
+                onClick={() => setActivePanel(null)}
+                className="rounded-lg p-1.5 text-(--color-muted) hover:bg-(--color-panel2)"
+              >
+                <X size={18} />
+              </button>
+            </div>
+
+            <div className="flex-1 overflow-auto px-6 py-5">
+              {activePanel === "models" && (
+                <div>
             <p className="mt-1 text-xs text-(--color-muted)">
               API Key 仅保存在本机系统凭据库，不写入数据库、日志或导出文件。
             </p>
@@ -460,120 +573,25 @@ export default function SettingsPage() {
                 </p>
               )}
             </div>
-          </section>
-
-          <section>
-            <h2 className="text-sm font-semibold">数据位置</h2>
-            <p className="mt-1 text-xs text-(--color-muted)">
-              项目原文、译文、知识库与数据库的保存目录。更改后需重启应用生效，已有数据不会自动迁移。
-            </p>
-            <div className="mt-3 rounded-xl bg-(--color-panel) px-4 py-3">
-              {isTauri ? (
-                <>
-                  <p className="break-all font-mono text-xs">
-                    {storage.data?.data_dir ?? "读取中…"}
-                  </p>
-                  <div className="mt-2 flex items-center gap-2">
-                    <button
-                      onClick={changeDataDir}
-                      className="rounded-lg border border-(--color-border) bg-(--color-bg) px-3 py-1 text-xs hover:bg-(--color-panel2)"
-                    >
-                      更改位置
-                    </button>
-                    {storage.data?.uses_custom_dir && (
-                      <span className="text-xs text-(--color-muted)">使用自定义目录</span>
-                    )}
-                  </div>
-                </>
-              ) : (
-                <p className="text-xs text-(--color-muted)">
-                  开发模式：数据目录由 MT_DATA_DIR 环境变量控制；桌面版可在应用内选择目录。
-                </p>
-              )}
-            </div>
-          </section>
-
-          <section>
-            <h2 className="text-sm font-semibold">使用说明</h2>
-            <div className="mt-3 flex items-center gap-3 rounded-xl bg-(--color-panel) px-4 py-3 text-sm">
-              <span className="text-(--color-muted)">查看完整的功能说明与操作步骤。</span>
-              <button
-                onClick={() => setShowHelp(true)}
-                className="ml-auto rounded-lg border border-(--color-border) bg-(--color-bg) px-3 py-1 text-xs hover:bg-(--color-panel2)"
-              >
-                打开使用说明
-              </button>
-            </div>
-          </section>
-
-          <section>
-            <h2 className="text-sm font-semibold">软件更新</h2>
-            <div className="mt-3 flex flex-wrap items-center gap-3 rounded-xl bg-(--color-panel) px-4 py-3 text-sm">
-              <span className="text-(--color-muted)">当前版本 v{APP_VERSION}</span>
-              {updateInfo?.has_update && (updateInfo.download_url || updateInfo.installer_url) && (
-                <>
-                  <span className="text-xs font-medium text-amber-600">发现新版本 v{updateInfo.latest}</span>
-                  <button
-                    onClick={() =>
-                      openExternal(updateInfo.installer_url || updateInfo.download_url || "")
-                    }
-                    className="rounded-lg bg-(--color-accent) px-3 py-1.5 text-xs font-medium text-white hover:bg-(--color-accent-hover)"
-                  >
-                    立即下载更新
-                  </button>
-                  <span className="text-xs text-(--color-muted)">
-                    下载完成后运行安装包，按提示覆盖安装即可
-                  </span>
-                </>
-              )}
-              {updateInfo && !updateInfo.has_update && (
-                <span className="text-xs text-emerald-600">
-                  {updateInfo.error ? "暂时无法检查更新（网络受限）" : "已是最新版本"}
-                </span>
-              )}
-              <button
-                onClick={async () => setUpdateInfo(await checkUpdate(true))}
-                className="ml-auto rounded-lg border border-(--color-border) bg-(--color-bg) px-3 py-1 text-xs hover:bg-(--color-panel2)"
-              >
-                检查更新
-              </button>
-            </div>
-          </section>
-        </div>
-      </div>
-
-      {showHelp && (
-        <div
-          className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-6"
-          onClick={() => setShowHelp(false)}
-        >
-          <div
-            className="flex h-[80vh] max-h-[calc(100vh-3rem)] w-full max-w-2xl flex-col rounded-2xl bg-(--color-bg) shadow-xl"
-            onClick={(e) => e.stopPropagation()}
-          >
-            <div className="flex items-center justify-between border-b border-(--color-border) px-5 py-4">
-              <h3 className="text-base font-semibold">MangaTrans 使用说明</h3>
-              <button
-                onClick={() => setShowHelp(false)}
-                className="rounded-lg p-1.5 text-(--color-muted) hover:bg-(--color-panel2)"
-              >
-                <X size={18} />
-              </button>
-            </div>
-            <div className="flex-1 space-y-6 overflow-auto px-5 py-5">
-              {HELP_SECTIONS.map((section) => (
-                <div key={section.title}>
-                  <h4 className="text-sm font-semibold">{section.title}</h4>
-                  <ul className="mt-2 space-y-1.5">
-                    {section.items.map((item, i) => (
-                      <li key={i} className="flex gap-2 text-xs leading-5 text-(--color-muted)">
-                        <span className="mt-2 h-1 w-1 shrink-0 rounded-full bg-(--color-muted)" />
-                        <span>{item}</span>
-                      </li>
-                    ))}
-                  </ul>
                 </div>
-              ))}
+              )}
+              {activePanel === "help" && (
+                <div className="space-y-6">
+                  {HELP_SECTIONS.map((section) => (
+                    <div key={section.title}>
+                      <h4 className="text-sm font-semibold">{section.title}</h4>
+                      <ul className="mt-2 space-y-1.5">
+                        {section.items.map((item, i) => (
+                          <li key={i} className="flex gap-2 text-xs leading-5 text-(--color-muted)">
+                            <span className="mt-2 h-1 w-1 shrink-0 rounded-full bg-(--color-muted)" />
+                            <span>{item}</span>
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  ))}
+                </div>
+              )}
             </div>
           </div>
         </div>

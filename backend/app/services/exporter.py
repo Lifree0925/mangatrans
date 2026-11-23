@@ -21,6 +21,7 @@ from app.models.document import Chapter, Scene, SourceSegment
 from app.models.project import Project
 from app.models.qa import QAIssue
 from app.models.translation import Translation
+from app.services.title_service import SourceTitle, detect_source_title
 
 FORMATS = {"md": ".md", "txt": ".txt", "docx": ".docx"}
 
@@ -215,18 +216,42 @@ def _export_docx(project: Project, segs, trans, bilingual: bool) -> bytes:
 
 
 def _export_delivery_markdown(
-    project: Project, segs, chapters, scenes, trans, title_en: str | None, doc_title: str | None
+    project: Project,
+    segs,
+    chapters,
+    scenes,
+    trans,
+    title_en: str | None,
+    doc_title: str | None,
+    source_title: SourceTitle | None = None,
 ) -> str:
-    """按交付模板生成 .md 正文。"""
+    """按交付模板生成 .md 正文。
+
+    原文已带英文标题时直接复用；标题所在片段不在正文重复输出。
+    """
     role_map = _build_role_map(segs, trans)
     lines: list[str] = []
-    lines.append((title_en or "").strip() or project.name)
-    lines.append(f"《{doc_title or project.name}》")
+    english_title = (
+        (title_en or "").strip()
+        or (source_title.english_title if source_title else "")
+        or project.name
+    )
+    # 剧本正文中的中英标题优先于文件名；文件名只在没有原文标题时兜底。
+    chinese_title = (
+        (source_title.chinese_title if source_title else "")
+        or (doc_title or "").strip()
+        or project.name
+    )
+    lines.append(english_title)
+    lines.append(f"《{chinese_title}》")
     lines.append("")
+    title_segment_ids = set(source_title.segment_ids) if source_title else set()
 
     last_chapter_id = None
     last_scene_id = None
     for s in segs:
+        if s.id in title_segment_ids:
+            continue
         if s.chapter_id != last_chapter_id:
             ch = chapters.get(s.chapter_id) if s.chapter_id else None
             if lines and lines[-1] != "":
@@ -306,14 +331,19 @@ def export_project(
     """
     segs, chapters, scenes, trans, issues = _load(db, project)
     report = _report(segs, trans, issues)
+    source_title = detect_source_title(segs)
 
     if fmt not in FORMATS:
         fmt = "md"
     if delivery:
         body = _export_delivery_markdown(
-            project, segs, chapters, scenes, trans, title_en, doc_title
+            project, segs, chapters, scenes, trans, title_en, doc_title, source_title
         )
-        name = (doc_title or project.name).strip() or "剧本"
+        name = (
+            (source_title.chinese_title if source_title else None)
+            or (doc_title or "").strip()
+            or project.name
+        ).strip() or "剧本"
         if fmt == "docx":
             return {
                 "filename": f"{name}.docx",

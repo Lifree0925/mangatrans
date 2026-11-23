@@ -388,6 +388,9 @@ pub fn run() {
                     Some(child)
                 }
                 Err(err) => {
+                    // spawn 失败时没有子进程，必须把状态标记为已退出；
+                    // 否则前端诊断会误报「后端进程运行中，正在初始化」，掩盖真正原因。
+                    child_exited.store(true, Ordering::SeqCst);
                     append_log(&log_path, &format!("[spawn-error] {err}"));
                     None
                 }

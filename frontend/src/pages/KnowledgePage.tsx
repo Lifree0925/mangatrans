@@ -3,11 +3,11 @@
 import { startTransition, useEffect, useRef, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Check, ChevronLeft, ChevronRight, Pencil, Plus, Trash2, X } from "lucide-react";
+import { Check, ChevronLeft, ChevronRight, Loader2, Pencil, Plus, Trash2, X } from "lucide-react";
 import { api } from "../lib/api";
 import { chapterLabel, characterDisplayName } from "../lib/format";
 import { confirmAction, toast } from "../lib/feedback";
-import type { ChapterStoryline, DialogueLineInfo, DialogueLinesResponse, DocInfo, KnowledgeEntry, Project } from "../lib/types";
+import type { ChapterStoryline, DialogueLineInfo, DialogueLinesResponse, KnowledgeEntry, Project } from "../lib/types";
 
 type StoryCard = {
   summary: string;
@@ -65,14 +65,6 @@ export default function KnowledgePage() {
     queryFn: () => api<Project>(`/projects/${active}`),
     enabled: !!active,
   });
-  const documents = useQuery({
-    queryKey: ["documents", active],
-    queryFn: () => api<DocInfo[]>(`/projects/${active}/documents`),
-    enabled: !!active,
-    staleTime: 60_000,
-  });
-  const currentDoc =
-    documents.data?.find((d) => d.status === "active") ?? documents.data?.[0];
 
   const characters = useQuery({
     queryKey: ["knowledge", active],
@@ -278,14 +270,9 @@ export default function KnowledgePage() {
         </Link>
         <h1 className="text-lg font-semibold">知识库</h1>
         <span className="text-(--color-muted)">/</span>
-        <span className="max-w-[200px] truncate text-sm font-medium">
+        <span className="max-w-[280px] truncate text-sm font-medium">
           {project.data?.name ?? "…"}
         </span>
-        {currentDoc && (
-          <span className="max-w-[220px] truncate text-xs text-(--color-muted)">
-            {currentDoc.filename}
-          </span>
-        )}
         <div className="ml-2 flex items-center gap-1.5">
           <button
             onClick={() => setTab("profiles")}
@@ -343,7 +330,15 @@ export default function KnowledgePage() {
                   <button onClick={() => setAdding(false)} className="rounded-lg border border-(--color-border) px-2.5 py-1 text-xs hover:bg-(--color-panel2)">取消</button>
                 </div>
               )}
-              {(() => {
+              {!characters.isFetchedAfterMount && (
+                <div className="flex justify-center py-16 text-(--color-muted)">
+                  <Loader2 size={22} className="animate-spin" />
+                </div>
+              )}
+              {characters.isFetchedAfterMount && characters.isError && (
+                <p className="py-8 text-center text-sm text-(--color-muted)">角色档案加载失败</p>
+              )}
+              {characters.isFetchedAfterMount && !characters.isError && (() => {
                 const chars = (characters.data ?? []).filter((k) => k.item_type === "character");
                 // 分类：用户手动指定优先（role_weight），否则按出场数（>=5 句为主要）
                 const isMajor = (k: KnowledgeEntry) => {
@@ -431,15 +426,15 @@ export default function KnowledgePage() {
                     {charGroup === "major" && (
                       <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
                         {major.map((k) => <Card key={k.id} k={k} />)}
-                        {major.length === 0 && (
-                          <p className="col-span-2 text-sm text-(--color-muted)">暂无（一键直出会自动提取）</p>
+                        {major.length === 0 && chars.length > 0 && (
+                          <p className="col-span-2 text-sm text-(--color-muted)">暂无主要角色</p>
                         )}
                       </div>
                     )}
                     {charGroup === "minor" && (
                       <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
                         {minor.map((k) => <Card key={k.id} k={k} />)}
-                        {minor.length === 0 && (
+                        {minor.length === 0 && chars.length > 0 && (
                           <p className="col-span-2 text-sm text-(--color-muted)">暂无次要角色</p>
                         )}
                       </div>
@@ -447,14 +442,16 @@ export default function KnowledgePage() {
                   </>
                 );
               })()}
-              {(characters.data ?? []).filter((k) => k.item_type === "character").length === 0 && (
-                <p className="py-8 text-center text-sm text-(--color-muted)">暂无角色档案（一键直出会自动提取，或手动添加角色）</p>
-              )}
+              {characters.isFetchedAfterMount &&
+                !characters.isError &&
+                (characters.data ?? []).filter((k) => k.item_type === "character").length === 0 && (
+                  <p className="py-8 text-center text-sm text-(--color-muted)">暂无角色档案（一键直出会自动提取，或手动添加角色）</p>
+                )}
             </>
           )}
 
           {tab === "storylines" && (
-          <div className="flex h-full">
+          <div className="relative flex h-full">
             {/* 章节目录（可收起） */}
             {!storyCollapsed && (
               <div className="toc-hide-scroll w-[179px] shrink-0 overflow-auto py-3">
@@ -476,7 +473,7 @@ export default function KnowledgePage() {
                     {chapterLabel(s.chapter_no, s.chapter_title)}
                   </button>
                 ))}
-                {(storylines.data ?? []).length === 0 && (
+                {storylines.isFetchedAfterMount && !storylines.isError && (storylines.data ?? []).length === 0 && (
                   <p className="px-3 py-4 text-xs text-(--color-muted)">暂无剧情卡（一键直出会自动生成）</p>
                 )}
               </div>
@@ -563,16 +560,26 @@ export default function KnowledgePage() {
                     </div>
                   );
                 })}
-                {(storylines.data ?? []).length === 0 && (
+                {storylines.isFetchedAfterMount && !storylines.isError && (storylines.data ?? []).length === 0 && (
                   <p className="py-8 text-center text-sm text-(--color-muted)">暂无剧情卡（一键直出会自动生成）</p>
                 )}
               </div>
             </div>
+            {!storylines.isFetchedAfterMount && (
+              <div className="pointer-events-none absolute inset-0 flex items-center justify-center text-(--color-muted)">
+                <Loader2 size={22} className="animate-spin" />
+              </div>
+            )}
+            {storylines.isFetchedAfterMount && storylines.isError && (
+              <div className="absolute inset-0 flex items-center justify-center text-sm text-(--color-muted)">
+                章节剧情加载失败
+              </div>
+            )}
           </div>
           )}
 
           {tab === "dialogue" && (
-          <div className="flex h-full">
+          <div className="relative flex h-full">
             {/* 章节目录（可收起） */}
             {!dialogueCollapsed && (
               <div className="toc-hide-scroll w-[179px] shrink-0 overflow-auto py-3">
@@ -594,7 +601,7 @@ export default function KnowledgePage() {
                     {chapterLabel(ch.chapter_no, ch.chapter_title)}
                   </button>
                 ))}
-                {(dialogueLines.data?.chapters ?? []).length === 0 && (
+                {dialogueLines.isFetchedAfterMount && !dialogueLines.isError && (dialogueLines.data?.chapters ?? []).length === 0 && (
                   <p className="px-3 py-4 text-xs text-(--color-muted)">
                     暂无台词本。一键直出时会自动抽取章节 → 场景 → 角色的纯对白流水并逐句对齐译文。
                   </p>
@@ -728,12 +735,22 @@ export default function KnowledgePage() {
                   ))}
                 </div>
               ))}
-              {(dialogueLines.data?.chapters ?? []).length === 0 && (
+              {dialogueLines.isFetchedAfterMount && !dialogueLines.isError && (dialogueLines.data?.chapters ?? []).length === 0 && (
                 <p className="py-8 text-center text-sm text-(--color-muted)">
                   暂无台词本。一键直出时会自动抽取章节 → 场景 → 角色的纯对白流水并逐句对齐译文。
                 </p>
               )}
             </div>
+            {!dialogueLines.isFetchedAfterMount && (
+              <div className="pointer-events-none absolute inset-0 flex items-center justify-center text-(--color-muted)">
+                <Loader2 size={22} className="animate-spin" />
+              </div>
+            )}
+            {dialogueLines.isFetchedAfterMount && dialogueLines.isError && (
+              <div className="absolute inset-0 flex items-center justify-center text-sm text-(--color-muted)">
+                台词本加载失败
+              </div>
+            )}
           </div>
           )}
         </div>

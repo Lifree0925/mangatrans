@@ -292,3 +292,52 @@ def test_export_delivery_file_types(client: TestClient, wait_task) -> None:
         else:
             assert "（剧终）" in data["content"]
             assert "第1集" in data["content"]
+
+
+def test_delivery_reuses_existing_english_title(client: TestClient, wait_task) -> None:
+    """剧本自带英文标题时：正文不重复输出，交付版直接复用且不再改写标题。"""
+    pid = client.post(
+        "/api/v1/projects", json={"name": "被狼王抛弃的新娘"}
+    ).json()["id"]
+    script = """The Alpha's Rejected Mate
+被狼王抛弃的新娘
+
+第一集 初遇
+【咖啡厅·日内】
+林晓：（走进来）你好。
+"""
+    r = client.post(
+        f"/api/v1/projects/{pid}/documents/import",
+        files={"file": ("titled.txt", script.encode(), "text/plain")},
+    )
+    assert r.status_code == 201
+    assert wait_task(
+        client, client.post(f"/api/v1/projects/{pid}/parse").json()["task_id"]
+    )["status"] == "completed"
+    _add_verified_provider()
+    set_provider(_universal_fake(client, pid))
+
+    task_id = client.post(
+        f"/api/v1/projects/{pid}/translation/start", json={}
+    ).json()["task_id"]
+    import asyncio
+
+    from app.pipeline.worker import run_once
+
+    for _ in range(60):
+        asyncio.run(run_once())
+        with dbmod.SessionLocal() as db:
+            if db.get(Task, task_id).status == "completed":
+                break
+
+    # 首段译文强制保留原英文标题
+    segments = client.get(f"/api/v1/projects/{pid}/segments").json()
+    first = min(segments, key=lambda s: s["segment_no"])
+    latest = client.get(f"/api/v1/projects/{pid}/translations/latest").json()["items"]
+    title_translation = next(x for x in latest if x["segment_id"] == first["id"])
+    assert title_translation["target_text"] == "The Alpha's Rejected Mate"
+
+    # 交付版自动使用剧本标题，且正文不再重复一次
+    body = client.post(f"/api/v1/projects/{pid}/export", json={}).json()["content"]
+    assert body.startswith("The Alpha's Rejected Mate\n《被狼王抛弃的新娘》\n")
+    assert body.count("The Alpha's Rejected Mate") == 1

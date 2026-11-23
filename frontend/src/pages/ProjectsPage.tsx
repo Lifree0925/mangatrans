@@ -1,6 +1,6 @@
 /** 项目列表：首屏立即渲染，连接状态静默处理（ChatGPT 风格）。 */
 
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Check, Folder, FolderOpen, Pencil, Plus, Search, Trash2, X } from "lucide-react";
 import { Link } from "react-router-dom";
@@ -85,33 +85,26 @@ export default function ProjectsPage() {
 
   const connecting = !projects.data && projects.isFetching;
 
-  // 后端诊断：连接失败时向 Rust 侧查询 sidecar 存活状态与日志（定位根因）
-  const [diag, setDiag] = useState<{ alive: boolean; log_tail: string } | null>(null);
-  useEffect(() => {
-    if (!projects.error || !(window as unknown as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__) {
-      setDiag(null);
-      return;
-    }
-    let cancelled = false;
-    (async () => {
-      try {
-        const { invoke } = await import("@tauri-apps/api/core");
-        const st = await invoke<{ alive: boolean; log_tail: string }>("get_backend_status");
-        if (!cancelled) setDiag(st);
-      } catch {
-        if (!cancelled) setDiag(null);
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, [projects.error]);
+  // 后端诊断：启动期间即向 Rust 侧查询 sidecar 状态。
+  // 若进程已退出，不必等 API 重试 30 秒结束，立即展示真实启动日志。
+  const backendStatus = useQuery<{ alive: boolean; log_tail: string }>({
+    queryKey: ["backend-status"],
+    queryFn: async () => {
+      const { invoke } = await import("@tauri-apps/api/core");
+      return await invoke<{ alive: boolean; log_tail: string }>("get_backend_status");
+    },
+    enabled: isTauri && (connecting || !!projects.error),
+    refetchInterval: connecting || projects.error ? 1500 : false,
+  });
+  const diag = backendStatus.data ?? null;
+  // 只在当前仍处于“连接中/请求失败”时展示诊断，避免成功后的旧缓存错误残留。
+  const backendFailed = isTauri && (connecting || !!projects.error) && !!diag && !diag.alive;
 
   return (
     <div className="flex h-full flex-col">
-      <div className="flex items-center gap-3 border-b border-(--color-border) px-6 py-4">
+      <div className="relative flex items-center gap-3 border-b border-(--color-border) px-6 py-4">
         <h1 className="text-lg font-semibold">项目</h1>
-        <div className="relative mx-auto w-full max-w-xs">
+        <div className="absolute left-1/2 top-1/2 w-full max-w-xs -translate-x-1/2 -translate-y-1/2">
           <Search size={15} className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-(--color-muted)" />
           <input
             value={search}
@@ -229,8 +222,8 @@ export default function ProjectsPage() {
             })()}
           </div>
 
-          {connecting && <div className="mt-4" /> /* 启动初始化期间静默：窗口立即显示，数据就绪后自动出现 */}
-          {projects.error && !connecting && (
+          {connecting && !backendFailed && <div className="mt-4" /> /* 启动初始化期间静默：窗口立即显示，数据就绪后自动出现 */}
+          {(projects.error || backendFailed) && (
             <div className="mt-4 rounded-xl border border-(--color-border) bg-(--color-panel) px-4 py-3 text-xs text-(--color-muted)">
               <div className="flex items-center gap-2">
                 <span>本地服务未就绪，系统会自动重试</span>

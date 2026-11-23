@@ -13,6 +13,7 @@ from app.models.task import Task, TaskItem
 from app.models.translation import StyleGuide, Translation
 from app.services.context_builder import ContextResult, build_context
 from app.services.importer import sha256
+from app.services.title_service import preserved_title_for_segment
 from app.services.translation import (
     PROMPT_VERSION, translate_window, translate_window_draft, translate_window_polish,
     validate_window,
@@ -365,10 +366,17 @@ def _persist_stage(
         entry = by_id.get(src.id)
         if entry is None:
             continue  # 缺失段不入库（调用方必须先过 validate_window）
+        target_text = entry["target_text"]
+        notes = list(entry.get("notes", []))
+        # 开头已带英文标题的片段：确定性保留原文英文标题，不采用模型改写结果。
+        preserved_title = preserved_title_for_segment(src)
+        if preserved_title:
+            target_text = preserved_title
+            notes.append("source-title-preserved")
         kw = dict(
             stage=stage,
-            target_text=entry["target_text"],
-            notes_json=json.dumps(entry.get("notes", []), ensure_ascii=False),
+            target_text=target_text,
+            notes_json=json.dumps(notes, ensure_ascii=False),
             ambiguity_json=json.dumps(entry.get("ambiguity", []), ensure_ascii=False),
             model_name=model,
             provider_id="default",
@@ -427,6 +435,7 @@ async def _window_material(
             "segment_type": s.segment_type,
             "speaker_name": s.speaker_name,
             "source_text": s.source_text,
+            "line_count_optional": bool(preserved_title_for_segment(s)),
         }
         for s in window
     ]
@@ -482,7 +491,15 @@ async def process_window_draft_item(db_factory, task_id: str, item_id: str, mode
 
     draft, carry, context = await translate_window_draft_direct(db_factory, project_id, window, model)
     errors = validate_window(
-        [{"segment_id": s.id, "source_text": s.source_text} for s in window], draft
+        [
+            {
+                "segment_id": s.id,
+                "source_text": s.source_text,
+                "line_count_optional": bool(preserved_title_for_segment(s)),
+            }
+            for s in window
+        ],
+        draft,
     )
     if errors:
         # 段缺失/顺序错位/重复：拒绝按序回填（历史串段根因），整窗重试
@@ -547,7 +564,8 @@ async def process_window_polish_item(db_factory, task_id: str, item_id: str, mod
     errors = validate_window(
         [
             {"segment_id": s.id, "segment_no": s.segment_no, "segment_type": s.segment_type,
-             "speaker_name": s.speaker_name, "source_text": s.source_text}
+             "speaker_name": s.speaker_name, "source_text": s.source_text,
+             "line_count_optional": bool(preserved_title_for_segment(s))}
             for s in window
         ],
         polished,

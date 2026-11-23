@@ -771,11 +771,11 @@ export default function ProjectPage() {
 
             {exportMode === "delivery" ? (
               <>
-                <p className="mt-4 text-xs text-(--color-muted)">英文剧名（可选）</p>
+                <p className="mt-4 text-xs text-(--color-muted)">英文剧名（可选，留空自动识别）</p>
                 <input
                   value={exportTitleEn}
                   onChange={(e) => setExportTitleEn(e.target.value)}
-                  placeholder="如 Betrayed by the Vampire, Marked by the Alpha"
+                  placeholder="留空则使用剧本自带的英文标题"
                   className="mt-2 w-full rounded-lg border border-(--color-border) bg-(--color-bg) px-3 py-2 text-sm outline-none focus:border-(--color-text)"
                 />
                 <p className="mt-4 text-xs text-(--color-muted)">文件类型</p>

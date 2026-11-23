@@ -2,14 +2,13 @@
 
 import { Link } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { BookOpen, ChevronRight, Trash2 } from "lucide-react";
+import { BookOpen, ChevronRight, Loader2, Trash2 } from "lucide-react";
 import { api } from "../lib/api";
 import { confirmAction, toast } from "../lib/feedback";
 
 interface OverviewItem {
   project_id: string;
   project_name: string;
-  filename: string | null;
   characters: number;
   terms: number;
   rules: number;
@@ -43,15 +42,22 @@ export default function KnowledgeOverviewPage() {
       <div className="mx-auto max-w-5xl px-8 py-8">
         <h1 className="text-xl font-semibold">知识库</h1>
 
-        {overview.isLoading && <div className="mt-8" />}
-        {!overview.isLoading && items.length === 0 && (
+        {!overview.isFetchedAfterMount && (
+          <div className="mt-24 flex justify-center text-(--color-muted)">
+            <Loader2 size={22} className="animate-spin" />
+          </div>
+        )}
+        {overview.isFetchedAfterMount && overview.isError && (
+          <div className="mt-24 text-center text-sm text-(--color-muted)">知识库加载失败</div>
+        )}
+        {overview.isFetchedAfterMount && !overview.isError && items.length === 0 && (
           <div className="mt-24 flex flex-col items-center gap-3 text-(--color-muted)">
             <BookOpen size={32} strokeWidth={1.5} />
             <p className="text-sm">暂无知识库</p>
           </div>
         )}
 
-        <div className="mt-6 grid grid-cols-1 gap-4 xl:grid-cols-2">
+        <div className={`mt-6 grid grid-cols-1 gap-4 xl:grid-cols-2 ${overview.isFetchedAfterMount && !overview.isError ? "" : "hidden"}`}>
           {items.map((item) => (
             <Link
               key={item.project_id}
@@ -61,9 +67,6 @@ export default function KnowledgeOverviewPage() {
               <div className="flex items-center gap-2 pr-10">
                 <BookOpen size={16} className="shrink-0 text-(--color-accent)" />
                 <span className="truncate text-[15px] font-medium">{item.project_name}</span>
-                {item.filename && (
-                  <span className="truncate text-xs text-(--color-muted)">{item.filename}</span>
-                )}
               </div>
 
               <div className="mt-4 flex flex-wrap items-center gap-x-6 gap-y-2 text-sm">

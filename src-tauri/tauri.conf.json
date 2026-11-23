@@ -18,7 +18,9 @@
         "minWidth": 1024,
         "minHeight": 700,
         "visible": false,
-        "additionalBrowserArgs": "--enable-features=CustomScrollbar --disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection"
+        "additionalBrowserArgs": "--enable-features=CustomScrollbar --disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection",
+        "theme": "Light",
+        "backgroundColor": "#ffffff"
       }
     ],
     "security": {

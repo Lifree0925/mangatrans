@@ -74,7 +74,7 @@ function friendlyNetworkError(err: unknown): string {
 async function fetchWithRetry(
   url: string,
   init?: RequestInit,
-  timeoutMs = 60_000
+  timeoutMs = 30_000
 ): Promise<Response> {
   const start = Date.now();
   let lastError: unknown;

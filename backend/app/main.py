@@ -16,14 +16,19 @@ from app.core import security
 from app.core.config import settings
 from app.core.single_instance import acquire_single_instance
 
-# 单实例锁：同一数据目录已有后端存活时本进程直接退出，避免孤儿进程堆积与并发写库。
-# 桌面壳（Tauri）在 spawn 前会探测 lock 文件中的端口复用已有实例，正常路径不会走到这里。
+# 单实例锁：同一数据目录已有后端存活时本进程退出，避免孤儿进程堆积与并发写库。
+# 注意：锁获取失败不等于「已有实例」——Windows 锁机制异常时若直接退出，
+# 会导致新装用户后端不启动、前端永久连接失败。必须探测已有实例真实存活后才退出。
 _LOCK_FD = acquire_single_instance()
 if _LOCK_FD is None:
     import sys
 
-    print("backend: 另一实例已在运行（同一数据目录），本进程退出", flush=True)
-    sys.exit(0)
+    from app.core.single_instance import existing_instance_alive
+
+    if existing_instance_alive():
+        print("backend: 已有后端实例在运行，本进程退出", flush=True)
+        sys.exit(0)
+    print("backend: 单实例锁不可用（锁文件异常），继续启动以保证软件可用", flush=True)
 
 ALLOWED_ORIGINS = [
     "http://localhost:5173",
@@ -57,9 +62,11 @@ def run_migrations_if_needed() -> None:
     if getattr(sys, "frozen", False):
         base = Path(sys._MEIPASS)  # noqa: SLF001 PyInstaller 资源目录
     else:
-        # 开发/容器环境：优先工作目录（backend 或 /app），回退包所在 backend 根
-        candidates = [Path.cwd(), Path(__file__).resolve().parents[2]]
-        base = next((c for c in candidates if (c / "alembic.ini").exists()), candidates[0])
+        # 开发/容器环境：优先工作目录（backend 或 /app），回退 app/main.py 所在 backend 根。
+        # 注意：main.py 位于 backend/app/main.py，backend 根是 parents[1]，不是 parents[2]。
+        backend_root = Path(__file__).resolve().parents[1]
+        candidates = [Path.cwd(), backend_root]
+        base = next((c for c in candidates if (c / "alembic.ini").exists()), backend_root)
     ini = base / "alembic.ini"
     script_dir = base / "migrations"
     cfg = Config(str(ini))

@@ -19,6 +19,8 @@ Rules:
 - Lock all facts: characters, relationships, actions, negation, conditions, causality, chronology, quantities must match the source exactly.
 - Word-for-word literalness is ACCEPTABLE at this stage; naturalness is handled in a later pass.
 - Do not invent, infer, explain, or add facts.
+- EXISTING ENGLISH TITLE: if a source segment is the screenplay title and already contains English,
+  copy that English title verbatim. Do not translate, normalize, or rewrite it.
 - If a reference is genuinely ambiguous, preserve the ambiguity and note it in the ambiguity field.
 - Preserve all stage directions and emotional details.
 - TERM & PLACE CONSISTENCY: a place, character title or proper noun must use the SAME standard
@@ -43,6 +45,8 @@ POLISH_SYSTEM = """You are a professional Chinese-to-English screenplay translat
 This is the POLISH pass. Rewrite the provided faithful draft into natural, idiomatic English suitable for screen dialogue.
 Hard constraints:
 - You MUST NOT change any fact, information point, emotional intensity, or speaker intent relative to the draft.
+- EXISTING ENGLISH TITLE: if a source segment is the screenplay title and already contains English,
+  copy that English title verbatim. Do not translate, normalize, or rewrite it.
 - You may only change wording, sentence structure, register, and naturalness.
 - Use the scene context card and carry-over state to make lines fit the situation accurately.
 - Use approved character names and terminology as given.
@@ -401,6 +405,9 @@ def validate_window(segments: list[dict], translations: list[dict]) -> list[str]
         src = src_by_id.get(t.get("segment_id"))
         if src is None:
             continue
+        # 已有英文标题可压缩成一行；标题后续会确定性回写，不做逐行覆盖校验。
+        if src.get("line_count_optional"):
+            continue
         src_lines = [x for x in src.get("source_text", "").strip().split("\n") if x.strip()]
         tgt_lines = [x for x in t.get("target_text", "").strip().split("\n") if x.strip()]
         if len(src_lines) > 1 and len(tgt_lines) < len(src_lines):
@@ -435,7 +442,14 @@ def locate_problem_segments(segments: list[dict], translations: list[dict]) -> s
             bad.add(sid)
             continue
         one = [t for t in translations if t.get("segment_id") == sid]
-        if validate_window([{"segment_id": sid, "source_text": s["source_text"]}], one):
+        if validate_window(
+            [{
+                "segment_id": sid,
+                "source_text": s["source_text"],
+                "line_count_optional": s.get("line_count_optional", False),
+            }],
+            one,
+        ):
             bad.add(sid)
     bad |= duplicate_segment_ids(translations)
     return bad

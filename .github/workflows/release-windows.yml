@@ -40,6 +40,10 @@ jobs:
         shell: pwsh
         run: ./scripts/build_backend.ps1
 
+      - name: Smoke test backend startup
+        shell: pwsh
+        run: ./scripts/smoke_backend.ps1
+
       - name: Build frontend
         shell: pwsh
         run: ./scripts/build_frontend.ps1
@@ -90,7 +94,8 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force -Path portable | Out-Null
           Copy-Item src-tauri/target/release/mangatrans.exe portable/
-          Copy-Item src-tauri/binaries/mangatrans-backend-x86_64-pc-windows-msvc.exe portable/
+          # Tauri 运行时按 sidecar 名称查找 mangatrans-backend.exe，便携包不能带 target triple 后缀
+          Copy-Item src-tauri/binaries/mangatrans-backend-x86_64-pc-windows-msvc.exe portable/mangatrans-backend.exe
           $readme = @(
             "MangaTrans portable test build (v${env:TAG})",
             "解压后直接运行 mangatrans.exe，无需安装。",

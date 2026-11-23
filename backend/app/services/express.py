@@ -24,6 +24,7 @@ from app.services.translation import (
     repair_segments,
     validate_window,
 )
+from app.services.title_service import preserved_title_for_segment
 from app.services.translation_batch import (
     _forced_terms_for_text,
     _persist_window_translations,
@@ -453,7 +454,12 @@ async def run_express(db_factory, project_id: str, source_document_id: str, mode
             continue
         # 段完整性校验：缺行/错位是历史漏译与标签错位的根因，拒绝静默落库
         seg_dicts = [
-            {"segment_id": s.id, "source_text": s.source_text} for s in window
+            {
+                "segment_id": s.id,
+                "source_text": s.source_text,
+                "line_count_optional": bool(preserved_title_for_segment(s)),
+            }
+            for s in window
         ]
         errors = validate_window(seg_dicts, polished)
         if errors:

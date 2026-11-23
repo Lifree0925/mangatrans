@@ -14,7 +14,6 @@ import {
 import TaskNotifier from "./components/TaskNotifier";
 import Toaster from "./components/Toaster";
 import UpdateNotice from "./components/UpdateNotice";
-import { APP_VERSION } from "./lib/version";
 import ProjectsPage from "./pages/ProjectsPage";
 import ProjectPage from "./pages/ProjectPage";
 import KnowledgePage from "./pages/KnowledgePage";
@@ -86,9 +85,6 @@ export default function App() {
           ))}
         </nav>
         {!collapsed && <UpdateNotice />}
-        {!collapsed && (
-          <div className="px-5 py-4 text-xs text-(--color-muted)">v{APP_VERSION}</div>
-        )}
       </aside>
       <main className="flex-1 overflow-hidden">
         <Routes>
