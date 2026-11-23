@@ -265,6 +265,32 @@ fn read_backend_lock(data_dir: &Path) -> Option<(u16, String, u32)> {
     Some((port as u16, token, pid))
 }
 
+fn kill_backend_pid(pid: u32) {
+    if pid == 0 || pid == std::process::id() {
+        return;
+    }
+    #[cfg(target_os = "windows")]
+    {
+        // /T 同时结束 PyInstaller one-file 启动器父进程与真正的 Python 子进程。
+        let _ = std::process::Command::new("taskkill")
+            .args(["/F", "/T", "/PID", &pid.to_string()])
+            .output();
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = std::process::Command::new("kill")
+            .args(["-TERM", &pid.to_string()])
+            .output();
+    }
+}
+
+/// 从 backend.lock 读取实际后端 PID 并结束进程树。
+fn kill_backend_from_lock(data_dir: &str) {
+    if let Some((_port, _token, pid)) = read_backend_lock(Path::new(data_dir)) {
+        kill_backend_pid(pid);
+    }
+}
+
 /// 探测既有后端是否存活（最多约 2 秒）。存活则复用其端口、令牌与 pid。
 fn try_reuse_existing_backend(data_dir: &Path) -> Option<(u16, String, u32)> {
     let (port, token, pid) = read_backend_lock(data_dir)?;
@@ -436,15 +462,11 @@ pub fn run() {
             // 复用的孤儿后端按 pid 结束（保证下次启动运行当前版本后端）
             if let tauri::RunEvent::ExitRequested { .. } | tauri::RunEvent::Exit = event {
                 if let Some(state) = app.try_state::<BackendState>() {
+                    // 先按 backend.lock 中的 Python 进程 PID 结束整棵进程树；
+                    // one-file 启动器父进程被 CommandChild.kill() 结束并不保证子进程退出。
+                    kill_backend_from_lock(&state.data_dir);
                     if let Some(pid) = state.reused_pid {
-                        #[cfg(target_os = "windows")]
-                        let _ = std::process::Command::new("taskkill")
-                            .args(["/F", "/PID", &pid.to_string()])
-                            .output();
-                        #[cfg(not(target_os = "windows"))]
-                        let _ = std::process::Command::new("kill")
-                            .arg(pid.to_string())
-                            .output();
+                        kill_backend_pid(pid);
                     }
                     if let Ok(mut guard) = state.child.lock() {
                         if let Some(child) = guard.take() {
