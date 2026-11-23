@@ -3,17 +3,39 @@
 import os
 
 from app.core.config import settings
-from app.core.single_instance import _lock_handle, existing_instance_alive
+import json
+
+from app.core.single_instance import (
+    _lock_handle,
+    acquire_single_instance,
+    existing_instance_alive,
+)
 
 
-def test_lock_handle_seeks_to_zero_on_empty_file(tmp_path):
-    path = tmp_path / "backend.lock"
+def test_lock_guard_stays_fixed_length(tmp_path):
+    path = tmp_path / "backend.lock.guard"
     fd = _lock_handle(path)
     try:
-        # 空文件写入占位后必须回到 0；Windows msvcrt.locking 从当前偏移锁定，
-        # 偏移 1 会导致新装用户后端启动失败（历史根因）
+        # 空文件写入占位后必须回到 0；锁后文件保持固定 1 字节，不能被截断。
         assert os.lseek(fd, 0, os.SEEK_CUR) == 0
         assert os.fstat(fd).st_size == 1
+    finally:
+        os.close(fd)
+    assert path.read_bytes() == b"0"
+
+
+def test_metadata_written_to_separate_file(tmp_path, monkeypatch):
+    monkeypatch.setattr(settings, "data_dir", tmp_path)
+    monkeypatch.setattr(settings, "port", 39001)
+    monkeypatch.setattr(settings, "auth_token", "test-token")
+    fd = acquire_single_instance()
+    assert fd is not None
+    try:
+        # 锁始终在 guard 文件上，元数据文件独立存在，持锁期间不截断 guard。
+        assert (tmp_path / "backend.lock.guard").read_bytes() == b"0"
+        meta = json.loads((tmp_path / "backend.lock").read_text(encoding="utf-8"))
+        assert meta["port"] == 39001
+        assert meta["token"] == "test-token"
     finally:
         os.close(fd)
 

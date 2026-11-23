@@ -48,8 +48,15 @@ Hard constraints:
 - EXISTING ENGLISH TITLE: if a source segment is the screenplay title and already contains English,
   copy that English title verbatim. Do not translate, normalize, or rewrite it.
 - You may only change wording, sentence structure, register, and naturalness.
-- Use the scene context card and carry-over state to make lines fit the situation accurately.
-- Use approved character names and terminology as given.
+- USE PROJECT KNOWLEDGE (critical): CHARACTER PROFILES define each speaker's personality,
+  speech style, emotional range and forms of address. Reflect them in word choice, sentence
+  length, register and emotional intensity. Never copy profile text into the output.
+- CONTINUITY: use CHAPTER STORYLINE and CARRY-OVER STATE to keep events, relationships,
+  prior dependencies and unresolved threads continuous. Never reveal FORESHADOWING or
+  SPOILER GUARD facts before their proper time.
+- USE approved character names, NAME-FORM MAP and terminology as given. Translate the
+  specific form used in the source: a nickname stays a nickname, a formal name stays formal;
+  never replace every alias with the canonical formal name.
 - If the draft flagged ambiguity, keep the ambiguity.
 - TERM & PLACE CONSISTENCY: use the standard translation from the term list with exact casing
   (e.g. "Wolf King", "Anti-magic Handcuffs"); the same place must keep the same English name

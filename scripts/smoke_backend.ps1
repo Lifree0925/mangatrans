@@ -16,6 +16,12 @@ $listener.Start()
 $port = ([System.Net.IPEndPoint]$listener.LocalEndpoint).Port
 $listener.Stop()
 
+# 第二实例用另一个空闲端口：若单实例锁失效，它会真正启动第二个服务，便于明确识别。
+$listener2 = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Loopback, 0)
+$listener2.Start()
+$secondPort = ([System.Net.IPEndPoint]$listener2.LocalEndpoint).Port
+$listener2.Stop()
+
 $tempRoot = if ($env:RUNNER_TEMP) { $env:RUNNER_TEMP } else { [System.IO.Path]::GetTempPath() }
 $dataDir = Join-Path $tempRoot ("mangatrans-smoke-" + [guid]::NewGuid().ToString("N"))
 New-Item -ItemType Directory -Force -Path $dataDir | Out-Null
@@ -63,20 +69,28 @@ try {
     throw "健康检查返回异常：$($health | ConvertTo-Json -Compress)"
   }
 
-  # 同一数据目录的第二实例必须退出，不能残留第二套 Worker
-  # 输出重定向到独立文件，避免复用首个进程的 stdout 句柄
+  # 同一数据目录的第二实例必须退出，不能残留第二套 Worker。
+  # 给它另一个端口，锁正常时应干净退出；锁失效时会真的启动第二个服务。
+  $env:MT_PORT = "$secondPort"
+  $secondOut = Join-Path $dataDir "second-stdout.log"
+  $secondErr = Join-Path $dataDir "second-stderr.log"
   $second = Start-Process -FilePath $BackendPath -PassThru -WindowStyle Hidden `
-    -RedirectStandardOutput (Join-Path $dataDir "second-stdout.log") `
-    -RedirectStandardError (Join-Path $dataDir "second-stderr.log")
+    -RedirectStandardOutput $secondOut -RedirectStandardError $secondErr
   $secondExited = $second.WaitForExit(30000)
   if (-not $secondExited) {
-    Stop-Process -Id $second.Id -Force
-    throw "单实例锁失效：第二实例 30 秒内未退出"
+    $secondHealthy = $false
+    try {
+      $sr = Invoke-WebRequest -UseBasicParsing -TimeoutSec 2 -Uri "http://127.0.0.1:$secondPort/health"
+      $secondHealthy = $sr.StatusCode -ge 200 -and $sr.StatusCode -lt 300
+    } catch {}
+    Stop-Process -Id $second.Id -Force -ErrorAction SilentlyContinue
+    throw "单实例锁失效：第二实例 30 秒内未退出（second_healthy=$secondHealthy，port=$secondPort）。`nsecond stdout：`n$(Get-Content $secondOut -Raw -ErrorAction SilentlyContinue)`nsecond stderr：`n$(Get-Content $secondErr -Raw -ErrorAction SilentlyContinue)"
   }
   if ($second.ExitCode -ne 0) {
-    throw "单实例锁失效：第二实例异常退出（code=$($second.ExitCode)），可能因端口冲突而非锁检测"
+    throw "单实例锁失效：第二实例异常退出（code=$($second.ExitCode)）。`nsecond stderr：`n$(Get-Content $secondErr -Raw -ErrorAction SilentlyContinue)"
   }
   Write-Host "single-instance lock ok (second exit code=0)"
+  $env:MT_PORT = "$port"
 
   # 第二实例退出后，首个后端仍必须可用
   $again = Invoke-RestMethod -TimeoutSec 2 -Uri "http://127.0.0.1:$port/health"

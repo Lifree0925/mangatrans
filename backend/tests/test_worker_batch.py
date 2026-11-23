@@ -339,3 +339,100 @@ def test_qa_retry_does_not_restart_windows(client, wait_task) -> None:
         assert all(i.status == "succeeded" for i in wins)
         task = db.get(Task, task_id)
         assert task.status == "completed"
+
+
+def test_polish_prompt_contains_project_knowledge(client: TestClient, wait_task) -> None:
+    """真实 Polish 调用链：角色档案、章节剧情和 carry-over 必须进入提示词。"""
+    pid = _setup_script(client, wait_task)
+    from app.models.document import Chapter
+    from app.models.knowledge import KnowledgeItem
+    from app.models.storyline import ChapterStoryline
+
+    with dbmod.SessionLocal() as db:
+        chapter = db.scalar(
+            select(Chapter).where(Chapter.project_id == pid).order_by(Chapter.chapter_no)
+        )
+        assert chapter is not None
+        db.add(
+            KnowledgeItem(
+                project_id=pid,
+                item_type="character",
+                canonical_key="林晓",
+                data_json=json.dumps(
+                    {
+                        "translation": "Lin Xiao",
+                        "personality": "沉稳内敛",
+                        "speech_style": "短句克制，少寒暄",
+                        "forms_of_address": ["林晓"],
+                    },
+                    ensure_ascii=False,
+                ),
+                status="approved",
+            )
+        )
+        db.add(
+            ChapterStoryline(
+                project_id=pid,
+                chapter_id=chapter.id,
+                version=1,
+                card_json=json.dumps(
+                    {
+                        "summary": "旧案重逢",
+                        "key_events": ["林晓与王强在咖啡厅见面"],
+                        "foreshadowing": ["王强隐瞒了真相"],
+                        "prior_deps": ["两人上一集不欢而散"],
+                        "character_states": {"林晓": "保持警惕"},
+                    },
+                    ensure_ascii=False,
+                ),
+                status="generated",
+            )
+        )
+        db.commit()
+
+    f = FakeProvider()
+
+    def h(messages):
+        content = messages[-1]["content"]
+        system = messages[0]["content"] if messages else ""
+        if "translate only these" in content or "FAITHFUL DRAFT" in content:
+            ids = re.findall(r"\[([0-9a-f]{32})\]", content)
+            natural = "POLISH pass" in system
+            out = {
+                "window_id": "W",
+                "translations": [
+                    {
+                        "segment_id": sid,
+                        "target_text": f"EN-{sid[:8]}-" + ("polished" if natural else "draft"),
+                        "notes": [],
+                        "ambiguity": [],
+                    }
+                    for sid in dict.fromkeys(ids)
+                ],
+                "carry_over": {
+                    "forms_of_address": ["直呼其名"],
+                    "ongoing_state": "旧案重逢后的紧张",
+                    "open_threads": ["王强隐瞒的真相"],
+                    "active_expressions": [],
+                },
+            }
+            return out
+        return None
+
+    set_provider(f.on(h))
+    task_id = client.post(f"/api/v1/projects/{pid}/translation/start", json={}).json()["task_id"]
+    assert _drive_worker(task_id) == "completed"
+
+    polish_prompts = [
+        call["messages"][1]["content"]
+        for call in f.calls
+        if call.get("messages")
+        and "POLISH pass" in call["messages"][0].get("content", "")
+    ]
+    assert polish_prompts
+    assert any("CHARACTER PROFILES (personality & speech style)" in p for p in polish_prompts)
+    assert any("沉稳内敛" in p and "短句克制，少寒暄" in p for p in polish_prompts)
+    assert any("CHAPTER STORYLINE (current chapter)" in p for p in polish_prompts)
+    assert any("两人上一集不欢而散" in p for p in polish_prompts)
+    assert any("CARRY-OVER STATE (previous window)" in p for p in polish_prompts)
+    assert any("旧案重逢后的紧张" in p for p in polish_prompts)
