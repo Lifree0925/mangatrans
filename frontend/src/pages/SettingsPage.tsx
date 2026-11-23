@@ -548,7 +548,7 @@ export default function SettingsPage() {
           onClick={() => setShowHelp(false)}
         >
           <div
-            className="flex max-h-[85vh] w-full max-w-2xl flex-col rounded-2xl bg-(--color-bg) shadow-xl"
+            className="flex h-[80vh] max-h-[calc(100vh-3rem)] w-full max-w-2xl flex-col rounded-2xl bg-(--color-bg) shadow-xl"
             onClick={(e) => e.stopPropagation()}
           >
             <div className="flex items-center justify-between border-b border-(--color-border) px-5 py-4">

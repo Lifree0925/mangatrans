@@ -527,7 +527,7 @@ export default function TasksPage() {
           onClick={() => setShowHistory(false)}
         >
           <div
-            className="flex max-h-[80vh] w-full max-w-3xl flex-col rounded-2xl bg-(--color-bg) p-5 shadow-2xl"
+            className="flex h-[560px] max-h-[calc(100vh-3rem)] w-full max-w-3xl flex-col rounded-2xl bg-(--color-bg) p-5 shadow-2xl"
             onClick={(e) => e.stopPropagation()}
           >
             <div className="flex items-center justify-between">

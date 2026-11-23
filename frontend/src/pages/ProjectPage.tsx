@@ -626,7 +626,7 @@ export default function ProjectPage() {
             onClick={() => setRetranslateOpen(false)}
           >
             <div
-              className="flex max-h-[80vh] w-full max-w-md flex-col rounded-2xl bg-(--color-bg) p-5 shadow-2xl"
+              className="flex h-[540px] max-h-[calc(100vh-3rem)] w-full max-w-md flex-col rounded-2xl bg-(--color-bg) p-5 shadow-2xl"
               onClick={(e) => e.stopPropagation()}
             >
               <div className="flex items-center justify-between">
@@ -717,7 +717,7 @@ export default function ProjectPage() {
           onClick={() => setExportOpen(false)}
         >
           <div
-            className="w-full max-w-md rounded-2xl bg-(--color-bg) p-5 shadow-2xl"
+            className="flex h-[540px] max-h-[calc(100vh-3rem)] w-full max-w-md flex-col rounded-2xl bg-(--color-bg) p-5 shadow-2xl"
             onClick={(e) => e.stopPropagation()}
           >
             <div className="flex items-center justify-between">
@@ -730,7 +730,8 @@ export default function ProjectPage() {
               </button>
             </div>
 
-            <p className="mt-4 text-xs text-(--color-muted)">导出类型</p>
+            <div className="mt-4 flex-1 overflow-auto pr-1">
+            <p className="text-xs text-(--color-muted)">导出类型</p>
             <div className="mt-2 grid grid-cols-2 gap-2">
               <button
                 onClick={() => setExportMode("delivery")}
@@ -862,8 +863,9 @@ export default function ProjectPage() {
                 <p className="mt-1 break-all font-mono">项目文件夹：{project.data.storage_path}</p>
               )}
             </div>
+            </div>
 
-            <div className="mt-5 flex justify-end gap-2">
+            <div className="mt-4 flex justify-end gap-2">
               <button
                 onClick={() => setExportOpen(false)}
                 className="rounded-lg border border-(--color-border) bg-(--color-bg) px-4 py-1.5 text-sm hover:bg-(--color-panel2)"

@@ -49,14 +49,14 @@ export default function Toaster() {
           onClick={() => confirm.close(false)}
         >
           <div
-            className="w-full max-w-sm rounded-2xl bg-(--color-bg) p-5 shadow-2xl"
+            className="flex min-h-[180px] w-full max-w-sm flex-col rounded-2xl bg-(--color-bg) p-5 shadow-2xl"
             onClick={(e) => e.stopPropagation()}
           >
             <h3 className="text-base font-semibold">{confirm.title}</h3>
             {confirm.message && (
               <p className="mt-2 text-sm leading-6 text-(--color-muted)">{confirm.message}</p>
             )}
-            <div className="mt-5 flex justify-end gap-2">
+            <div className="mt-auto flex justify-end gap-2 pt-5">
               <button
                 onClick={() => confirm.close(false)}
                 className="rounded-lg border border-(--color-border) bg-(--color-bg) px-4 py-1.5 text-sm hover:bg-(--color-panel2)"

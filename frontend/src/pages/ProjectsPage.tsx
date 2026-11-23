@@ -268,7 +268,7 @@ export default function ProjectsPage() {
           onClick={() => setCreateOpen(false)}
         >
           <div
-            className="w-full max-w-md rounded-2xl bg-(--color-bg) p-5 shadow-2xl"
+            className="flex h-[380px] max-h-[calc(100vh-3rem)] w-full max-w-md flex-col rounded-2xl bg-(--color-bg) p-5 shadow-2xl"
             onClick={(e) => e.stopPropagation()}
           >
             <div className="flex items-center justify-between">
@@ -316,7 +316,7 @@ export default function ProjectsPage() {
               原文与项目文件将保存在此文件夹；建议每个项目使用独立文件夹。留空则使用软件默认目录。
             </p>
 
-            <div className="mt-5 flex justify-end gap-2">
+            <div className="mt-auto flex justify-end gap-2">
               <button
                 onClick={() => setCreateOpen(false)}
                 className="rounded-lg border border-(--color-border) bg-(--color-bg) px-4 py-1.5 text-sm hover:bg-(--color-panel2)"
