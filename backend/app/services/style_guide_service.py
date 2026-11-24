@@ -37,11 +37,11 @@ GUIDE_PROMPT = """你是剧本翻译风格总监。根据以下试译样本（�
 
 要求：
 1. character_voices：为每个出场人物归纳 voice（用词、句式、语域、称呼习惯、情绪强度）。
-2. dialogue_register：整体对白口语化程度与语域。
+2. dialogue_register：整体对白口语化程度与语域；对白必须像英语原创剧，避免翻译腔、堆叠名词和场景标题式表达。
 3. action_description_style：动作描述风格（简洁/标准/详细）。
-4. cultural_strategy：文化表达转换策略。
+4. cultural_strategy：文化表达转换策略；中文意象、俗语、辱骂和威胁要用等价的英语表达，不保留生硬直译。
 5. capitalization_rules：专名/头衔大小写规则。
-6. examples：挑选 3-5 条最能代表风格的中英对照。
+6. examples：挑选 3-5 条最能代表风格的中英对照；只选自然、可复用的表达。
 7. 只依据样本，不编造。
 8. 只返回 JSON。
 

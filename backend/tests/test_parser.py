@@ -97,3 +97,17 @@ def test_junk_line_merged_into_previous_segment() -> None:
     types = [s.type for s in r.segments]
     assert "junk" not in types
     assert r.segments[0].text == "# 第1回 桃园结义\nvi:Tam quốc diễn nghĩa/Hồi 1\n"
+
+
+def test_stage_direction_and_cast_list_with_colon_are_narrative() -> None:
+    """含冒号的△动作行与人物表不能误判成对白。"""
+    text = (
+        "△Ethan盯着手里的报告。白纸黑字写着：排除亲子关系。\n\n"
+        "人物：Chloe，Leo，Ethan\n\n"
+        "Chloe：这是真的吗？\n"
+    )
+    r = parse_script(text)
+    assert [s.type for s in r.segments] == ["narrative", "narrative", "dialogue"]
+    assert r.segments[0].speaker is None
+    assert r.segments[1].speaker is None
+    assert r.segments[2].speaker == "Chloe"

@@ -1,12 +1,22 @@
 /** 项目列表：首屏立即渲染，连接状态静默处理（ChatGPT 风格）。 */
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Check, Folder, FolderOpen, Pencil, Plus, Search, Trash2, X } from "lucide-react";
 import { Link } from "react-router-dom";
 import { api } from "../lib/api";
 import { confirmAction, toast } from "../lib/feedback";
 import type { Project } from "../lib/types";
+
+interface BackendDiag {
+  alive: boolean;
+  port: number;
+  log_tail: string;
+  sidecar_path: string;
+  sidecar_exists: boolean;
+  last_exit_code: number | null;
+  reused: boolean;
+}
 
 export default function ProjectsPage() {
   const qc = useQueryClient();
@@ -87,18 +97,50 @@ export default function ProjectsPage() {
 
   // 后端诊断：启动期间即向 Rust 侧查询 sidecar 状态。
   // 若进程已退出，不必等 API 重试 30 秒结束，立即展示真实启动日志。
-  const backendStatus = useQuery<{ alive: boolean; log_tail: string }>({
+  const backendStatus = useQuery<BackendDiag>({
     queryKey: ["backend-status"],
     queryFn: async () => {
       const { invoke } = await import("@tauri-apps/api/core");
-      return await invoke<{ alive: boolean; log_tail: string }>("get_backend_status");
+      return await invoke<BackendDiag>("get_backend_status");
     },
     enabled: isTauri && (connecting || !!projects.error),
     refetchInterval: connecting || projects.error ? 1500 : false,
   });
   const diag = backendStatus.data ?? null;
+  const refetchBackendStatus = backendStatus.refetch;
   // 只在当前仍处于“连接中/请求失败”时展示诊断，避免成功后的旧缓存错误残留。
   const backendFailed = isTauri && (connecting || !!projects.error) && !!diag && !diag.alive;
+  const autoRestartAttempts = useRef(0);
+
+  // sidecar 存在但意外退出时自动重启一次；文件缺失不做无效拉起。
+  useEffect(() => {
+    if (!backendFailed || diag?.alive || !diag?.sidecar_exists) return;
+    if (autoRestartAttempts.current >= 1) return;
+    autoRestartAttempts.current += 1;
+    const timer = window.setTimeout(async () => {
+      try {
+        const { invoke } = await import("@tauri-apps/api/core");
+        await invoke("restart_backend");
+      } catch {
+        /* 错误会由状态查询和日志展示 */
+      }
+      void qc.invalidateQueries({ queryKey: ["projects"] });
+      void refetchBackendStatus();
+    }, 800);
+    return () => window.clearTimeout(timer);
+  }, [backendFailed, diag?.alive, diag?.sidecar_exists, qc, refetchBackendStatus]);
+
+  const restartLocalService = async () => {
+    if (!isTauri || !diag || diag.alive) return true;
+    try {
+      const { invoke } = await import("@tauri-apps/api/core");
+      await invoke("restart_backend");
+      return true;
+    } catch (err) {
+      toast.error(`重启本地服务失败：${String(err)}`);
+      return false;
+    }
+  };
 
   return (
     <div className="flex h-full flex-col">
@@ -228,21 +270,35 @@ export default function ProjectsPage() {
               <div className="flex items-center gap-2">
                 <span>本地服务未就绪，系统会自动重试</span>
                 <button
-                  onClick={() => projects.refetch()}
+                  onClick={async () => {
+                    const restarted = await restartLocalService();
+                    if (restarted) await projects.refetch();
+                  }}
                   className="ml-auto rounded-lg border border-(--color-border) bg-(--color-bg) px-2 py-1 hover:bg-(--color-panel2)"
                 >
-                  立即重试
+                  {diag && !diag.alive ? "重启服务" : "立即重试"}
                 </button>
               </div>
               {diag && (
                 <div className="mt-2">
                   {diag.alive ? (
                     <p className="text-emerald-600">后端进程运行中，正在初始化</p>
+                  ) : diag.sidecar_exists ? (
+                    <>
+                      <p className="font-medium text-red-600">
+                        本地服务进程已退出，正在尝试自动重启；仍失败请点击“重启服务”：
+                      </p>
+                      <pre className="mt-1 max-h-40 overflow-auto whitespace-pre-wrap break-all rounded-lg bg-(--color-bg) p-2 font-mono text-[11px] leading-4">
+                        {diag.log_tail || "（日志为空）"}
+                      </pre>
+                    </>
                   ) : (
                     <>
                       <p className="font-medium text-red-600">
-                        本地服务进程已退出（启动失败）。请复制以下日志反馈排查：
+                        本地服务文件缺失，可能被杀毒软件隔离或安装不完整：
                       </p>
+                      <p className="mt-1 break-all font-mono text-[11px]">{diag.sidecar_path}</p>
+                      <p className="mt-1 text-red-600">请恢复该文件或重新安装软件。</p>
                       <pre className="mt-1 max-h-40 overflow-auto whitespace-pre-wrap break-all rounded-lg bg-(--color-bg) p-2 font-mono text-[11px] leading-4">
                         {diag.log_tail || "（日志为空）"}
                       </pre>

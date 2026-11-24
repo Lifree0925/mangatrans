@@ -10,7 +10,11 @@
 !macroend
 
 !macro NSIS_HOOK_PREINSTALL
-  ; 覆盖安装前清理上次崩溃/强杀遗留的 sidecar，避免 Windows 文件锁导致静默安装失败。
+  ; 覆盖安装前先关闭旧主程序，再清理 sidecar。
+  ; 只杀 sidecar 会让旧窗口继续运行并显示“本地服务已退出”，也会干扰新版本启动。
+  DetailPrint "关闭正在运行的 MangaTrans"
+  nsExec::ExecToLog 'taskkill /F /IM mangatrans.exe'
+  Pop $0
   DetailPrint "关闭残留的本地翻译服务"
   nsExec::ExecToLog 'taskkill /F /IM mangatrans-backend.exe'
   Pop $0

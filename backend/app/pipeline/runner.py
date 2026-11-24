@@ -12,6 +12,11 @@ from sqlalchemy import select
 import app.core.database as dbmod
 from app.llm.registry import get_provider
 from app.models.task import Task
+from app.pipeline.task_timer import (
+    settle_task_timer,
+    settle_task_timer_for_recovery,
+    start_task_timer,
+)
 from app.services import express, knowledge_service, style_guide_service
 
 
@@ -48,14 +53,12 @@ async def _run(task_id: str) -> None:
 
 
 async def _run_task(task_id: str) -> None:
-    from datetime import datetime, timezone
-
     with _sess_factory() as db:
         task = db.get(Task, task_id)
         if task is None:
             return
         task.status = "running"
-        task.started_at = datetime.now(timezone.utc)
+        start_task_timer(task)
         task.error_message = None
         task.error_code = None
         db.commit()
@@ -140,7 +143,7 @@ async def _run_task(task_id: str) -> None:
             else:
                 task.error_code = (getattr(exc, "code", None) or type(exc).__name__)[:32]
                 task.error_message = str(exc)[:2000] or type(exc).__name__
-            task.started_at = None  # 无执行线程
+            settle_task_timer(task)  # 无执行线程：结算实际运行时长
             db.commit()
         return
 
@@ -148,12 +151,12 @@ async def _run_task(task_id: str) -> None:
         task = db.get(Task, task_id)
         if task.status == "paused":
             # 用户暂停：不覆盖为 completed（保留进度，resume 重新调度续跑）
-            task.started_at = None
+            settle_task_timer(task)
             task.progress_json = json.dumps(result, ensure_ascii=False)
             db.commit()
             return
         task.status = "completed"
-        task.started_at = None
+        settle_task_timer(task)
         task.progress_json = json.dumps(result, ensure_ascii=False)
         db.commit()
 
@@ -177,6 +180,7 @@ def recover_threaded_tasks(db) -> int:
         task = db.get(Task, tid)
         task.status = "failed"
         task.error_message = "应用中断：任务未完成，请点击重试。"
-        task.started_at = None
+        # 只结算到最后一次写库时间，重启停机期间不计入运行时长。
+        settle_task_timer_for_recovery(task)
     db.commit()
     return len(zombie_ids)

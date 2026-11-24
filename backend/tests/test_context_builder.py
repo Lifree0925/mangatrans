@@ -1,6 +1,8 @@
 """Context Builder 单元测试。"""
 
-from app.services.context_builder import build_context
+import json
+
+from app.services.context_builder import build_context, build_qa_reference
 
 
 def test_assembly_order_and_snapshot() -> None:
@@ -226,3 +228,49 @@ def test_lean_context_drops_unused_knowledge_but_keeps_required_facts() -> None:
     assert "王强隐瞒秘密" not in text
     assert "沉稳" not in text
     assert result.snapshot["context_mode"] == "lean"
+
+
+def test_qa_reference_includes_relevant_relationship_and_address_facts() -> None:
+    """QA 参考必须包含亲属关系/称谓，否则无法判断 aunt 是否应为 mother。"""
+    reference = build_qa_reference(
+        segments=[{
+            "segment_id": "S1", "segment_type": "dialogue", "speaker_name": "Damian",
+            "source_text": "Damian：你那个恶毒的母亲又来了。\n",
+        }],
+        knowledge=[
+            {
+                "id": "C1", "item_type": "character", "canonical_key": "Damian",
+                "aliases": [], "data": {
+                    "translation": "Damian Parker",
+                    "role_translation": "heir",
+                    "forms_of_address": ["Damian先生"],
+                },
+            },
+            {
+                "id": "C2", "item_type": "character", "canonical_key": "Helen",
+                "aliases": [], "data": {"translation": "Helen Parker"},
+            },
+            {
+                "id": "R1", "item_type": "relation", "canonical_key": "Damian—Helen",
+                "aliases": [], "data": {
+                    "subject": "Damian", "object": "Helen",
+                    "relation": "母亲", "relation_translation": "mother",
+                },
+            },
+            {
+                "id": "R2", "item_type": "relation", "canonical_key": "Ethan—Mia",
+                "aliases": [], "data": {"relation": "夫妻"},
+            },
+        ],
+    )
+    payload = json.loads(reference)
+    assert payload["characters"][0]["role"] == "heir"
+    assert payload["characters"][0]["forms_of_address"] == ["Damian先生"]
+    assert payload["relationships"] == [{
+        "item": "Damian—Helen",
+        "data": {
+            "subject": "Damian", "object": "Helen",
+            "relation": "母亲", "relation_translation": "mother",
+        },
+    }]
+    assert all(item["item"] != "Ethan—Mia" for item in payload["relationships"])

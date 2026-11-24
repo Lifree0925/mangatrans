@@ -37,6 +37,8 @@ _DIALOGUE_RE = re.compile(
     r"^([^\s：:（）()【】\[.\]\"'’“”]{1,24})\s*(?:（[^）]{1,40}）)?[：:](\s*.*)$"
 )
 _PAREN_RE = re.compile(r"^（[^）]{1,200}）\s*$")
+# 人物表不是对白：冒号后的角色名单必须保留原样，不能按「角色：台词」解析。
+_CAST_LIST_RE = re.compile(r"^(?:人物|角色|出场人物|登场人物|主要人物)\s*[：:]")
 
 
 @dataclass
@@ -115,6 +117,12 @@ def _classify_line(line: str) -> tuple[str, str, str | None]:
     if _JUNK_RE.match(stripped):
         # 杂质行（链接/语言标记等）：并入上一片段
         return "junk", "junk", None
+    # △ 开头是舞台动作/叙述，即使行内出现冒号也不能当对白。
+    # 否则会把「△Ethan盯着报告：排除亲子关系」误判成角色名为整句动作的对白。
+    if stripped.startswith("△"):
+        return "narrative", RULE_NARRATIVE, None
+    if _CAST_LIST_RE.match(stripped):
+        return "narrative", RULE_NARRATIVE, None
     if _CHAPTER_RE.match(stripped):
         return "heading", RULE_CHAPTER, None
     m_bracket = _SCENE_BRACKET_RE.match(stripped)

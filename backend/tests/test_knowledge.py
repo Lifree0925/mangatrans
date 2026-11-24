@@ -34,7 +34,7 @@ def _fake_provider() -> FakeProvider:
 
     def knowledge_handler(messages):
         text = messages[0]["content"]
-        if "提取人物与术语" in text:
+        if "提取人物" in text:
             return {
                 "items": [
                     {

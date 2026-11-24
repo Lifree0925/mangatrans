@@ -18,8 +18,10 @@ PROMPT = """你是剧本角色分析专家。根据角色名单和跨全剧抽�
 1. personality：稳定的性格特征，必须有台词/行为依据，不写空泛形容词。
 2. speech_style：具体说话方式，包括句长、语域（粗俗/克制/古雅等）、常用句式、反问/命令倾向、口头禅和省略习惯。
 3. forms_of_address：角色对他人使用的称呼，以及别人如何称呼该角色（只摘原文）。
-4. emotional_range：常见情绪区间，以及情绪爆发时的表达特点。
-5. notes：翻译时的具体约束，例如是否用缩略语、是否避免文雅词、是否保留粗口强度、是否常用短句。
+4. role：原文明确体现的身份/职业，写成自然英文职位或身份；没有明确依据就留空。
+5. relationships：原文明确体现的人际关系，写成简短英文事实（例如 "Damian's mother"）；没有明确依据就留空，禁止猜亲属关系。
+6. emotional_range：常见情绪区间，以及情绪爆发时的表达特点。
+7. notes：翻译时的具体约束，例如是否用缩略语、是否避免文雅词、是否保留粗口强度、是否常用短句。
 
 硬性要求：
 - 只依据提供的原文；不要根据名字猜测性格，不得补写剧情。
@@ -36,6 +38,8 @@ class CharacterProfile(BaseModel):
     personality: str = ""
     speech_style: str = ""
     forms_of_address: list[str] = Field(default_factory=list)
+    role: str = ""
+    relationships: list[str] = Field(default_factory=list)
     emotional_range: str = ""
     notes: str = ""
 
@@ -165,6 +169,8 @@ async def extract_profiles(
                     "personality": prof.personality,
                     "speech_style": prof.speech_style,
                     "forms_of_address": prof.forms_of_address,
+                    "role": prof.role,
+                    "relationships": prof.relationships,
                     "emotional_range": prof.emotional_range,
                     "notes": prof.notes,
                 }

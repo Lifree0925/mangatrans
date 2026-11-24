@@ -23,6 +23,8 @@ _PROFILE_FIELDS = (
     "personality",
     "speech_style",
     "forms_of_address",
+    "role",
+    "relationships",
     "emotional_range",
     "notes",
 )
@@ -223,14 +225,19 @@ def build_context(
             snapshot["storyline_id"] = storyline.get("id")
 
     if chars:
-        char_rows = [
-            {
+        char_rows = []
+        for c in chars:
+            data = c.get("data", {}) or {}
+            char_rows.append({
                 "name": c["canonical_key"],
                 "aliases": c.get("aliases", []),
-                "translation": (c.get("data", {}) or {}).get("translation", ""),
-            }
-            for c in chars
-        ]
+                "translation": data.get("translation", ""),
+                "role": (
+                    data.get("role_translation") or data.get("role")
+                    or data.get("identity") or data.get("occupation") or ""
+                ),
+                "relationships": data.get("relationships", []),
+            })
         blocks.append(_json_block("APPROVED CHARACTERS", char_rows))
         alias_map = [
             {
@@ -459,6 +466,11 @@ def build_qa_reference(
             "english_name": data.get("translation") or speaker_map.get(normalize(item.get("canonical_key", "")), ""),
             "aliases": item.get("aliases", []),
             "forms_of_address": data.get("forms_of_address") or [],
+            "role": (
+                data.get("role_translation") or data.get("role")
+                or data.get("identity") or data.get("occupation") or ""
+            ),
+            "relationships": data.get("relationships") or [],
         })
 
     terms = [
@@ -480,6 +492,40 @@ def build_qa_reference(
             seen_terms.add(key)
             dedup_terms.append(term)
 
+    # QA 需要人物关系/称呼/身份事实，否则只能看到人名，无法判断 "aunt" 是否该是 "mother"。
+    focus_names = {str(s).strip() for s in speakers if str(s).strip()}
+    for c in characters:
+        for name in (
+            c.get("source_name", ""), c.get("english_name", ""),
+            *(c.get("aliases") or []), *(c.get("forms_of_address") or []),
+        ):
+            name = str(name or "").strip()
+            if len(name) >= 2:
+                focus_names.add(name)
+    for m in matches:
+        for name in (m.get("source_form", ""), m.get("canonical", ""), m.get("en", "")):
+            name = str(name or "").strip()
+            if len(name) >= 2:
+                focus_names.add(name)
+
+    def _fact_relevant(item: dict) -> bool:
+        names = [n for n in _item_names(item) if len(n) >= 2]
+        if any(n in window_text for n in names):
+            return True
+        blob = _item_blob(item)
+        return any(n in blob for n in focus_names)
+
+    relations = [
+        {"item": item.get("canonical_key", ""), "data": item.get("data", {}) or {}}
+        for item in knowledge
+        if item.get("item_type") == "relation" and _fact_relevant(item)
+    ][:16]
+    rules = [
+        {"item": item.get("canonical_key", ""), "data": item.get("data", {}) or {}}
+        for item in knowledge
+        if item.get("item_type") == "rule" and _fact_relevant(item)
+    ][:12]
+
     story = {}
     if storyline:
         story = {
@@ -492,12 +538,15 @@ def build_qa_reference(
     payload = {
         "characters": characters[:16],
         "terms": dedup_terms[:30],
+        "relationships": relations,
+        "translation_rules": rules,
         "chapter_storyline": story,
     }
     text = json.dumps(payload, ensure_ascii=False, indent=2)
     if len(text) > max_chars:
-        # 优先保留角色和专名；剧情卡只保留摘要与前情依赖。
+        # 优先保留角色、关系与专名；剧情卡只保留摘要与前情依赖。
         story = {k: story.get(k) for k in ("summary", "prior_deps") if story.get(k)}
         payload["chapter_storyline"] = story
+        payload["translation_rules"] = rules[:6]
         text = json.dumps(payload, ensure_ascii=False, indent=2)
     return text[:max_chars]

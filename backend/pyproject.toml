@@ -1,6 +1,6 @@
 [project]
 name = "mangatrans-backend"
-version = "0.1.0"
+version = "0.1.1"
 description = "AI 漫剧剧本翻译系统本地后端"
 requires-python = ">=3.12"
 dependencies = [

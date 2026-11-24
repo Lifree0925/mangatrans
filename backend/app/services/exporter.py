@@ -5,8 +5,9 @@
 - 集标题：第N集（章间空行分隔）
 - 场景行：N-M 地点 时间 内外（中文原文）
 - 人物行：人物：Role1、Role2（角色名英文化）
-- 动作/音效/闪回等叙述行：保留中文原文（制作团队以中文阅读）
-- 台词：英文角色名（中文语气说明）：英文台词（唯一被替换为译文的部分）
+- 动作/音效/闪回等舞台行：保留中文原文（制作团队以中文阅读）
+- 旁白/画外音/字幕/提示音等叙述内容：输出英文
+- 台词：英文角色名（中文语气说明）：英文台词
 - 结尾：（剧终）
 """
 
@@ -29,7 +30,9 @@ FORMATS = {"md": ".md", "txt": ".txt", "docx": ".docx"}
 _DIALOGUE_SRC_RE = re.compile(r"^\s*([^（(：:]+?)\s*[（(]([^）)]*)[）)]\s*[:：]\s*(.*)$")
 # 译文台词行："Role (english direction): line"
 _DIALOGUE_EN_RE = re.compile(
-    r"^\s*([A-Za-z][A-Za-z0-9 .'&-]*?)\s*(?:\([^)]*\))?\s*[:：]\s*(.*)$"
+    # 角色标签允许多人同说（A/B、A+B）以及英文名中的常见连接符；
+    # 必须与 translation.py 的台词锚点校验保持一致，否则交付版会退回未格式化的译文行。
+    r"^\s*([A-Za-z][A-Za-z0-9 .'’&/+_-]*?)\s*(?:\([^)]*\))?\s*[:：]\s*(.*)$"
 )
 _CHAPTER_HEADING_RE = re.compile(r"^第\s*[0-9一二三四五六七八九十百]+\s*[集話话回章]")
 _SCENE_HEADING_RE = re.compile(r"^\d+\s*[-–]\s*\d+\s*\S")
@@ -86,25 +89,136 @@ def _report(segs, trans, issues) -> dict:
 
 
 def _build_role_map(segs, trans) -> dict[str, str]:
-    """中文原文角色名 → 英文角色名（从原文/译文台词前缀对齐得到）。"""
-    role_map: dict[str, str] = {}
+    """中文原文角色名 → 稳定英文角色名。
+
+    映射优先来自台词前缀，并用“人物：”行的中英对照补齐没有台词的群众角色。
+    同一中文角色出现多个英文写法时，取出现次数最多者；同票取最早出现者，
+    避免后写覆盖先写造成角色标签漂移。
+    """
+    counts: dict[str, dict[str, int]] = {}
+    first_seen: dict[tuple[str, str], int] = {}
+
+    def add(src_role: str, en_role: str, order: int) -> None:
+        src_role = (src_role or "").strip()
+        en_role = (en_role or "").strip()
+        if not src_role or not en_role or src_role == en_role:
+            return
+        counts.setdefault(src_role, {})
+        counts[src_role][en_role] = counts[src_role].get(en_role, 0) + 1
+        first_seen.setdefault((src_role, en_role), order)
+
+    order = 0
     for s in segs:
-        if s.segment_type != "dialogue":
-            continue
         t = trans.get(s.id)
         if t is None:
             continue
         src_lines = [l.strip() for l in (s.source_text or "").split("\n") if l.strip()]
         tgt_lines = [l.strip() for l in (t.target_text or "").split("\n") if l.strip()]
-        for sl, tl in zip(src_lines, tgt_lines):
-            m1 = _DIALOGUE_SRC_RE.match(sl)
-            m2 = _DIALOGUE_EN_RE.match(tl)
-            if m1 and m2:
-                src_role = m1.group(1).strip()
-                en_role = m2.group(1).strip()
-                if src_role and en_role and src_role != en_role:
-                    role_map[src_role] = en_role
+
+        if s.segment_type == "dialogue":
+            for sl, tl in zip(src_lines, tgt_lines):
+                m1 = _DIALOGUE_SRC_RE.match(sl)
+                m2 = _DIALOGUE_EN_RE.match(tl)
+                if m1 and m2:
+                    add(m1.group(1), m2.group(1), order)
+                order += 1
+            continue
+
+        # 人物行：源/译同名列表按顺序对齐，补齐无台词角色（保安、佣人、宾客等）。
+        if _CAST_HEADING_RE.match((s.source_text or "").strip()):
+            src_line = next((l for l in src_lines if _CAST_HEADING_RE.match(l)), "")
+            tgt_line = next(
+                (l for l in tgt_lines if re.match(r"^\s*(?:Characters|Cast)\s*[：:]", l, re.I)),
+                "",
+            )
+            if src_line and tgt_line:
+                src_names = _split_cast_names(src_line)
+                tgt_names = _split_cast_names(tgt_line)
+                if len(src_names) == len(tgt_names):
+                    for sn, en in zip(src_names, tgt_names):
+                        add(sn, en, order)
+                        order += 1
+            continue
+
+    role_map: dict[str, str] = {}
+    for src_role, variants in counts.items():
+        best = max(
+            variants.items(),
+            key=lambda item: (item[1], -first_seen.get((src_role, item[0]), 10**9)),
+        )[0]
+        role_map[src_role] = best
     return role_map
+
+
+def _split_cast_names(line: str) -> list[str]:
+    body = line.split("：", 1)[-1] if "：" in line else line.split(":", 1)[-1]
+    return [x.strip() for x in re.split(r"[、，,]\s*", body) if x.strip()]
+
+
+def _role_lookup(name: str, role_map: dict[str, str]) -> str:
+    """人物行名称可能带中文括注；先精确匹配，再退回基础名。"""
+    name = (name or "").strip()
+    if not name:
+        return name
+    if name in role_map:
+        return role_map[name]
+    base = re.sub(r"[（(][^）)]*[）)]\s*$", "", name).strip()
+    return role_map.get(base, name)
+
+
+# 明确是“说给观众听/看的内容”的叙述标记；纯动作描述即使带冒号也不在此列。
+_NARRATION_MARKER_RE = re.compile(
+    r"^\s*(?:△\s*)?(?:旁白|画外音|电视画外音|广播|字幕|系统提示音|提示音|播报|新闻播报|"
+    r"VO(?:ICE[- ]?OVER)?|V\.O\.|O\.S\.|OS)"
+    r"\s*(?:[（(][^）)]*[）)])?\s*[^：:\n]{0,20}[：:]",
+    re.IGNORECASE,
+)
+
+
+_BRACKETED_NARRATION_RE = re.compile(
+    r"^[【（(]\s*(?:旁白|画外音|电视画外音|广播|字幕|系统提示音|提示音|播报|新闻播报|"
+    r"VO(?:ICE[- ]?OVER)?|V\.O\.|O\.S\.|OS)",
+    re.IGNORECASE,
+)
+
+
+def _is_narration_line(line: str) -> bool:
+    """判断叙述段中的一行是否需要输出英文。
+
+    - 带明确旁白/画外音/字幕/提示音标记的行：翻译；
+    - 无 △ / 【 / 括号舞台标记的普通叙述行：翻译；
+    - △ 动作、音效、括号舞台说明等：保留中文。
+    """
+    stripped = (line or "").strip()
+    if not stripped:
+        return False
+    if stripped in {"（剧终）", "(剧终)"}:
+        return False
+    if _CAST_HEADING_RE.match(stripped):
+        return False
+    if _SCENE_HEADING_RE.match(stripped):
+        return False
+    if stripped.startswith(("△", "【", "（", "(")):
+        return bool(
+            _NARRATION_MARKER_RE.match(stripped)
+            or _BRACKETED_NARRATION_RE.match(stripped)
+        )
+    return True
+
+
+def _render_narrative_lines(src_text: str, tgt_text: str) -> list[str]:
+    """按行合成叙述段：旁白类使用译文，动作/音效类保留中文原文。"""
+    src_lines = [l.strip() for l in (src_text or "").split("\n") if l.strip()]
+    tgt_lines = [l.strip() for l in (tgt_text or "").split("\n") if l.strip()]
+    out: list[str] = []
+    for i, sl in enumerate(src_lines):
+        if _is_narration_line(sl) and i < len(tgt_lines) and tgt_lines[i]:
+            out.append(tgt_lines[i])
+        else:
+            out.append(sl)
+    # 正常情况下 validate_window 保证行数一致；保留多余译文行，避免数据修复后静默丢弃。
+    out.extend(tgt_lines[len(src_lines):])
+    return out
 
 
 def _render_cast_line(line: str, role_map: dict[str, str]) -> str:
@@ -112,12 +226,14 @@ def _render_cast_line(line: str, role_map: dict[str, str]) -> str:
     m = _CAST_HEADING_RE.match(line)
     if not m:
         return line.strip()
-    names = re.split(r"[、，,]\s*", line.split("：", 1)[-1] if "：" in line else line.split(":", 1)[-1])
-    rendered = [role_map.get(n.strip(), n.strip()) for n in names if n.strip()]
+    names = _split_cast_names(line)
+    rendered = [_role_lookup(n, role_map) for n in names]
     return "人物：" + "、".join(rendered)
 
 
-def _render_dialogue(src_text: str, tgt_text: str) -> list[str]:
+def _render_dialogue(
+    src_text: str, tgt_text: str, role_map: dict[str, str] | None = None,
+) -> list[str]:
     """台词合成：英文角色名（中文语气说明）：英文台词；原文行与译文行逐行对齐。"""
     src_lines = [l.strip() for l in (src_text or "").split("\n") if l.strip()]
     tgt_lines = [l.strip() for l in (tgt_text or "").split("\n") if l.strip()]
@@ -136,6 +252,8 @@ def _render_dialogue(src_text: str, tgt_text: str) -> list[str]:
         if tm:
             en_role = tm.group(1).strip()
             en_line = tm.group(2).strip()
+            if role_map:
+                en_role = _role_lookup(m.group(1).strip(), role_map)
             out.append(
                 f"{en_role}（{direction}）：{en_line}" if direction else f"{en_role}：{en_line}"
             )
@@ -274,8 +392,15 @@ def _export_delivery_markdown(
         t = trans.get(s.id)
         text = t.target_text.strip() if t else ""
 
+        # 解析器把「人物：」行归为 narrative；交付模板要求角色名英文化，
+        # 因此这里必须独立识别，不能只依赖 heading 分支。
+        source_body = s.source_text.strip()
+        if _CAST_HEADING_RE.match(source_body):
+            lines.append(_render_cast_line(source_body, role_map))
+            continue
+
         if s.segment_type == "heading":
-            stripped = s.source_text.strip()
+            stripped = source_body
             if (
                 _CHAPTER_HEADING_RE.match(stripped)
                 or _SCENE_HEADING_RE.match(stripped)
@@ -286,17 +411,12 @@ def _export_delivery_markdown(
                 )
             ):
                 continue  # 章/场景行已由上方结构输出
-            if _CAST_HEADING_RE.match(stripped):
-                lines.append(_render_cast_line(stripped, role_map))
-                continue
             lines.append(stripped)
         elif s.segment_type == "dialogue":
-            lines.extend(_render_dialogue(s.source_text, text))
+            lines.extend(_render_dialogue(s.source_text, text, role_map))
         else:
-            # 动作 / 音效 / 闪回等：交付模板保留中文原文
-            body = s.source_text.strip()
-            if body:
-                lines.append(body)
+            # 动作/音效/闪回保留中文；旁白/画外音/字幕等叙述内容输出英文。
+            lines.extend(_render_narrative_lines(s.source_text, text))
 
     # 结尾：（剧终）；原文已含则不再重复
     last_text = (lines[-1] if lines else "").strip()

@@ -47,7 +47,8 @@ async def generate_storyline(
 
 
 async def generate_for_document(
-    db_factory, project_id: str, source_document_id: str, provider: LLMProvider, model: str
+    db_factory, project_id: str, source_document_id: str, provider: LLMProvider, model: str,
+    on_chapter_done=None,
 ) -> dict:
     """逐章生成剧情卡；已有卡片则新增版本（可追溯）。"""
     with db_factory() as db:
@@ -73,37 +74,42 @@ async def generate_for_document(
     import asyncio
 
     async def one_chapter(ch: Chapter) -> tuple[bool, bool]:
-        text = "".join(s.source_text for s in seg_by_ch.get(ch.id, []))
-        if len(text.strip()) < 20:
-            return False, False
         try:
-            card = await generate_storyline(provider, model, text)
-        except Exception:  # noqa: BLE001 单章失败不阻塞
-            return False, True
-        # 第一集/第一章不存在前情：强制清空，避免模型虚构「上一集依赖」
-        if ch.chapter_no == 1:
-            card.prior_deps = []
-        with db_factory() as db:
-            base = (
-                db.scalar(
-                    select(ChapterStoryline.version).where(
-                        ChapterStoryline.chapter_id == ch.id
+            text = "".join(s.source_text for s in seg_by_ch.get(ch.id, []))
+            if len(text.strip()) < 20:
+                return False, False
+            try:
+                card = await generate_storyline(provider, model, text)
+            except Exception:  # noqa: BLE001 单章失败不阻塞
+                return False, True
+            # 第一集/第一章不存在前情：强制清空，避免模型虚构「上一集依赖」
+            if ch.chapter_no == 1:
+                card.prior_deps = []
+            with db_factory() as db:
+                base = (
+                    db.scalar(
+                        select(ChapterStoryline.version).where(
+                            ChapterStoryline.chapter_id == ch.id
+                        )
+                        .order_by(ChapterStoryline.version.desc()).limit(1)
                     )
-                    .order_by(ChapterStoryline.version.desc()).limit(1)
+                    or 0
                 )
-                or 0
-            )
-            db.add(
-                ChapterStoryline(
-                    project_id=project_id,
-                    chapter_id=ch.id,
-                    version=base + 1,
-                    card_json=json.dumps(card.model_dump(), ensure_ascii=False),
-                    status="generated",
+                db.add(
+                    ChapterStoryline(
+                        project_id=project_id,
+                        chapter_id=ch.id,
+                        version=base + 1,
+                        card_json=json.dumps(card.model_dump(), ensure_ascii=False),
+                        status="generated",
+                    )
                 )
-            )
-            db.commit()
-        return True, False
+                db.commit()
+            return True, False
+        finally:
+            # 无论成功/失败/章节过短都释放该章节等待，避免窗口级流水线死等。
+            if on_chapter_done is not None:
+                on_chapter_done(ch.id)
 
     sem = asyncio.Semaphore(6)  # 章节并发
 

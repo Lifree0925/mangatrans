@@ -11,6 +11,11 @@ _TASK_ID: ContextVar[str | None] = ContextVar("llm_task_id", default=None)
 _PROJECT_ID: ContextVar[str | None] = ContextVar("llm_project_id", default=None)
 
 
+def current_usage_task_id() -> str | None:
+    """当前计量上下文中的任务 ID。"""
+    return _TASK_ID.get()
+
+
 @contextmanager
 def usage_context(task_id: str | None, project_id: str | None):
     """在当前协程/线程内绑定任务与项目。"""

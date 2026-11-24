@@ -3,7 +3,7 @@
 import uuid
 from datetime import datetime, timezone
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text
+from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.core.database import Base
@@ -29,8 +29,12 @@ class Task(Base):
     last_checkpoint: Mapped[str | None] = mapped_column(String(32), nullable=True)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     error_code: Mapped[str | None] = mapped_column(String(32), nullable=True)
-    # 线程型任务的实际开始时间：用于僵尸检测与崩溃恢复（约束：started_at 超时回收）
+    # 当前运行段起点；暂停/完成/失败后清空，用于僵尸检测与崩溃恢复。
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # 已结算的实际运行秒数（不含暂停、关闭和停机时间）。
+    active_seconds: Mapped[float] = mapped_column(
+        Float, default=0.0, server_default="0", nullable=False
+    )
     # 归档：成功后归档，任务中心隐藏、历史记录查看
     archived: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)

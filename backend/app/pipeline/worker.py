@@ -1,7 +1,9 @@
-"""持久 Worker：Draft 阶段并发（6 路），Polish 阶段并发（carry-over 前置）。
+"""持久 Worker：Draft/Polish 流水线并行（各自窗口级并发）。
 
 - carry-over 由 Draft 阶段顺带生成并写入任务进度（调度层顺序写），
-  Polish 消费前一窗口的 Draft carry，因此窗口间无执行依赖，可并发。
+  Polish 消费前一窗口的 Draft carry。
+- 无待定术语时，同一轮可同时领取 Draft 与依赖就绪的 Polish；有待定术语时
+  先等全量 Draft 完成并锁名，再启动 Polish，保证术语一致性。
 - started_at 超时回收：崩溃/僵死后自动回 pending，断点续跑。
 """
 
@@ -15,6 +17,11 @@ from sqlalchemy import func, select
 
 import app.core.database as dbmod
 from app.models.task import Task, TaskItem
+from app.pipeline.task_timer import (
+    settle_task_timer,
+    settle_task_timer_for_recovery,
+    start_task_timer,
+)
 from app.services.translation_batch import (
     process_window_draft_item,
     process_window_polish_item,
@@ -69,6 +76,17 @@ def recover_all_running(db) -> int:
     for item in rows:
         item.status = "pending"
         item.finished_at = None
+    # 上次进程运行段只结算到最后一次写库时间，应用关闭期间的时长不计入。
+    active_tasks = list(
+        db.scalars(
+            select(Task).where(
+                Task.status.in_(["running", "queued", "paused"]),
+                Task.started_at.is_not(None),
+            )
+        )
+    )
+    for task in active_tasks:
+        settle_task_timer_for_recovery(task)
     db.commit()
     return len(rows)
 
@@ -103,6 +121,11 @@ def claim_draft_batch(db, limit: int = DRAFT_CONCURRENCY) -> list[TaskItem]:
     for item in rows:
         if not _task_usable(db, item.task_id):
             continue
+        task = db.get(Task, item.task_id)
+        if task is not None:
+            if task.status == "queued":
+                task.status = "running"
+            start_task_timer(task)
         item.status = "running"
         item.started_at = datetime.now(timezone.utc)
         item.attempts += 1
@@ -112,7 +135,7 @@ def claim_draft_batch(db, limit: int = DRAFT_CONCURRENCY) -> list[TaskItem]:
 
 
 def claim_polish_batch(db, limit: int = POLISH_CONCURRENCY) -> list[TaskItem]:
-    """原子领取最多 limit 个 polish 待办（并发执行；只领取活动任务的窗口）。"""
+    """领取依赖就绪的 polish 窗口：术语已锁定，且前一窗口 Draft 已完成。"""
     rows = list(
         db.scalars(
             select(TaskItem)
@@ -123,16 +146,41 @@ def claim_polish_batch(db, limit: int = POLISH_CONCURRENCY) -> list[TaskItem]:
                 Task.status.in_(["running", "queued"]),
             )
             .order_by(TaskItem.window_id)
-            .limit(limit)
         )
     )
+    terms_ready: dict[str, bool] = {}
     claimed: list[TaskItem] = []
     for item in rows:
+        if len(claimed) >= limit:
+            break
         if not _task_usable(db, item.task_id):
             continue
+        if item.task_id not in terms_ready:
+            task = db.get(Task, item.task_id)
+            progress = json.loads((task.progress_json if task else "") or "{}")
+            terms_ready[item.task_id] = bool(progress.get("terms_locked"))
+        if not terms_ready[item.task_id]:
+            continue
+        try:
+            win_idx = int(item.window_id.split("_")[1])
+        except (IndexError, ValueError):
+            continue
+        if win_idx > 0:
+            prev_id = f"WIN_{win_idx - 1:04d}"
+            prev = db.scalar(
+                select(TaskItem).where(
+                    TaskItem.task_id == item.task_id,
+                    TaskItem.window_id == prev_id,
+                )
+            )
+            # 单 item 只在 Draft 成功后从 draft 转 polish；未完成时不能提前润色。
+            if prev is not None and prev.phase == "draft" and prev.status in ("pending", "running"):
+                continue
         task = db.get(Task, item.task_id)
-        if task is not None and task.status == "queued":
-            task.status = "running"
+        if task is not None:
+            if task.status == "queued":
+                task.status = "running"
+            start_task_timer(task)
         item.status = "running"
         item.started_at = datetime.now(timezone.utc)
         item.attempts += 1
@@ -161,8 +209,10 @@ def claim_qa_batch(db, limit: int = QA_CONCURRENCY) -> list[TaskItem]:
         if not _task_usable(db, item.task_id):
             continue
         task = db.get(Task, item.task_id)
-        if task is not None and task.status == "queued":
-            task.status = "running"
+        if task is not None:
+            if task.status == "queued":
+                task.status = "running"
+            start_task_timer(task)
         item.status = "running"
         item.started_at = datetime.now(timezone.utc)
         item.attempts += 1
@@ -213,6 +263,7 @@ def _apply_draft_carry(factory, task_id: str, results: list) -> None:
         carry_map = dict(progress.get("draft_carry") or {})
         carry_map.update(entries)
         progress["draft_carry"] = carry_map
+        progress["draft_done"] = len(carry_map)
         progress["phase"] = "draft"
         task.progress_json = json.dumps(progress, ensure_ascii=False)
         db.commit()
@@ -247,53 +298,79 @@ def _apply_polish_progress(factory, task_id: str, res: dict) -> None:
             .where(TaskItem.task_id == task_id, TaskItem.phase != "qa")
         ) or done
         progress["total"] = total
-        progress["phase"] = "polish"
+        draft_left = int(
+            db.scalar(
+                select(func.count())
+                .select_from(TaskItem)
+                .where(
+                    TaskItem.task_id == task_id,
+                    TaskItem.phase == "draft",
+                    TaskItem.status.in_(["pending", "running"]),
+                )
+            )
+            or 0
+        )
+        progress["parallel"] = draft_left > 0
+        progress["phase"] = "draft" if draft_left else "polish"
         task.progress_json = json.dumps(progress, ensure_ascii=False)
         task.last_checkpoint = res.get("window_id")
         db.commit()
 
 
-async def _maybe_lock_terms(factory) -> int:
-    """batch 流程术语锁定：Draft 清零且 Polish 待执行时，为无译名术语统一定名。"""
+async def _ensure_terms_gate(factory) -> int:
+    """术语门控：无待定术语时立即放行流水线；有待定术语时等全量 Draft 后锁定。"""
     from app.llm.registry import get_provider
-    from app.services.term_lock import lock_untranslated_terms
+    from app.services.term_lock import has_pending_untranslated_terms, lock_untranslated_terms
 
+    target: tuple[str, str, str, str] | None = None
     with factory() as db:
-        tid = db.scalar(
-            select(TaskItem.task_id)
-            .join(Task, TaskItem.task_id == Task.id)
-            .where(
-                TaskItem.phase == "polish",
-                TaskItem.status == "pending",
-                Task.status.in_(["running", "queued"]),
-            )
-            .limit(1)
-        )
-        if tid is None:
-            return 0
-        task = db.get(Task, tid)
-        if task is None:
-            return 0
-        progress = json.loads(task.progress_json or "{}")
-        if progress.get("terms_locked"):
-            return 0
-        draft_left = db.scalar(
-            select(func.count())
-            .select_from(TaskItem)
-            .where(
-                TaskItem.task_id == tid,
-                TaskItem.phase == "draft",
-                TaskItem.status.in_(["pending", "running"]),
+        task_ids = list(
+            db.scalars(
+                select(Task.id)
+                .join(TaskItem, TaskItem.task_id == Task.id)
+                .where(
+                    Task.status.in_(["running", "queued"]),
+                    TaskItem.phase.in_(["draft", "polish"]),
+                )
+                .distinct()
             )
         )
-        if draft_left:
-            return 0
-        payload = json.loads(task.config_snapshot_json or "{}")
-        source_document_id = payload.get("source_document_id")
-        project_id = task.project_id
-        model = payload.get("model", "fake-model")
-    if not source_document_id:
+        for tid in task_ids:
+            task = db.get(Task, tid)
+            if task is None:
+                continue
+            progress = json.loads(task.progress_json or "{}")
+            if progress.get("terms_locked"):
+                continue
+            if not has_pending_untranslated_terms(db, task.project_id):
+                progress["terms_locked"] = {"locked": 0, "pipeline": True}
+                task.progress_json = json.dumps(progress, ensure_ascii=False)
+                db.commit()
+                continue
+            draft_left = db.scalar(
+                select(func.count())
+                .select_from(TaskItem)
+                .where(
+                    TaskItem.task_id == tid,
+                    TaskItem.phase == "draft",
+                    TaskItem.status.in_(["pending", "running"]),
+                )
+            )
+            if draft_left:
+                continue
+            payload = json.loads(task.config_snapshot_json or "{}")
+            source_document_id = payload.get("source_document_id")
+            if source_document_id:
+                target = (
+                    tid,
+                    task.project_id,
+                    source_document_id,
+                    payload.get("model", "fake-model"),
+                )
+                break
+    if target is None:
         return 0
+    tid, project_id, source_document_id, model = target
     with usage_context_for_task(tid):
         result = await lock_untranslated_terms(
             factory, project_id, source_document_id, get_provider(), model
@@ -301,9 +378,9 @@ async def _maybe_lock_terms(factory) -> int:
     with factory() as db:
         task = db.get(Task, tid)
         if task is not None:
-            p = json.loads(task.progress_json or "{}")
-            p["terms_locked"] = {"locked": result.get("locked", 0)}
-            task.progress_json = json.dumps(p, ensure_ascii=False)
+            progress = json.loads(task.progress_json or "{}")
+            progress["terms_locked"] = {"locked": result.get("locked", 0)}
+            task.progress_json = json.dumps(progress, ensure_ascii=False)
             db.commit()
     return int(result.get("locked", 0))
 
@@ -327,6 +404,9 @@ def _mark_task_completed(factory, task_id: str) -> None:
     from app.services.quality_service import auto_approve_project, project_quality_report
 
     with factory() as db:
+        task = db.get(Task, task_id)
+        if task is None or task.status == "paused":
+            return
         active = db.scalar(
             select(func.count())
             .select_from(TaskItem)
@@ -345,10 +425,8 @@ def _mark_task_completed(factory, task_id: str) -> None:
             )
         )
         failed = len(failed_codes)
-        task = db.get(Task, task_id)
-        if task is None:
-            return
         if failed:
+            settle_task_timer(task)
             task.status = "failed"
             if any(code in ("qa_incomplete", "quality_gate") for code in failed_codes):
                 task.error_code = "quality_gate"
@@ -362,6 +440,7 @@ def _mark_task_completed(factory, task_id: str) -> None:
             return
         report = project_quality_report(db, task.project_id)
         if report.get("gate") != "passed":
+            settle_task_timer(task)
             task.status = "failed"
             task.error_code = "quality_gate"
             task.error_message = "自动质检未通过：" + str(report.get("reason") or "存在未解决问题")
@@ -375,6 +454,7 @@ def _mark_task_completed(factory, task_id: str) -> None:
         progress["quality"] = report
         progress["approve"] = approved
         task.progress_json = json.dumps(progress, ensure_ascii=False)
+        settle_task_timer(task)
         task.status = "completed"
         task.error_code = None
         task.error_message = None
@@ -388,26 +468,60 @@ async def _within_usage(task_id: str, awaitable, timeout: float):
 
 
 async def run_once(db_factory=None) -> int:
-    """一批 Draft（并发）或一个 Polish（串行），返回执行数。"""
+    """同一轮同时推进 Draft 与依赖就绪的 Polish；QA 在翻译全部收尾后执行。"""
     factory = db_factory or (lambda: dbmod.SessionLocal())
 
     with factory() as db:
         recover_stale_items(db)
+    await _ensure_terms_gate(factory)
+
+    with factory() as db:
         drafts = claim_draft_batch(db)
-        jobs = [(it.task_id, it.id, _model_of(db, it.task_id)) for it in drafts]
-    if drafts:
-        results = await asyncio.gather(
-            *[
-                _within_usage(
-                    tid,
-                    process_window_draft_item(factory, tid, iid, model),
-                    WINDOW_TIMEOUT_SECONDS,
-                )
-                for tid, iid, model in jobs
-            ],
-            return_exceptions=True,
+        draft_jobs = [(it.task_id, it.id, _model_of(db, it.task_id)) for it in drafts]
+        polish_items = claim_polish_batch(db)
+        polish_jobs = [
+            (it.task_id, it.id, _model_of(db, it.task_id)) for it in polish_items
+        ]
+
+    if drafts or polish_items:
+        draft_await = (
+            asyncio.gather(
+                *[
+                    _within_usage(
+                        tid,
+                        process_window_draft_item(factory, tid, iid, model),
+                        WINDOW_TIMEOUT_SECONDS,
+                    )
+                    for tid, iid, model in draft_jobs
+                ],
+                return_exceptions=True,
+            )
+            if draft_jobs
+            else None
         )
-        for (tid, iid, _model), res in zip(jobs, results):
+        polish_await = (
+            asyncio.gather(
+                *[
+                    _within_usage(
+                        tid,
+                        process_window_polish_item(factory, tid, iid, model),
+                        WINDOW_TIMEOUT_SECONDS,
+                    )
+                    for tid, iid, model in polish_jobs
+                ],
+                return_exceptions=True,
+            )
+            if polish_jobs
+            else None
+        )
+        if draft_await is not None and polish_await is not None:
+            draft_results, polish_results = await asyncio.gather(draft_await, polish_await)
+        elif draft_await is not None:
+            draft_results, polish_results = await draft_await, []
+        else:
+            draft_results, polish_results = [], await polish_await  # type: ignore[arg-type]
+
+        for (tid, iid, _model), res in zip(draft_jobs, draft_results):
             if isinstance(res, BaseException):
                 from app.llm.protocol import LLMError
                 code = res.code if isinstance(res, LLMError) else type(res).__name__
@@ -418,29 +532,11 @@ async def run_once(db_factory=None) -> int:
                     factory, tid, iid, res.get("error_code") or res["error"],
                     retryable=bool(res.get("retryable", True)),
                 )
-        for tid in {tid for tid, _i, _m in jobs}:
-            _apply_draft_carry(factory, tid, results)
-        return len(drafts)
+        for tid in {tid for tid, _i, _m in draft_jobs}:
+            _apply_draft_carry(factory, tid, draft_results)
 
-    # Draft 全量完成后、Polish 领取前锁定术语（一次性，terms_locked 标记防重复）
-    await _maybe_lock_terms(factory)
-    with factory() as db:
-        items = claim_polish_batch(db)
-        jobs = [(it.task_id, it.id, _model_of(db, it.task_id)) for it in items]
-    if jobs:
-        results = await asyncio.gather(
-            *[
-                _within_usage(
-                    tid,
-                    process_window_polish_item(factory, tid, iid, model),
-                    WINDOW_TIMEOUT_SECONDS,
-                )
-                for tid, iid, model in jobs
-            ],
-            return_exceptions=True,
-        )
         touched_tasks: set[str] = set()
-        for (tid, iid, _model), res in zip(jobs, results):
+        for (tid, iid, _model), res in zip(polish_jobs, polish_results):
             touched_tasks.add(tid)
             if isinstance(res, BaseException):
                 from app.llm.protocol import LLMError
@@ -456,10 +552,20 @@ async def run_once(db_factory=None) -> int:
                 _apply_polish_progress(factory, tid, res)
         for tid in touched_tasks:
             _mark_task_completed(factory, tid)
-        return len(jobs)
+        return len(draft_jobs) + len(polish_jobs)
 
-    # QA 节点：定点查询 + 定点修改（与窗口翻译解耦，失败/超时只重跑 QA 自身）
+    # QA 节点：必须等全部翻译窗口收尾，避免流水线中提前质检。
     with factory() as db:
+        translation_left = db.scalar(
+            select(func.count())
+            .select_from(TaskItem)
+            .where(
+                TaskItem.phase.in_(["draft", "polish"]),
+                TaskItem.status.in_(["pending", "running"]),
+            )
+        )
+        if translation_left:
+            return 0
         qa_items = claim_qa_batch(db)
         qa_jobs = [(it.task_id, it.id, _model_of(db, it.task_id)) for it in qa_items]
     if not qa_jobs:
@@ -541,6 +647,7 @@ def finalize_stale_tasks(db) -> int:
                 .where(TaskItem.task_id == tid, TaskItem.status == "failed")
             )
             t = db.get(Task, tid)
+            settle_task_timer(t)
             if failed:
                 t.status = "failed"
                 t.error_code = "items_failed"

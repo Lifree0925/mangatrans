@@ -1,6 +1,6 @@
 /** 任务中心：任务步骤明细、进度与错误（中文）。 */
 
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
 import { Archive, Circle, CheckCircle2, History, Loader2, Pause, Play, RotateCcw, Trash2, Undo2, X, XCircle } from "lucide-react";
@@ -57,6 +57,50 @@ function fmtSecs(secs?: number): string {
   return r ? `${m} 分 ${r} 秒` : `${m} 分钟`;
 }
 
+/** 运行状态只用短标签表达：正常 / 等待 / 异常，不给用户堆说明文字。 */
+function taskLiveState(t: TaskInfo): {
+  label: string; textClass: string; dotClass: string; pulse: boolean; title: string;
+} | null {
+  if (t.status !== "running") return null;
+  const activeCalls = t.live?.active_calls ?? 0;
+  if (activeCalls > 0) {
+    const stages = (t.live?.stages ?? []).join(" / ");
+    const waited = t.live?.oldest_seconds ?? 0;
+    return {
+      label: "模型响应中",
+      textClass: waited >= 180 ? "text-amber-600" : "text-emerald-600",
+      dotClass: waited >= 180 ? "bg-amber-500" : "bg-emerald-500",
+      pulse: true,
+      title: `${stages || "模型请求"} · ${activeCalls} 个并发 · 最长等待 ${fmtSecs(waited)}`,
+    };
+  }
+  const raw = t.last_activity_at ?? t.started_at;
+  const last = raw ? new Date(raw).getTime() : NaN;
+  if (!Number.isFinite(last)) {
+    return {
+      label: "运行正常", textClass: "text-emerald-600", dotClass: "bg-emerald-500",
+      pulse: false, title: "任务进程运行中",
+    };
+  }
+  const age = Math.max(0, (Date.now() - last) / 1000);
+  if (age < 90) {
+    return {
+      label: "运行正常", textClass: "text-emerald-600", dotClass: "bg-emerald-500",
+      pulse: false, title: `最近活动 ${fmtSecs(age)}前`,
+    };
+  }
+  if (age < 300) {
+    return {
+      label: "等待响应", textClass: "text-amber-600", dotClass: "bg-amber-500",
+      pulse: false, title: `最近活动 ${fmtSecs(age)}前，任务仍在运行`,
+    };
+  }
+  return {
+    label: "响应较慢", textClass: "text-red-600", dotClass: "bg-red-500",
+    pulse: false, title: `已超过 ${fmtSecs(age)}没有新活动，任务进程仍在运行`,
+  };
+}
+
 function stepDetail(key: string, step: Record<string, unknown> | undefined): string {
   if (!step) return "";
   switch (key) {
@@ -103,14 +147,23 @@ function stepDetail(key: string, step: Record<string, unknown> | undefined): str
       return s.windows != null ? `已生成 ${s.windows} 个窗口样本${s.style_guide_id ? " · 风格基线已建立" : ""}` : "";
     }
     case "translation": {
-      const s = step as { done?: number; total?: number; phase?: string; draft_done?: number };
+      const s = step as {
+        done?: number; total?: number; phase?: string; draft_done?: number;
+        model_done?: number; model_total?: number; active_polish?: number;
+      };
       if (s.total == null) return "";
       if (s.phase === "draft") {
         const pct = s.total ? Math.round(((s.draft_done ?? 0) / s.total) * 100) : 0;
-        return `草稿锁事实 ${s.draft_done ?? 0} / ${s.total} 个窗口（${pct}%）`;
+        const polishStarted = (s.model_done ?? 0) > 0
+          ? ` · 同步润色 ${s.model_done} / ${s.model_total ?? 0}`
+          : "";
+        return `草稿锁事实 ${s.draft_done ?? 0} / ${s.total} 个窗口（${pct}%）${polishStarted}`;
       }
       const pct = s.total ? Math.round(((s.done ?? 0) / s.total) * 100) : 0;
-      return `润色情境化 ${s.done ?? 0} / ${s.total} 个窗口（${pct}%）`;
+      const modelDone = s.model_total != null && s.model_done != null
+        ? ` · 模型返回 ${s.model_done} / ${s.model_total}`
+        : "";
+      return `润色 ${s.done ?? 0} / ${s.total} 个窗口（${pct}%）${modelDone}`;
     }
     case "qa": {
       const s = step as { done?: number; total?: number; issues?: number; needs_review?: number; blocked?: number; failed?: number; severity_counts?: Record<string, number>; semantic_done?: number; semantic_total?: number; gate_passed?: boolean };
@@ -229,11 +282,11 @@ function ExpressSteps({ task }: { task: TaskInfo }) {
 /** 全文翻译（重新翻译/章节重译）任务节点：从进度字段推导各阶段。 */
 function TranslateSteps({ task }: { task: TaskInfo }) {
   const p = task.progress as {
-    done?: number; total?: number; draft_carry?: Record<string, unknown>;
+    done?: number; total?: number; draft_done?: number;
     qa_issues?: number; qa_done?: number; failed?: number; phase?: string;
   };
   const total = p.total ?? 0;
-  const draftDone = p.draft_carry ? Object.keys(p.draft_carry).length : 0;
+  const draftDone = p.draft_done ?? 0;
   const done = p.done ?? 0;
   const running = task.status === "running" || task.status === "queued";
   const finished = task.status === "completed";
@@ -283,17 +336,14 @@ function TranslateSteps({ task }: { task: TaskInfo }) {
 export default function TasksPage() {
   const qc = useQueryClient();
   const [showHistory, setShowHistory] = useState(false);
-  // 每秒本地时钟：运行时长等动态文案不依赖查询刷新（structuralSharing 下数据不变不重渲染）
-  const [now, setNow] = useState(() => Date.now());
-  useEffect(() => {
-    const t = setInterval(() => setNow(Date.now()), 1000);
-    return () => clearInterval(t);
-  }, []);
-
   const tasks = useQuery({
     queryKey: ["tasks"],
     queryFn: () => api<TaskInfo[]>("/tasks"),
-    refetchInterval: 2000,
+    // 有活动任务时快速刷新；全部结束后降频，避免空转轮询。
+    refetchInterval: (query) => {
+      const rows = query.state.data as TaskInfo[] | undefined;
+      return rows?.some((t) => t.status === "running" || t.status === "queued") ? 1500 : 10000;
+    },
   });
 
   const pauseTask = useMutation({
@@ -366,13 +416,26 @@ export default function TasksPage() {
         <div className="mx-auto max-w-4xl space-y-3">
           {tasks.data?.map((t) => {
             const prog = t.progress as {
-              done?: number; total?: number; lines?: number; discarded?: number; failed_batches?: number;
-              steps?: Record<string, { done?: number; total?: number }>;
+              done?: number; total?: number; phase?: string; draft_done?: number;
+              lines?: number; discarded?: number; failed_batches?: number;
+              steps?: Record<string, {
+                done?: number; total?: number; phase?: string; draft_done?: number;
+                base_done?: number; model_done?: number; model_total?: number;
+              }>;
             };
             const trStep = prog.steps?.translation;
             const doneN = trStep?.total != null ? trStep.done ?? 0 : prog.done ?? 0;
             const totalN = trStep?.total != null ? trStep.total : prog.total ?? 0;
-            const pct = totalN ? Math.min(100, Math.round((doneN / totalN) * 100)) : null;
+            const draftN = trStep?.draft_done ?? prog.draft_done ?? 0;
+            // 初翻和润色并行时，按两个阶段合计进度展示；模型已返回但尚未落库也计入。
+            const livePolish = Math.max(
+              doneN,
+              (trStep?.base_done ?? doneN) + (trStep?.model_done ?? 0),
+            );
+            const combinedTotal = totalN > 0 ? totalN * 2 : 0;
+            const pct = combinedTotal
+              ? Math.min(100, Math.round(((Math.min(totalN, draftN) + Math.min(totalN, livePolish)) / combinedTotal) * 100))
+              : null;
             return (
               <div key={t.id} className="rounded-xl border border-(--color-border) bg-(--color-panel) px-4 py-3">
                 <div className="flex items-center gap-3">
@@ -392,18 +455,37 @@ export default function TasksPage() {
                       <span className="text-sm font-medium text-(--color-text)">{t.project_name}</span>
                     )
                   )}
-                  {(t.status === "running" || t.status === "queued") ? (
+                  {t.status === "running" ? (
                     <span className="flex items-center gap-1 text-sm font-medium text-emerald-600">
-                      <Loader2 size={13} className="animate-spin" /> 执行中
+                      <Loader2 size={13} className="animate-spin" /> 运行中
+                    </span>
+                  ) : t.status === "queued" ? (
+                    <span className="flex items-center gap-1 text-sm font-medium text-(--color-muted)">
+                      <Circle size={11} /> 排队中
                     </span>
                   ) : (
                     <span className={`text-sm font-medium ${statusColor[t.status] ?? ""}`}>
                       {statusLabel[t.status] ?? t.status}
                     </span>
                   )}
-                  {t.created_at && (t.status === "running" || t.status === "queued") && (
+                  {t.status === "running" && (() => {
+                    const live = taskLiveState(t);
+                    return live ? (
+                      <span
+                        title={live.title}
+                        className={`inline-flex items-center gap-1.5 text-xs font-medium ${live.textClass}`}
+                      >
+                        <span className="relative flex h-1.5 w-1.5">
+                          {live.pulse && <span className={`absolute inline-flex h-full w-full animate-ping rounded-full opacity-70 ${live.dotClass}`} />}
+                          <span className={`relative inline-flex h-1.5 w-1.5 rounded-full ${live.dotClass}`} />
+                        </span>
+                        {live.label}
+                      </span>
+                    ) : null;
+                  })()}
+                  {t.status === "running" && (t.elapsed_seconds ?? 0) > 0 && (
                     <span className="text-xs text-(--color-muted)">
-                      已运行 {fmtSecs(Math.max(0, (now - new Date(t.created_at).getTime()) / 1000))}
+                      已运行 {fmtSecs(t.elapsed_seconds)}
                     </span>
                   )}
                   {t.model && (
@@ -468,11 +550,20 @@ export default function TasksPage() {
                 </div>
 
                 {pct != null && t.status !== "completed" && (
-                  <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-(--color-panel2)">
+                  <div
+                    className="relative mt-2 h-1.5 overflow-hidden rounded-full bg-(--color-panel2)"
+                    role="progressbar"
+                    aria-valuemin={0}
+                    aria-valuemax={100}
+                    aria-valuenow={pct}
+                  >
                     <div
-                      className="h-full rounded-full bg-(--color-accent) transition-all"
+                      className="h-full rounded-full bg-(--color-accent) transition-all duration-500"
                       style={{ width: `${pct}%` }}
                     />
+                    {t.status === "running" && (
+                      <div className="absolute inset-y-0 right-0 w-16 animate-pulse bg-white/45" />
+                    )}
                   </div>
                 )}
 

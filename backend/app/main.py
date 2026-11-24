@@ -104,6 +104,14 @@ async def lifespan(_app: FastAPI):
         yield
     finally:
         worker_task.cancel()
+        # 正常关闭时结算当前运行段；崩溃场景由下次启动按最后写库时间恢复。
+        try:
+            from app.pipeline.task_timer import settle_active_task_timers
+
+            with dbmod.SessionLocal() as db:
+                settle_active_task_timers(db)
+        except Exception:  # noqa: BLE001 退出清理不能阻塞窗口关闭
+            pass
 
 
 def create_app() -> FastAPI:

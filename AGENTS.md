@@ -33,7 +33,7 @@ AI 漫剧剧本翻译系统（Windows 桌面版）：本地优先工作台，将
 2. 翻译必须两段式：Draft 锁事实（允许生硬）→ Polish 情境自然化（不得改变 Draft 事实）；两轮都入库，polished 为对外默认版本。
 3. Express 与 Guided 共用同一管线，差异只在确认节点是否自动通过；`auto_approved` 仅限高置信度、explicit 证据的人名/术语。
 4. 场景卡已剔除；情境准确翻译由知识库、章节剧情卡、speaker voice 与 carry-over 承担。
-5. carry-over 由 Draft 阶段前置生成并随任务进度持久化；Draft 与 Polish 均窗口级并发（`MT_WINDOW_CONCURRENCY` 默认 3），Polish 消费前一窗口 Draft 的 carry。任务级进度由调度层单协程顺序写。
+5. carry-over 由 Draft 阶段前置生成并随任务进度持久化；Draft 与 Polish 均窗口级并发（`MT_WINDOW_CONCURRENCY` 默认 3），Polish 消费前一窗口 Draft 的 carry。无待定术语时 Draft/Polish 流水线并行，Polish 在自身及前一窗口 Draft 完成、术语锁定、全局角色档案/风格基线就绪、且本窗口所属章节剧情卡完成后启动，不等待无关章节剧情卡或台词本抽取；存在待定术语时等待全量 Draft 完成并锁定术语后再启动 Polish。任务级进度由调度层单协程顺序写。
 6. 思考模式：仅 Polish 与语义 QA 开启；Draft、抽取、对齐等环节关闭。禁止无意义地对不可重试错误反复重试。
 7. 结构完整性：`validate_window` 除 segment/行数/重复外，必须校验说话人、场景号、△/【】标记；单行对白被换成相邻段也必须判错。截断（finish_reason=length）优先自动拆半重跑，不能无限重复同一请求。
 8. 术语策略：`exact` 只用于专名/地点/头衔/具名物件；普通名词、物种、群体、泛称只做 `contextual` 参考。地点别名统一，头衔/称谓别名按语境翻译，不能一律替换为正式名。

@@ -229,13 +229,6 @@ async def run_express(db_factory, project_id: str, source_document_id: str, mode
             )
         _sync_progress(db_factory, task_id, report["steps"], "profiles")
 
-    async def _prep_storylines():
-        if "storylines" not in report["steps"]:
-            report["steps"]["storylines"] = await storyline_service.generate_for_document(
-                db_factory, project_id, source_document_id, provider, model
-            )
-        _sync_progress(db_factory, task_id, report["steps"], "storylines")
-
     async def _prep_dialogue():
         if "extracted" not in (report["steps"].get("dialogue") or {}):
             from app.services import dialogue_service
@@ -264,9 +257,10 @@ async def run_express(db_factory, project_id: str, source_document_id: str, mode
         _sync_progress(db_factory, task_id, report["steps"], "trial")
 
     _sync_progress(db_factory, task_id, report["steps"], "translation")
-    # 4. 全本窗口翻译：carry-over 由 Draft 前置生成，Draft 与 Polish 均并发。
-    #    质量依据：Polish 硬约束「不得改变 Draft 事实」，窗口间传递的事实状态
-    #    已在 Draft 锁定，Polish 并发不损伤连续一致性。
+    # 4. 全本窗口翻译：Draft/Polish 流水线并行。
+    #    Polish 等自身及前一窗口 Draft、术语门控、全局角色档案/风格基线，
+    #    以及“本窗口所属章节”的剧情卡就绪后启动；不等待无关章节或台词本。
+    #    有待定术语时退回全量 Draft 后锁名的安全路径。
     with db_factory() as db:
         segs = list(
             db.scalars(
@@ -355,6 +349,8 @@ async def run_express(db_factory, project_id: str, source_document_id: str, mode
 
     async def _draft_one(win_idx, win):
         nonlocal draft_done_count, draft_carry_map
+        if _paused():
+            return None
         carry_key = f"WIN_{win_idx:04d}"
         # 已初翻窗口直接复用 DB Draft；carry 缺失也不重跑 Draft（旧版本/中断兼容）。
         if win_idx in draft_complete:
@@ -367,6 +363,8 @@ async def run_express(db_factory, project_id: str, source_document_id: str, mode
             )
             return reused_draft, carry, context
         async with _sem:
+            if _paused():
+                return None
             try:
                 result = await _aio.wait_for(
                     translate_window_draft_direct(db_factory, project_id, win, model),
@@ -384,18 +382,6 @@ async def run_express(db_factory, project_id: str, source_document_id: str, mode
         _sync_progress(db_factory, task_id, report["steps"], "translation")
         return result
 
-    async def _run_draft():
-        results = await _aio.gather(
-            *[_draft_one(wi, w) for wi, w in zip(todo_indices, todo)]
-        )
-        for wi, r in zip(todo_indices, results):
-            if r is not None and r[1] is not None:
-                draft_carry_map[f"WIN_{wi:04d}"] = r[1]
-        report["steps"]["translation"]["draft_done"] = draft_done_count
-        report["steps"]["translation"]["draft_carry"] = draft_carry_map
-        _sync_progress(db_factory, task_id, report["steps"], "translation")
-        return results
-
     async def _lock_terms_once():
         """Draft 全量完成后为无译名术语统一定名，Polish 强制使用（跨窗口一致性）。"""
         if report["steps"].get("terms_locked"):
@@ -408,26 +394,116 @@ async def run_express(db_factory, project_id: str, source_document_id: str, mode
         report["steps"]["terms_locked"] = {"locked": result.get("locked", 0)}
         _sync_progress(db_factory, task_id, report["steps"], "translation")
 
-    # Draft 立即启动，与四个准备步骤并行（关键路径 = 知识 → Draft → Polish）
-    draft_task = _aio.create_task(_run_draft())
-    await _aio.wait_for(
-        _aio.gather(
-            _prep_profiles(), _prep_storylines(), _prep_dialogue(), _prep_trial()
-        ),
-        timeout=2400,  # 准备步骤整组硬超时：超时任务失败，重试时已完成步骤跳过
-    )
-    draft_results = await draft_task
-    # 术语锁定：Draft 全部完成 → 统一无译名术语的标准译名 → Polish 强制使用
-    await _lock_terms_once()
+    # 并行流水线：Draft 立即启动；准备资料和术语门控异步推进。
+    # 无待定术语时 Polish 可在首个窗口 Draft 完成后立即开始；
+    # 有待定术语时自动等待全量 Draft + 术语锁定，保持原有质量路径。
+    from app.services.term_lock import has_pending_untranslated_terms
 
-    # 阶段 2：Polish 并发（carry-over 取前一窗口 Draft 的 carry）
-    report["steps"]["translation"] = {
-        "done": done,
-        "total": total,
-        "phase": "polish",
-        "draft_done": draft_done_count,
-        "draft_carry": draft_carry_map,
+    with db_factory() as db:
+        pending_terms = has_pending_untranslated_terms(db, project_id)
+
+    draft_tasks = {
+        wi: _aio.create_task(_draft_one(wi, windows[wi])) for wi in todo_indices
     }
+
+    profiles_ready = _aio.Event()
+    profiles_errors: list[Exception] = []
+    style_ready = _aio.Event()
+    style_errors: list[Exception] = []
+    storyline_errors: list[Exception] = []
+    dialogue_errors: list[Exception] = []
+    chapter_ids = {w[0].chapter_id for w in windows if w and w[0].chapter_id}
+    storyline_ready = {cid: _aio.Event() for cid in chapter_ids}
+
+    async def _run_profiles_gate():
+        try:
+            await _aio.wait_for(_prep_profiles(), timeout=600)
+        except Exception as exc:  # noqa: BLE001
+            profiles_errors.append(exc)
+        finally:
+            profiles_ready.set()
+
+    async def _run_storylines_gate():
+        try:
+            if "storylines" not in report["steps"]:
+                def _chapter_done(chapter_id: str) -> None:
+                    event = storyline_ready.get(chapter_id)
+                    if event is not None:
+                        event.set()
+
+                report["steps"]["storylines"] = await _aio.wait_for(
+                    storyline_service.generate_for_document(
+                        db_factory, project_id, source_document_id, provider, model,
+                        on_chapter_done=_chapter_done,
+                    ),
+                    timeout=2400,
+                )
+            _sync_progress(db_factory, task_id, report["steps"], "storylines")
+        except Exception as exc:  # noqa: BLE001 全局剧情卡失败才阻塞，单章失败由服务内部标记
+            storyline_errors.append(exc)
+        finally:
+            # 异常/续跑场景释放所有章节等待，避免 Polish 死等。
+            for event in storyline_ready.values():
+                event.set()
+
+    async def _run_style_gate():
+        try:
+            await _aio.wait_for(_prep_trial(), timeout=2400)
+        except Exception as exc:  # noqa: BLE001
+            style_errors.append(exc)
+        finally:
+            style_ready.set()
+
+    async def _run_dialogue_background():
+        try:
+            await _aio.wait_for(_prep_dialogue(), timeout=600)
+        except Exception as exc:  # noqa: BLE001 台词本不阻塞润色，但会在 QA 前报错
+            dialogue_errors.append(exc)
+
+    terms_ready = _aio.Event()
+    term_errors: list[Exception] = []
+
+    async def _run_terms_gate():
+        try:
+            if pending_terms:
+                if draft_tasks:
+                    await _aio.gather(*draft_tasks.values())
+                await _lock_terms_once()
+            else:
+                report["steps"]["terms_locked"] = {"locked": 0, "pipeline": True}
+                _sync_progress(db_factory, task_id, report["steps"], "translation")
+        except Exception as exc:  # noqa: BLE001 术语门控失败不得让 Polish 使用未锁定术语
+            term_errors.append(exc)
+        finally:
+            terms_ready.set()
+
+    profiles_task = _aio.create_task(_run_profiles_gate())
+    storylines_task = _aio.create_task(_run_storylines_gate())
+    style_task = _aio.create_task(_run_style_gate())
+    dialogue_task = _aio.create_task(_run_dialogue_background())
+    terms_task = _aio.create_task(_run_terms_gate())
+
+    # Polish 流水线实时活动：Draft 未结束时 phase 仍为 draft，
+    # 但 model_done/active_polish 会同步展示已开始的润色窗口。
+    polish_base_done = done
+    polish_active = 0
+    polish_processed = 0
+    polish_model_total = len(todo_indices)
+
+    def _sync_polish_live() -> None:
+        tr = report["steps"]["translation"]
+        tr["active_polish"] = polish_active
+        tr["model_done"] = polish_processed
+        tr["model_total"] = polish_model_total
+        tr["base_done"] = polish_base_done
+        _sync_progress(db_factory, task_id, report["steps"], "translation")
+
+    report["steps"]["translation"].update({
+        "active_polish": 0,
+        "model_done": 0,
+        "model_total": polish_model_total,
+        "base_done": polish_base_done,
+    })
     _sync_progress(db_factory, task_id, report["steps"], "translation")
     _sem2 = _aio.Semaphore(WINDOW_CONCURRENCY)
 
@@ -474,19 +550,53 @@ async def run_express(db_factory, project_id: str, source_document_id: str, mode
     polish_errors: dict[int, str] = {}
     permanent_failures: set[int] = set()
 
-    async def _polish_one(win_idx, window, draft, retries: int = 2):
+    async def _polish_one(win_idx, window, retries: int = 2):
+        nonlocal polish_active, polish_processed
         if _paused():
             return None
+        draft_res = await draft_tasks[win_idx]
+        # 窗口 i 的 carry 来自 i-1 的 Draft：必须等前一窗口 Draft 完成；
+        # 若前一窗口已润色完成（不在本轮 todo 中），沿用已有 carry/DB 快照。
+        if win_idx > 0 and (win_idx - 1) in draft_tasks:
+            await draft_tasks[win_idx - 1]
+        await profiles_ready.wait()
+        await style_ready.wait()
+        chapter_id = window[0].chapter_id if window else None
+        chapter_event = storyline_ready.get(chapter_id) if chapter_id else None
+        if chapter_event is not None:
+            await chapter_event.wait()
+        await terms_ready.wait()
+        if profiles_errors:
+            polish_errors[win_idx] = f"角色档案失败：{profiles_errors[0]}"
+            return "failed"
+        if style_errors:
+            polish_errors[win_idx] = f"风格基线失败：{style_errors[0]}"
+            return "failed"
+        if storyline_errors:
+            polish_errors[win_idx] = f"剧情卡全局失败：{storyline_errors[0]}"
+            return "failed"
+        if term_errors:
+            polish_errors[win_idx] = f"术语锁定失败：{term_errors[0]}"
+            return "failed"
+        if _paused():
+            return None
+        draft = draft_res[0] if draft_res else None
         if draft is None:
             polish_errors[win_idx] = "draft 缺失"
             return "failed"
         # 断点续跑：窗口 polished 已完成 → 直接复用，不重做
         with db_factory() as db:
             if _window_polished_complete(db, window):
+                polish_processed = min(polish_model_total, polish_processed + 1)
+                _sync_polish_live()
                 return _polished_from_db(db, window), None
         last_error = ""
         for attempt in range(retries + 1):
+            if _paused():
+                return None
             async with _sem2:
+                polish_active += 1
+                _sync_polish_live()
                 try:
                     return await _aio.wait_for(
                         translate_window_polish_direct(
@@ -501,6 +611,10 @@ async def run_express(db_factory, project_id: str, source_document_id: str, mode
                     if isinstance(exc, LLMError) and not exc.retryable:
                         permanent_failures.add(win_idx)
                         break
+                finally:
+                    polish_active = max(0, polish_active - 1)
+                    polish_processed = min(polish_model_total, polish_processed + 1)
+                    _sync_polish_live()
             if attempt < retries:
                 await _aio.sleep(3 * (attempt + 1))
         return "failed"
@@ -536,10 +650,38 @@ async def run_express(db_factory, project_id: str, source_document_id: str, mode
             polish_errors[win_idx] = f"拆窗重试失败：{type(exc).__name__}: {str(exc)[:240]}"
             return None
 
-    polish_jobs = list(zip(todo_indices, todo, draft_results))
-    polished_results = await _aio.gather(
-        *[_polish_one(wi, w, dr[0] if dr else None) for wi, w, dr in polish_jobs]
-    )
+    polish_jobs = list(zip(todo_indices, todo))
+    polish_tasks = [
+        _aio.create_task(_polish_one(wi, w)) for wi, w in polish_jobs
+    ]
+
+    # 等 Draft 与准备/术语门控完成后，再收集 Polish 结果；Polish 任务已在后台等待依赖。
+    if draft_tasks:
+        ordered_drafts = await _aio.gather(*(draft_tasks[wi] for wi in todo_indices))
+        draft_results = list(ordered_drafts)
+        # Draft 全部结束，切换任务中心阶段显示；已提前完成的 Polish 数据保留。
+        report["steps"]["translation"]["phase"] = "polish"
+        report["steps"]["translation"]["draft_done"] = draft_done_count
+        report["steps"]["translation"]["draft_carry"] = draft_carry_map
+        _sync_progress(db_factory, task_id, report["steps"], "translation")
+    else:
+        draft_results = []
+    await profiles_task
+    await storylines_task
+    await style_task
+    await dialogue_task
+    await terms_task
+    polished_results = await _aio.gather(*polish_tasks)
+    if profiles_errors:
+        raise profiles_errors[0]
+    if style_errors:
+        raise style_errors[0]
+    if storyline_errors:
+        raise storyline_errors[0]
+    if dialogue_errors:
+        raise dialogue_errors[0]
+    if term_errors:
+        raise term_errors[0]
 
     # 并发结束后只补跑一次瞬时失败的窗口；永久错误（截断/认证）绝不重复烧钱。
     failed_positions = [
@@ -549,10 +691,8 @@ async def run_express(db_factory, project_id: str, source_document_id: str, mode
     if failed_positions and not _paused():
         await _aio.sleep(5)
         for pos in failed_positions:
-            wi, w, dr = polish_jobs[pos]
-            polished_results[pos] = await _polish_one(
-                wi, w, dr[0] if dr else None, retries=1
-            )
+            wi, w = polish_jobs[pos]
+            polished_results[pos] = await _polish_one(wi, w, retries=1)
 
     # 顺序持久化与进度上报（单协程写，无竞争）
     failed_windows = 0
@@ -583,7 +723,7 @@ async def run_express(db_factory, project_id: str, source_document_id: str, mode
                 "draft_done": draft_done_count,
                 "draft_carry": draft_carry_map,
             }
-            _sync_progress(db_factory, task_id, report["steps"], "translation")
+            _sync_polish_live()
             continue
         # 段完整性校验：缺行/错位是历史漏译与标签错位的根因，拒绝静默落库
         seg_dicts = [
@@ -641,7 +781,7 @@ async def run_express(db_factory, project_id: str, source_document_id: str, mode
             "draft_done": draft_done_count,
             "draft_carry": draft_carry_map,
         }
-        _sync_progress(db_factory, task_id, report["steps"], "translation")
+        _sync_polish_live()
 
     if failed_windows and not _paused():
         errors = {

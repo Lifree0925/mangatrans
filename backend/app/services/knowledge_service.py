@@ -28,10 +28,10 @@ from app.models.knowledge import KnowledgeAlias, KnowledgeEvidence, KnowledgeIte
 from app.schemas.knowledge import ExtractionOutput
 from app.services.term_match import classify_term, enforcement_for, is_generic_source, normalize
 
-EXTRACT_PROMPT = """你是剧本分析助手。任务：提取人物与术语候选，并治理具名实体与跨章节设定术语。
-阅读给定的中文剧本片段，提取真正需要全文一致的知识。
+EXTRACT_PROMPT = """你是剧本分析助手。任务：提取人物、术语与显式人物关系候选，并治理具名实体与跨章节设定术语。
+阅读给定的中文剧本片段，提取真正需要全文一致或影响人物理解的知识。
 
-只提取真正需要全文一致的内容，严格避免把普通词当专名。
+只提取真正需要全文一致或影响人物关系理解的内容，严格避免把普通词当专名。
 
 必须遵守：
 1. 只提取原文明确出现的信息；不得补充剧情之外的背景。
@@ -41,23 +41,33 @@ EXTRACT_PROMPT = """你是剧本分析助手。任务：提取人物与术语候
    地下室、山洞、走廊、餐厅、血脉、银器、银剑、手铐、匕首、徽章、通讯器、狼群、狼人、
    吸血鬼、贵族、卫兵、护卫、守卫、仆人、侍女、医生、刺客、信使、战士、长老、头目、管家。
    这些词必须根据当前句子的语境自然翻译，不能绑定到某一个具体地点或实体。
-4. 需要提取的内容只有：
+4. 需要提取的内容：
    - 人物角色；
+   - 人物身份/职业（原文明确时写入该 character 的 data.role；英文职业名写入 data.role_translation）；
    - 具名地点（例：荒原边缘酒吧、Valentine Manor、Van Helsing家族庄园）；
    - 头衔/世界设定（例：狼王、狼后、阿尔法、月亮女神、猎魔人、命定伴侣、永恒标记）；
-   - 反复出现且存在专名性质的物件/组织（例：禁魔手铐、Van Helsing家族徽章）。
+   - 反复出现且存在专名性质的物件/组织（例：禁魔手铐、Van Helsing家族徽章）；
+   - 反复出现、剧情关键且需要统一称谓的设定物（例：特定神经毒素、病毒、实验项目、武器、
+     组织或契约）。只有原文把它当作固定设定名时才提取，普通药物/普通武器不提取；
+   - 原文明确说明的人物关系（母亲、父亲、姐妹、夫妻、上下级、律师、公关总监等）。
 5. 地点必须使用完整名称作为 canonical_key，不能把「酒吧」「庄园」「大厅」单独作为地点名。
    同一地点有正式全名和简称时，canonical_key 用最完整的名称，简称只放 aliases，
    且简称必须仍然带有区分性（例如「荒原边缘酒吧」alias 可含「边缘酒吧」，但绝不能含「酒吧」）。
 6. 每个 character 的 data 必须包含 translation：角色的标准英文名；如果原文名本身是英文则原样填写。
+   原文没有明确身份/职业时不要猜；有明确身份/职业时，同时给出 data.role（中文）与
+   data.role_translation（自然英文职位/身份，不是逐字拼词）。
 7. 每个 term 的 data 必须包含：
    - translation：唯一标准英文译名；
    - variants：合法英文词形（复数/所有格等），没有则 []；
    - term_kind：proper_name / title / place / item / common_noun / species / concept 之一；
    - enforcement：proper_name/title/place/item 用 exact；common_noun/species/concept 用 contextual。
+   对剧情关键的固定设定物，如果原文反复使用同一名称且换词会改变指代，使用 exact；普通类别词仍用 contextual。
 8. aliases 只允许是“同一实体的另一个完整称呼”，不得放普通类别词、代词、亲属称谓或自称。
 9. 不确定是否同一实体时，宁可不合并，也不要制造错误别名。
-10. 只返回 JSON，不要任何解释。
+10. 人物关系必须是显式证据；输出 item_type=relation，canonical_key 用「人物A—人物B」，
+    data 至少包含 subject（A）、object（B）、relation（中文关系）、relation_translation（自然英文关系）。
+    没有明确证据时不要输出，不能根据年龄、性别或称呼猜亲属关系。
+11. 只返回 JSON，不要任何解释。
 
 片段：
 {text}"""

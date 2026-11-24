@@ -7,7 +7,7 @@
 use std::io::Write;
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -29,8 +29,12 @@ struct BackendState {
     child: Mutex<Option<CommandChild>>,
     /// sidecar 进程是否已退出（Terminated 事件置位）
     child_exited: Arc<AtomicBool>,
+    /// 最近一次 sidecar 退出码；i32::MIN 表示尚无退出记录
+    last_exit_code: Arc<AtomicI32>,
     /// 复用已有后端时的进程 pid（退出时经 pid 结束，保证下次启动运行新版本）
     reused_pid: Option<u32>,
+    /// 防止并发触发多次重启
+    restarting: AtomicBool,
 }
 
 /// 用系统默认浏览器打开外部链接（更新下载等）。仅允许 GitHub 相关域名白名单。
@@ -61,6 +65,10 @@ pub struct BackendStatus {
     alive: bool,
     port: u16,
     log_tail: String,
+    sidecar_path: String,
+    sidecar_exists: bool,
+    last_exit_code: Option<i32>,
+    reused: bool,
 }
 
 fn read_log_tail(path: &Path, max_bytes: usize) -> String {
@@ -73,16 +81,66 @@ fn read_log_tail(path: &Path, max_bytes: usize) -> String {
 
 #[tauri::command]
 fn get_backend_status(state: State<'_, BackendState>) -> BackendStatus {
-    let alive = !state.child_exited.load(Ordering::SeqCst);
+    let sidecar_path = sidecar_executable_path();
+    let mut alive = !state.child_exited.load(Ordering::SeqCst);
+    // 复用后端没有 Terminated 事件通道，必须主动探测健康状态。
+    if state.reused_pid.is_some() {
+        alive = backend_healthy(state.port, Duration::from_millis(700));
+    }
     let log_tail = read_log_tail(
         &Path::new(&state.data_dir).join("logs").join("sidecar.log"),
-        4096,
+        16384,
     );
+    let code = state.last_exit_code.load(Ordering::SeqCst);
     BackendStatus {
         alive,
         port: state.port,
         log_tail,
+        sidecar_path: sidecar_path.to_string_lossy().to_string(),
+        sidecar_exists: sidecar_path.exists(),
+        last_exit_code: (code != i32::MIN).then_some(code),
+        reused: state.reused_pid.is_some(),
     }
+}
+
+/// 重启本地 sidecar：沿用原端口/令牌，前端无需丢弃已缓存的 API 配置。
+#[tauri::command]
+fn restart_backend(app: AppHandle, state: State<'_, BackendState>) -> Result<(), String> {
+    if backend_healthy(state.port, Duration::from_millis(700)) {
+        state.child_exited.store(false, Ordering::SeqCst);
+        return Ok(());
+    }
+    if state.restarting.swap(true, Ordering::SeqCst) {
+        return Err("本地服务正在重启，请稍候".to_string());
+    }
+    let result = (|| -> Result<(), String> {
+        let log_path = sidecar_log_path(Path::new(&state.data_dir));
+        append_log(&log_path, "[restart] 应用内重启本地服务");
+        if let Some(pid) = locked_backend_pid(&state.data_dir) {
+            kill_backend_pid(pid);
+        }
+        if let Ok(mut guard) = state.child.lock() {
+            if let Some(child) = guard.take() {
+                let _ = child.kill();
+            }
+        }
+        let _ = std::fs::remove_file(backend_lock_path(Path::new(&state.data_dir)));
+        let child = spawn_sidecar(
+            &app,
+            state.port,
+            &state.token,
+            &state.data_dir,
+            &log_path,
+            state.child_exited.clone(),
+            state.last_exit_code.clone(),
+        )?;
+        if let Ok(mut guard) = state.child.lock() {
+            *guard = Some(child);
+        }
+        Ok(())
+    })();
+    state.restarting.store(false, Ordering::SeqCst);
+    result
 }
 
 #[tauri::command]
@@ -330,6 +388,120 @@ fn wait_until_healthy(port: u16, log_path: &Path) {
     append_log(log_path, "[health] timeout after 8s");
 }
 
+fn sidecar_executable_path() -> PathBuf {
+    let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("mangatrans.exe"));
+    let dir = exe.parent().map(Path::to_path_buf).unwrap_or_else(|| PathBuf::from("."));
+    #[cfg(target_os = "windows")]
+    let name = "mangatrans-backend.exe";
+    #[cfg(not(target_os = "windows"))]
+    let name = "mangatrans-backend";
+    dir.join(name)
+}
+
+fn backend_healthy(port: u16, timeout: Duration) -> bool {
+    let Ok(client) = reqwest::blocking::Client::builder().timeout(timeout).build() else {
+        return false;
+    };
+    client
+        .get(format!("http://127.0.0.1:{port}/health"))
+        .send()
+        .map(|r| r.status().is_success())
+        .unwrap_or(false)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn spawn_sidecar(
+    app: &AppHandle,
+    port: u16,
+    token: &str,
+    data_dir: &str,
+    log_path: &Path,
+    child_exited: Arc<AtomicBool>,
+    last_exit_code: Arc<AtomicI32>,
+) -> Result<CommandChild, String> {
+    let sidecar_path = sidecar_executable_path();
+    let exists = sidecar_path.exists();
+    append_log(
+        log_path,
+        &format!(
+            "[spawn] port={port} sidecar={} exists={exists}",
+            sidecar_path.display()
+        ),
+    );
+    if !exists {
+        child_exited.store(true, Ordering::SeqCst);
+        let msg = format!(
+            "本地服务文件不存在：{}。可能被杀毒软件隔离或安装不完整，请恢复文件或重新安装",
+            sidecar_path.display()
+        );
+        append_log(log_path, &format!("[spawn-error] {msg}"));
+        return Err(msg);
+    }
+
+    let sidecar = app
+        .shell()
+        .sidecar("mangatrans-backend")
+        .map_err(|err| {
+            child_exited.store(true, Ordering::SeqCst);
+            let msg = format!("sidecar 未打包或路径无效：{err}");
+            append_log(log_path, &format!("[spawn-error] {msg}"));
+            msg
+        })?
+        .env("MT_PORT", port.to_string())
+        .env("MT_AUTH_TOKEN", token)
+        .env("MT_DATA_DIR", data_dir)
+        .env("MT_MIGRATE_ON_START", "1")
+        // Windows 管道默认可能是 cp1252，Python 中文日志会直接抛 UnicodeEncodeError。
+        .env("PYTHONIOENCODING", "utf-8")
+        .env("PYTHONUTF8", "1");
+
+    match sidecar.spawn() {
+        Ok((mut rx, child)) => {
+            child_exited.store(false, Ordering::SeqCst);
+            last_exit_code.store(i32::MIN, Ordering::SeqCst);
+            let event_log = log_path.to_path_buf();
+            let exit_flag = child_exited.clone();
+            let exit_code = last_exit_code.clone();
+            tauri::async_runtime::spawn(async move {
+                while let Some(event) = rx.recv().await {
+                    match event {
+                        CommandEvent::Stdout(line) => append_log(
+                            &event_log,
+                            &format!("[stdout] {}", String::from_utf8_lossy(&line)),
+                        ),
+                        CommandEvent::Stderr(line) => append_log(
+                            &event_log,
+                            &format!("[stderr] {}", String::from_utf8_lossy(&line)),
+                        ),
+                        CommandEvent::Error(err) => {
+                            append_log(&event_log, &format!("[error] {err}"));
+                        }
+                        CommandEvent::Terminated(payload) => {
+                            exit_flag.store(true, Ordering::SeqCst);
+                            exit_code.store(payload.code.unwrap_or(-1), Ordering::SeqCst);
+                            append_log(
+                                &event_log,
+                                &format!("[terminated] code={:?}", payload.code),
+                            );
+                        }
+                        _ => {}
+                    }
+                }
+            });
+            Ok(child)
+        }
+        Err(err) => {
+            child_exited.store(true, Ordering::SeqCst);
+            let msg = format!(
+                "启动本地服务失败：{err}（sidecar={}）",
+                sidecar_path.display()
+            );
+            append_log(log_path, &format!("[spawn-error] {msg}"));
+            Err(msg)
+        }
+    }
+}
+
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
@@ -345,6 +517,17 @@ pub fn run() {
             // 数据目录：MT_DATA_DIR > 用户配置 > 系统应用数据目录
             let data_dir = resolve_data_dir(app.handle());
             let log_path = sidecar_log_path(&data_dir);
+            let startup_sidecar_path = sidecar_executable_path();
+            append_log(
+                &log_path,
+                &format!(
+                    "[boot] version={} data_dir={} sidecar={} exists={}",
+                    env!("CARGO_PKG_VERSION"),
+                    data_dir.display(),
+                    startup_sidecar_path.display(),
+                    startup_sidecar_path.exists()
+                ),
+            );
             let main_window = app
                 .get_webview_window("main")
                 .expect("main window missing");
@@ -364,7 +547,9 @@ pub fn run() {
                     data_dir: data_dir.to_string_lossy().to_string(),
                     child: Mutex::new(None),
                     child_exited: Arc::new(AtomicBool::new(false)),
+                    last_exit_code: Arc::new(AtomicI32::new(i32::MIN)),
                     reused_pid: Some(existing_pid),
+                    restarting: AtomicBool::new(false),
                 });
                 // 立即显示窗口：用户打开即见主界面，不等任何连接
                 let _ = main_window.show();
@@ -376,59 +561,20 @@ pub fn run() {
             let token = generate_token();
 
             let child_exited = Arc::new(AtomicBool::new(false));
-            let exit_flag = child_exited.clone();
+            let last_exit_code = Arc::new(AtomicI32::new(i32::MIN));
 
-            let sidecar = app
-                .shell()
-                .sidecar("mangatrans-backend")
-                .expect("sidecar 未打包")
-                .env("MT_PORT", port.to_string())
-                .env("MT_AUTH_TOKEN", &token)
-                .env("MT_DATA_DIR", data_dir.to_str().unwrap_or_default())
-                .env("MT_MIGRATE_ON_START", "1")
-                // Windows 管道默认可能是 cp1252，Python 中文日志会直接抛 UnicodeEncodeError。
-                // 强制 UTF-8，保证任何后端诊断输出都不会中断启动/退出流程。
-                .env("PYTHONIOENCODING", "utf-8")
-                .env("PYTHONUTF8", "1");
-
-            // sidecar 启动失败时不崩溃：记录日志，窗口照常显示，由前端提示错误
-            let child = match sidecar.spawn() {
-                Ok((mut rx, child)) => {
-                    let event_log = log_path.clone();
-                    tauri::async_runtime::spawn(async move {
-                        while let Some(event) = rx.recv().await {
-                            match event {
-                                CommandEvent::Stdout(line) => append_log(
-                                    &event_log,
-                                    &format!("[stdout] {}", String::from_utf8_lossy(&line)),
-                                ),
-                                CommandEvent::Stderr(line) => append_log(
-                                    &event_log,
-                                    &format!("[stderr] {}", String::from_utf8_lossy(&line)),
-                                ),
-                                CommandEvent::Error(err) => {
-                                    append_log(&event_log, &format!("[error] {err}"))
-                                }
-                                CommandEvent::Terminated(payload) => {
-                                    exit_flag.store(true, Ordering::SeqCst);
-                                    append_log(
-                                        &event_log,
-                                        &format!("[terminated] code={:?}", payload.code),
-                                    );
-                                }
-                                _ => {}
-                            }
-                        }
-                    });
-                    Some(child)
-                }
-                Err(err) => {
-                    // spawn 失败时没有子进程，必须把状态标记为已退出；
-                    // 否则前端诊断会误报「后端进程运行中，正在初始化」，掩盖真正原因。
-                    child_exited.store(true, Ordering::SeqCst);
-                    append_log(&log_path, &format!("[spawn-error] {err}"));
-                    None
-                }
+            // sidecar 启动失败时不崩溃：记录日志，窗口照常显示，由前端提示错误并允许重启
+            let child = match spawn_sidecar(
+                app.handle(),
+                port,
+                &token,
+                data_dir.to_str().unwrap_or_default(),
+                &log_path,
+                child_exited.clone(),
+                last_exit_code.clone(),
+            ) {
+                Ok(child) => Some(child),
+                Err(_) => None,
             };
 
             // 窗口立即显示：不等健康检查（前端静默重试，连接失败展示诊断信息）
@@ -446,7 +592,9 @@ pub fn run() {
                 data_dir: data_dir.to_string_lossy().to_string(),
                 child: Mutex::new(child),
                 child_exited,
+                last_exit_code,
                 reused_pid: None,
+                restarting: AtomicBool::new(false),
             });
             Ok(())
         })
@@ -454,6 +602,7 @@ pub fn run() {
             open_external,
             get_backend_config,
             get_backend_status,
+            restart_backend,
             get_storage_info,
             choose_data_dir,
             pick_directory,
@@ -473,16 +622,30 @@ pub fn run() {
                     return;
                 }
                 if let Some(state) = app.try_state::<BackendState>() {
-                    // 先按 backend.lock 中的 Python 进程 PID 结束整棵进程树；
-                    // one-file 启动器父进程被 CommandChild.kill() 结束并不保证子进程退出。
-                    let lock_pid = locked_backend_pid(&state.data_dir);
-                    if let Some(pid) = lock_pid {
-                        kill_backend_pid(pid);
-                    }
-                    // 复用后端时 lock_pid 与 reused_pid 通常相同：只结束一次，避免双 taskkill。
-                    if let Some(pid) = state.reused_pid {
-                        if Some(pid) != lock_pid {
+                    append_log(
+                        &sidecar_log_path(Path::new(&state.data_dir)),
+                        "[shutdown] 应用退出，清理本地服务",
+                    );
+                    // 只有本实例确实拉起或复用了后端时才允许清理。
+                    // 启动失败的实例不能按 backend.lock 盲杀，否则可能误杀随后启动的新后端。
+                    let owns_backend = state.reused_pid.is_some()
+                        || state
+                            .child
+                            .lock()
+                            .map(|guard| guard.is_some())
+                            .unwrap_or(false);
+                    if owns_backend {
+                        // 先按 backend.lock 中的 Python 进程 PID 结束整棵进程树；
+                        // one-file 启动器父进程被 CommandChild.kill() 结束并不保证子进程退出。
+                        let lock_pid = locked_backend_pid(&state.data_dir);
+                        if let Some(pid) = lock_pid {
                             kill_backend_pid(pid);
+                        }
+                        // 复用后端时 lock_pid 与 reused_pid 通常相同：只结束一次，避免双 taskkill。
+                        if let Some(pid) = state.reused_pid {
+                            if Some(pid) != lock_pid {
+                                kill_backend_pid(pid);
+                            }
                         }
                     }
                     if let Ok(mut guard) = state.child.lock() {

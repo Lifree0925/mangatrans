@@ -415,3 +415,18 @@ def test_validate_window_accepts_out_of_order_entries():
         {"segment_id": "a", "target_text": "First."},
     ]
     assert validate_window(segs, translations) == []
+
+
+def test_validate_window_accepts_multi_speaker_labels() -> None:
+    """多人同说对白允许斜杠角色标签，不能误报「缺少角色标签」。"""
+    src = {
+        "segment_id": "s-multi",
+        "segment_type": "dialogue",
+        "speaker_name": "Damian/Ethan",
+        "source_text": "Damian/Ethan（厉声）：不行！\n",
+    }
+    ok = validate_window([src], [{
+        "segment_id": "s-multi",
+        "target_text": "Damian/Ethan: No!\n",
+    }])
+    assert ok == []

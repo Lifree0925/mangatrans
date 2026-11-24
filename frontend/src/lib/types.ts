@@ -76,6 +76,13 @@ export interface TaskUsage {
   by_stage?: Record<string, { requests?: number; prompt_tokens?: number; completion_tokens?: number; total_tokens?: number; latency_ms?: number }>;
 }
 
+export interface TaskLiveInfo {
+  active_calls: number;
+  oldest_seconds?: number | null;
+  stages?: string[];
+  models?: string[];
+}
+
 export interface TaskInfo {
   id: string;
   task_type: string;
@@ -84,6 +91,11 @@ export interface TaskInfo {
   error_message: string | null;
   error_code?: string | null;
   created_at: string | null;
+  started_at?: string | null;
+  active_seconds?: number;
+  elapsed_seconds?: number;
+  last_activity_at?: string | null;
+  live?: TaskLiveInfo;
   project_id?: string;
   project_name?: string;
   model?: string;

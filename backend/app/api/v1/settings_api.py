@@ -1,6 +1,7 @@
 """模型设置与任务中心 API。"""
 
 import json
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select, update
@@ -10,7 +11,14 @@ from app.core import credentials
 from app.core.database import get_db
 from app.models.task import Task, TaskItem
 from app.models.translation import ProviderConfig
+from app.llm.activity import active_calls_snapshot
 from app.pipeline.runner import launch as launch_task
+from app.pipeline.task_timer import (
+    current_task_run_seconds,
+    elapsed_task_seconds,
+    settle_task_timer,
+    start_task_timer,
+)
 from app.services.provider_service import set_default_from_db, test_provider
 from app.services.usage_service import summarize_one, summarize_task_usage
 
@@ -25,6 +33,50 @@ def _iso_utc(dt) -> str | None:
     if getattr(dt, "tzinfo", None) is None:
         return dt.isoformat() + "Z"
     return dt.isoformat()
+
+
+def _compact_progress(raw: str) -> dict:
+    """任务列表只返回展示所需进度，裁掉 draft_carry 等大体积内部快照。
+
+    详情接口仍返回完整 progress，便于排查；列表每 1.5 秒轮询，必须控制体积。
+    """
+    try:
+        progress = json.loads(raw or "{}")
+    except json.JSONDecodeError:
+        return {}
+    if not isinstance(progress, dict):
+        return {}
+    top_carry = progress.pop("draft_carry", None)
+    if isinstance(top_carry, dict):
+        progress["draft_done"] = max(int(progress.get("draft_done") or 0), len(top_carry))
+    steps = progress.get("steps")
+    if isinstance(steps, dict):
+        translation = steps.get("translation")
+        if isinstance(translation, dict):
+            carry = translation.pop("draft_carry", None)
+            if isinstance(carry, dict):
+                translation["draft_done"] = max(
+                    int(translation.get("draft_done") or 0), len(carry)
+                )
+            translation.pop("failed_window_errors", None)
+    return progress
+
+
+def _latest_activity_at(task: Task, usage: dict | None) -> str | None:
+    """任务最近一次真实活动：进度写库时间与最近模型调用取较晚者。"""
+    values = [task.updated_at, (usage or {}).get("last_call_at")]
+    latest: datetime | None = None
+    for value in values:
+        if value is None:
+            continue
+        normalized = (
+            value.replace(tzinfo=timezone.utc)
+            if getattr(value, "tzinfo", None) is None
+            else value.astimezone(timezone.utc)
+        )
+        if latest is None or normalized > latest:
+            latest = normalized
+    return _iso_utc(latest)
 
 
 @router.get("/settings/providers")
@@ -188,6 +240,7 @@ def get_task(task_id: str, db: Session = Depends(get_db)) -> dict:
     task = db.get(Task, task_id)
     if task is None:
         raise HTTPException(status_code=404, detail="任务不存在")
+    usage = summarize_one(db, task.id)
     return {
         "id": task.id,
         "task_type": task.task_type,
@@ -196,8 +249,13 @@ def get_task(task_id: str, db: Session = Depends(get_db)) -> dict:
         "error_message": task.error_message,
         "error_code": task.error_code,
         "created_at": _iso_utc(task.created_at),
+        "started_at": _iso_utc(task.started_at),
+        "active_seconds": round(float(task.active_seconds or 0), 1),
+        "elapsed_seconds": elapsed_task_seconds(task),
+        "last_activity_at": _latest_activity_at(task, usage),
+        "live": active_calls_snapshot([task.id]).get(task.id, {"active_calls": 0}),
         "model": json.loads(task.config_snapshot_json or "{}").get("model", ""),
-        "usage": summarize_one(db, task.id),
+        "usage": usage,
     }
 
 
@@ -232,11 +290,9 @@ def resume_task(task_id: str, db: Session = Depends(get_db)) -> dict:
     )
     if has_items is None:
         # 线程型任务（Express/试译/知识/场景卡）：必须真正重新调度执行
-        from datetime import datetime, timedelta, timezone
-
         if task.status == "running" and task.started_at is not None:
             # 仍在执行（30 分钟内）：无需重复调度
-            if datetime.now(timezone.utc) - task.started_at < timedelta(minutes=30):
+            if current_task_run_seconds(task) < 30 * 60:
                 return {"id": task.id, "status": task.status}
         if task.status == "completed":
             return {"id": task.id, "status": task.status}
@@ -247,10 +303,13 @@ def resume_task(task_id: str, db: Session = Depends(get_db)) -> dict:
         _reset_task_items_for_resume(
             db, task_id, reset_running=task.status == "failed"
         )
+    # 暂停/失败期间不计时：旧运行段只结算到最后一次写库时间。
+    settle_task_timer(task, until=task.updated_at)
     _reset_quality_steps_for_retry(task)
     task.status = "running"
     task.error_message = None
     task.error_code = None
+    start_task_timer(task)
     db.commit()
     if has_items is None:
         # 仅改状态不会重新执行，必须重新调度
@@ -280,10 +339,13 @@ def retry_task(task_id: str, db: Session = Depends(get_db)) -> dict:
     has_items = _reset_task_items_for_resume(
         db, task_id, reset_running=task.status == "failed"
     )
+    # 失败/中断期间不计时：旧运行段只结算到最后一次写库时间。
+    settle_task_timer(task, until=task.updated_at)
     _reset_quality_steps_for_retry(task)
     task.status = "running"
     task.error_message = None
     task.error_code = None
+    start_task_timer(task)
     db.commit()
     if not has_items:
         # 线程型任务：重新调度执行
@@ -343,16 +405,23 @@ def list_all_tasks(db: Session = Depends(get_db), archived: bool = False) -> lis
         p.id: p.name
         for p in db.scalars(select(Project).where(Project.id.in_({t.project_id for t in tasks})))
     }
-    usage = summarize_task_usage(db, [t.id for t in tasks])
+    task_ids = [t.id for t in tasks]
+    usage = summarize_task_usage(db, task_ids)
+    live = active_calls_snapshot(task_ids)
     return [
         {
             "id": t.id,
             "task_type": t.task_type,
             "status": t.status,
-            "progress": json.loads(t.progress_json or "{}"),
+            "progress": _compact_progress(t.progress_json),
             "error_message": t.error_message,
             "error_code": t.error_code,
             "created_at": _iso_utc(t.created_at),
+            "started_at": _iso_utc(t.started_at),
+            "active_seconds": round(float(t.active_seconds or 0), 1),
+            "elapsed_seconds": elapsed_task_seconds(t),
+            "last_activity_at": _latest_activity_at(t, usage.get(t.id)),
+            "live": live.get(t.id, {"active_calls": 0}),
             "project_id": t.project_id,
             "project_name": names.get(t.project_id, "已删除项目"),
             "model": json.loads(t.config_snapshot_json or "{}").get("model", ""),
@@ -370,16 +439,23 @@ def list_project_tasks(project_id: str, db: Session = Depends(get_db)) -> list[d
     tasks = db.scalars(
         select(Task).where(Task.project_id == project_id).order_by(Task.created_at.desc()).limit(50)
     )
-    usage = summarize_task_usage(db, [t.id for t in tasks])
+    task_ids = [t.id for t in tasks]
+    usage = summarize_task_usage(db, task_ids)
+    live = active_calls_snapshot(task_ids)
     return [
         {
             "id": t.id,
             "task_type": t.task_type,
             "status": t.status,
-            "progress": json.loads(t.progress_json or "{}"),
+            "progress": _compact_progress(t.progress_json),
             "error_message": t.error_message,
             "error_code": t.error_code,
             "created_at": _iso_utc(t.created_at),
+            "started_at": _iso_utc(t.started_at),
+            "active_seconds": round(float(t.active_seconds or 0), 1),
+            "elapsed_seconds": elapsed_task_seconds(t),
+            "last_activity_at": _latest_activity_at(t, usage.get(t.id)),
+            "live": live.get(t.id, {"active_calls": 0}),
             "project_name": db.get(Project, t.project_id).name if db.get(Project, t.project_id) else "已删除项目",
             "model": json.loads(t.config_snapshot_json or "{}").get("model", ""),
             "usage": usage.get(t.id, {}),

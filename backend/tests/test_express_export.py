@@ -9,6 +9,12 @@ import app.core.database as dbmod
 from app.llm.fake import FakeProvider
 from app.llm.registry import set_provider
 from app.models.task import Task
+from app.services.exporter import (
+    _build_role_map,
+    _render_cast_line,
+    _render_dialogue,
+    _render_narrative_lines,
+)
 from conftest import fake_translation_entries
 
 
@@ -340,3 +346,82 @@ def test_delivery_reuses_existing_english_title(client: TestClient, wait_task) -
     body = client.post(f"/api/v1/projects/{pid}/export", json={}).json()["content"]
     assert body.startswith("The Alpha's Rejected Mate\n《被狼王抛弃的新娘》\n")
     assert body.count("The Alpha's Rejected Mate") == 1
+
+
+def test_delivery_multi_speaker_dialogue_keeps_chinese_direction() -> None:
+    """多人同说标签必须能解析，交付版不能退回英文括号格式。"""
+    rendered = _render_dialogue(
+        "Damian/Ethan（厉声）：不行！",
+        "Damian/Ethan (sharp): No!",
+    )
+    assert rendered == ["Damian/Ethan（厉声）：No!"]
+
+    rendered = _render_dialogue(
+        "Ethan/Marcus（异口同声，嘲讽拉满）：就凭你？",
+        "Ethan/Marcus (in unison, dripping with mockery): You?",
+    )
+    assert rendered == ["Ethan/Marcus（异口同声，嘲讽拉满）：You?"]
+
+
+def test_delivery_cast_lines_are_anglicized_and_role_labels_canonicalized() -> None:
+    """人物行即使属于 narrative 也要英文化；角色变体按多数名统一。"""
+    from types import SimpleNamespace
+
+    def seg(sid, stype, source):
+        return SimpleNamespace(id=sid, segment_type=stype, source_text=source)
+
+    segs = [
+        seg("c1", "narrative", "人物：Chloe，恶霸房东，保镖若干"),
+        seg("d1", "dialogue", "恶霸房东（冷笑）：滚。"),
+        seg("d2", "dialogue", "头目（冷笑）：滚。"),
+        seg("d3", "dialogue", "头目（怒）：滚。"),
+        seg("d4", "dialogue", "头目（冷）：滚。"),
+        seg("c2", "narrative", "人物：Damian，Helen（Damian母亲）"),
+    ]
+    trans = {
+        "c1": SimpleNamespace(target_text="Characters: Chloe, Bully Landlord, several bodyguards"),
+        "d1": SimpleNamespace(target_text="Bully Landlord (sneers): Get out."),
+        "d2": SimpleNamespace(target_text="African Burly Man Leader (sneers): Get out."),
+        "d3": SimpleNamespace(target_text="African Strongman Leader (angry): Get out."),
+        "d4": SimpleNamespace(target_text="African Strongman Leader (cold): Get out."),
+        "c2": SimpleNamespace(target_text="Characters: Damian, Helen (Damian's mother)"),
+    }
+    role_map = _build_role_map(segs, trans)
+    assert role_map["头目"] == "African Strongman Leader"
+    assert _render_cast_line("人物：Chloe，恶霸房东，保镖若干", role_map) == (
+        "人物：Chloe、Bully Landlord、several bodyguards"
+    )
+    assert _render_cast_line("人物：Damian，Helen（Damian母亲）", role_map) == (
+        "人物：Damian、Helen (Damian's mother)"
+    )
+    assert _render_dialogue("头目（冷笑）：滚。", "African Burly Man Leader (sneers): Get out.", role_map) == [
+        "African Strongman Leader（冷笑）：Get out."
+    ]
+
+
+def test_delivery_narration_uses_translation_but_action_stays_chinese() -> None:
+    """旁白/画外音/字幕输出英文；纯动作和剧终标记仍保留中文。"""
+    source = "\n".join([
+        "△Chloe推开门。",
+        "△电视画外音：据知情人透露，五年前的黑客就是她。",
+        "△字幕：三个月后。",
+        "△系统提示音冰冷响起：警告，防火墙破损百分之六十！",
+        "旁白：故事从这一夜开始。",
+        "（剧终）",
+    ])
+    target = "\n".join([
+        "△Chloe pushes the door open.",
+        "△TV voice-over: Sources say the hacker from five years ago was her.",
+        "△Subtitle: Three months later.",
+        "△The system alert chimes cold: Warning — firewall sixty percent compromised!",
+        "Narration: The story begins that night.",
+        "(End)",
+    ])
+    assert _render_narrative_lines(source, target) == [
+        "△Chloe推开门。",
+        "△TV voice-over: Sources say the hacker from five years ago was her.",
+        "△Subtitle: Three months later.",
+        "△The system alert chimes cold: Warning — firewall sixty percent compromised!",
+        "Narration: The story begins that night.",
+        "（剧终）",
+    ]

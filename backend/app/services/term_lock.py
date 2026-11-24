@@ -27,6 +27,29 @@ class TermLockOutput(BaseModel):
     terms: dict[str, str] = Field(default_factory=dict)
 
 
+def has_pending_untranslated_terms(db, project_id: str) -> bool:
+    """是否存在尚未锁定译名的已批准术语。
+
+    有待定术语时不能安全地提前润色：术语锁定需要 Draft 样本，必须等全量 Draft
+    完成后统一锁名，否则前后窗口可能使用不同译名。
+    """
+    terms = db.scalars(
+        select(KnowledgeItem).where(
+            KnowledgeItem.project_id == project_id,
+            KnowledgeItem.item_type == "term",
+            KnowledgeItem.status.in_(["approved", "auto_approved"]),
+        )
+    )
+    for item in terms:
+        try:
+            data = json.loads(item.data_json or "{}")
+        except json.JSONDecodeError:
+            continue
+        if not str(data.get("translation") or "").strip():
+            return True
+    return False
+
+
 async def lock_untranslated_terms(
     db_factory, project_id: str, source_document_id: str, provider, model: str
 ) -> dict:
