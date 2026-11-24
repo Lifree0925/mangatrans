@@ -1,6 +1,6 @@
 /** 项目工作台：导入、解析、章节树、片段列表、解析报告。 */
 
-import { startTransition, useEffect, useMemo, useRef, useState } from "react";
+import { startTransition, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ArrowLeft, BookOpen, Check, ChevronLeft, ChevronRight, Download, FileUp, Loader2, Pencil, X, Zap } from "lucide-react";
 import { Link, useParams } from "react-router-dom";
@@ -21,6 +21,9 @@ export default function ProjectPage() {
   const [editMenuFor, setEditMenuFor] = useState<string | null>(null);
   const [editMenuPos, setEditMenuPos] = useState<{ x: number; y: number } | null>(null);
   const [activeChapterId, setActiveChapterId] = useState<string | null>(null);
+  // 本次导入触发的解析任务：任务结束后必须再拉取一次正文，避免解析太快时错过 running 状态
+  const [parsingTaskId, setParsingTaskId] = useState<string | null>(null);
+  const refreshedParsingTaskRef = useRef<string | null>(null);
   const bodyRef = useRef<HTMLDivElement | null>(null);
   const scrollRaf = useRef<number | null>(null);
 
@@ -130,14 +133,14 @@ export default function ProjectPage() {
     }
   };
 
-  const invalidate = () => {
+  const invalidate = useCallback(() => {
     qc.invalidateQueries({ queryKey: ["chapters", id] });
     qc.invalidateQueries({ queryKey: ["scenes", id] });
     qc.invalidateQueries({ queryKey: ["segments", id] });
     qc.invalidateQueries({ queryKey: ["project", id] });
     qc.invalidateQueries({ queryKey: ["latest-translations", id] });
     qc.invalidateQueries({ queryKey: ["project-tasks", id] });
-  };
+  }, [id, qc]);
 
   const upload = useMutation({
     mutationFn: async (file: File) => {
@@ -243,14 +246,33 @@ export default function ProjectPage() {
 
   const parse = useMutation({
     mutationFn: () => api<{ task_id: string }>(`/projects/${id}/parse`, { method: "POST" }),
-    onSuccess: () => {
+    onSuccess: (r) => {
+      setParsingTaskId(r.task_id);
       invalidate();
       qc.invalidateQueries({ queryKey: ["project-tasks", id] });
     },
     onError: (err) => toast.error(`解析失败：${String(err)}`),
   });
 
+  // 解析任务完成（或失败/取消）后刷新正文。不能只依赖 hasActiveTask 轮询：
+  // 短剧本解析可能在两次任务轮询之间结束，片段查询会一直停留在导入前的空结果。
+  const parsingTask = parsingTaskId
+    ? (projectTasks.data ?? []).find((t) => t.id === parsingTaskId)
+    : undefined;
+  useEffect(() => {
+    if (!parsingTaskId) return;
+    if (!parsingTask || !["completed", "failed", "cancelled"].includes(parsingTask.status)) return;
+    if (refreshedParsingTaskRef.current === parsingTaskId) return;
+    refreshedParsingTaskRef.current = parsingTaskId;
+    invalidate();
+  }, [invalidate, parsingTask, parsingTaskId]);
+
   const segs = segments.data ?? [];
+  const preparingSource =
+    upload.isPending ||
+    parse.isPending ||
+    (parsingTaskId !== null &&
+      (!parsingTask || parsingTask.status === "queued" || parsingTask.status === "running"));
   const trMap = useMemo(() => {
     const m = new Map<string, LatestTranslation>();
     for (const i of latestTranslations.data?.items ?? []) m.set(i.segment_id, i);
@@ -469,6 +491,12 @@ export default function ProjectPage() {
                 </span>
               );
             })()}
+            {segs.length === 0 && preparingSource && (
+              <div role="status" className="flex items-center gap-2 py-2 text-xs text-(--color-muted)">
+                <Loader2 size={13} className="animate-spin" />
+                正在解析原文…
+              </div>
+            )}
             {segs.map((s) => {
               const tr = trMap.get(s.id);
               const startEdit = (side: "source" | "target") => {
