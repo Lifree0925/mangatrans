@@ -5,8 +5,8 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { BookOpen, ChevronRight, Cpu, Eye, EyeOff, FolderOpen, Plus, RefreshCw, Trash2, X } from "lucide-react";
 import { api } from "../lib/api";
 import { confirmAction, toast } from "../lib/feedback";
-import { APP_VERSION, checkUpdate, type UpdateInfo } from "../lib/version";
-import { openExternal } from "../lib/open";
+import { APP_VERSION } from "../lib/version";
+import { useAppUpdate } from "../lib/updater";
 import type { ProviderInfo } from "../lib/types";
 
 const HELP_SECTIONS: { title: string; items: string[] }[] = [
@@ -139,10 +139,11 @@ export default function SettingsPage() {
   const [keyDraft, setKeyDraft] = useState("");
   const [editingKeyFor, setEditingKeyFor] = useState<string | null>(null);
   const [showEditKey, setShowEditKey] = useState(false);
-  const [updateInfo, setUpdateInfo] = useState<UpdateInfo | null>(null);
   const [activePanel, setActivePanel] = useState<"models" | "help" | null>(null);
-  const [checkingUpdate, setCheckingUpdate] = useState(false);
   const [preset, setPreset] = useState("openai");
+  const { state: updateState, check: checkUpdate, install: installUpdate } = useAppUpdate(false);
+  const updateChecking = updateState.phase === "checking";
+  const updateBusy = updateState.phase === "downloading" || updateState.phase === "installing";
   const isTauri = !!(
     window as unknown as { __TAURI_INTERNALS__?: unknown }
   ).__TAURI_INTERNALS__;
@@ -171,17 +172,13 @@ export default function SettingsPage() {
   };
 
   const checkForUpdates = async () => {
-    setCheckingUpdate(true);
     try {
-      const info = await checkUpdate(true);
-      setUpdateInfo(info);
-      if (info.has_update) toast.success(`发现新版本 v${info.latest}`);
-      else if (info.error) toast.error("检查更新失败，请稍后重试");
+      const result = await checkUpdate();
+      if (result.phase === "available") toast.success(`发现新版本 v${result.version ?? ""}`);
+      else if (result.phase === "error") toast.error("检查更新失败，请稍后重试");
       else toast.success("已是最新版本");
     } catch (err) {
       toast.error(`检查更新失败：${String(err)}`);
-    } finally {
-      setCheckingUpdate(false);
     }
   };
 
@@ -324,34 +321,44 @@ export default function SettingsPage() {
             </span>
             <div className="flex shrink-0 flex-col items-end gap-1">
               <div className="flex items-center gap-2">
-                {updateInfo?.has_update && (updateInfo.download_url || updateInfo.installer_url) && (
+                {updateState.phase === "available" && (
                   <button
-                    onClick={() => openExternal(updateInfo.installer_url || updateInfo.download_url || "")}
+                    onClick={() => void installUpdate()}
                     className="rounded-lg bg-(--color-accent) px-3 py-1 text-xs font-medium text-white hover:bg-(--color-accent-hover)"
                   >
-                    下载 v{updateInfo.latest}
+                    更新 v{updateState.version ?? ""}
                   </button>
                 )}
                 <span className="font-mono text-xs text-(--color-muted)">v{APP_VERSION}</span>
                 <button
                   onClick={checkForUpdates}
-                  disabled={checkingUpdate}
+                  disabled={updateChecking || updateBusy}
                   className="rounded-lg border border-(--color-border) bg-(--color-bg) px-3 py-1 text-xs hover:bg-(--color-panel2) disabled:opacity-40"
                 >
-                  {checkingUpdate ? "检查中…" : "检查更新"}
+                  {updateChecking ? "检查中…" : "检查更新"}
                 </button>
               </div>
-              {updateInfo && (
+              {updateState.phase !== "idle" && updateState.phase !== "checking" && (
                 <span
                   className={`text-[11px] ${
-                    updateInfo.has_update ? "text-amber-600" : updateInfo.error ? "text-red-600" : "text-emerald-600"
+                    updateState.phase === "error"
+                      ? "text-red-600"
+                      : updateState.phase === "latest"
+                        ? "text-emerald-600"
+                        : "text-amber-600"
                   }`}
                 >
-                  {updateInfo.has_update
-                    ? `发现新版本 v${updateInfo.latest}`
-                    : updateInfo.error
-                      ? "检查失败，请稍后重试"
-                      : "已是最新版本"}
+                  {updateState.phase === "available"
+                    ? `发现新版本 v${updateState.version ?? ""}`
+                    : updateState.phase === "downloading"
+                      ? `正在下载更新${updateState.progress != null ? ` ${updateState.progress}%` : "…"}`
+                      : updateState.phase === "installing"
+                        ? "正在安装更新…"
+                        : updateState.phase === "error"
+                          ? updateState.failedAction === "install"
+                            ? "更新失败，请稍后重试"
+                            : "检查失败，请稍后重试"
+                          : "已是最新版本"}
                 </span>
               )}
             </div>

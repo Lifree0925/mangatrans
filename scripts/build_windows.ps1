@@ -28,6 +28,9 @@ $tauriCli = Join-Path $root "frontend\node_modules\.bin\tauri.cmd"
 if (-not (Test-Path $tauriCli)) {
   throw "缺少 Tauri CLI：$tauriCli（先在 frontend 执行 pnpm install）"
 }
+if (-not $env:TAURI_SIGNING_PRIVATE_KEY -or -not $env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD) {
+  throw "缺少 Tauri updater 签名环境变量：TAURI_SIGNING_PRIVATE_KEY / TAURI_SIGNING_PRIVATE_KEY_PASSWORD"
+}
 
 Set-Location (Join-Path $root "src-tauri")
 $tauriArgs = @("build")

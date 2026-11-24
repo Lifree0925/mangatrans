@@ -1,4 +1,4 @@
-/** 应用版本与更新检查（静态 update.json，避免 GitHub API 限流 403；一天缓存）。 */
+/** 应用版本；静态 update.json 检查仅用于浏览器开发环境的更新回退。 */
 
 declare const __APP_VERSION__: string;
 

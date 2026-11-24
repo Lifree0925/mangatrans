@@ -44,6 +44,7 @@ logs/
 *.pid
 
 # 本地环境与敏感文件
+.secrets/
 .env
 .env.local
 *.bak

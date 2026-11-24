@@ -66,6 +66,13 @@ AI 漫剧剧本翻译系统（Windows 桌面版）：本地优先工作台，将
   不 commit、不 push、不打 tag、不触发 CI 构建。
 - 发版指令一旦给出，流程为：bump 版本号（`tauri.conf.json` / `frontend/package.json` / `update.json`）
   → 前后端测试 → commit → push main → tag `vX.Y.Z` → push tag → 盯 CI → 确认 release 资产。
+- 应用内更新走 `tauri-plugin-updater`：updater 公钥在 `tauri.conf.json`，私钥和密码只放本机
+  `~/.tauri/mangatrans-updater.key` / `.password`，绝不入仓库。CI 必须配置 Secrets
+  `TAURI_SIGNING_PRIVATE_KEY` 与 `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`；发布资产必须包含
+  `latest.json` 和对应的 NSIS updater 签名产物。
+- 本机项目备份位于 `.secrets/updater/`（已被 `.gitignore` 排除，权限 600，禁止提交）。
+- updater 私钥不可轮换，否则已安装客户端无法验证后续更新；`update.json` 继续供仍在使用
+  旧版手动更新流程的客户端使用，发版时同步 bump。
 
 ## 本仓库实测的坑（务必遵守）
 

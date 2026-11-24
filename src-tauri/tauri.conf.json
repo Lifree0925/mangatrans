@@ -27,8 +27,20 @@
       "csp": null
     }
   },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDcwNzc3RTVCRjRCNDE4RjkKUldUNUdMVDBXMzUzY1A5UXpodVlmTWV0R2tmSGxmb1M0MTNiQzl3Nis1cDhEeFBhdkN6dkxONVoK",
+      "endpoints": [
+        "https://github.com/Lifree0925/mangatrans/releases/latest/download/latest.json"
+      ],
+      "windows": {
+        "installMode": "passive"
+      }
+    }
+  },
   "bundle": {
     "active": true,
+    "createUpdaterArtifacts": true,
     "targets": [
       "nsis"
     ],

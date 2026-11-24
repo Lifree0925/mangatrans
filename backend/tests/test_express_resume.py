@@ -1,5 +1,6 @@
 """Express 断点续跑：只补未完成窗口，已初翻/已润色部分不重复执行。"""
 
+import asyncio
 import json
 import re
 import time
@@ -12,6 +13,7 @@ from app.llm.registry import set_provider
 from app.models.document import SourceSegment
 from app.models.task import Task
 from app.models.translation import ProviderConfig, Translation
+from app.pipeline.worker import run_once
 from app.services.window_planner import build_windows
 
 
@@ -351,3 +353,91 @@ def test_polish_structure_failure_has_actionable_error(client, wait_task) -> Non
     assert "个翻译窗口失败" in message
     assert "结构校验失败" in message
     assert "not enough values" not in message
+
+
+def test_repeated_retries_after_structure_failure_eventually_complete(client, wait_task) -> None:
+    """连续多次重试不能卡死；服务恢复后下一次重试应继续并完成。"""
+    _pid, tid, _target_id = _prepare_structure_retry(client, wait_task)
+    set_provider(_CorruptPolishProvider(_structured_fake(), always=True))
+
+    for _ in range(2):
+        assert client.post(f"/api/v1/tasks/{tid}/retry").status_code == 200
+        failed = wait_task(client, tid, timeout=90)
+        assert failed["status"] == "failed"
+        message = failed.get("error_message") or ""
+        assert "个翻译窗口失败" in message
+        assert "not enough values" not in message
+        with dbmod.SessionLocal() as db:
+            assert db.get(Task, tid).status == "failed"
+
+    # 模拟模型服务恢复后再次点击重试：不能因为前两次失败而保留死锁。
+    set_provider(_CorruptPolishProvider(_structured_fake()))
+    assert client.post(f"/api/v1/tasks/{tid}/retry").status_code == 200
+    completed = wait_task(client, tid, timeout=90)
+    assert completed["status"] == "completed", completed.get("error_message")
+
+
+def _drive_worker_until_done(task_id: str, max_rounds: int = 80) -> str:
+    status = "running"
+    for _ in range(max_rounds):
+        asyncio.run(run_once())
+        with dbmod.SessionLocal() as db:
+            task = db.get(Task, task_id)
+            status = task.status
+        if status in ("completed", "failed"):
+            break
+    return status
+
+
+def test_full_retranslate_after_structure_failure_completes(client, wait_task) -> None:
+    """Express 结构失败后，“全部重新翻译”应创建新任务并完整完成。"""
+    pid, tid, target_id = _prepare_structure_retry(client, wait_task)
+    set_provider(_CorruptPolishProvider(_structured_fake(), always=True))
+    assert client.post(f"/api/v1/tasks/{tid}/retry").status_code == 200
+    failed = wait_task(client, tid, timeout=90)
+    assert failed["status"] == "failed"
+
+    # 用户不再重试旧任务，直接点“全部重新翻译”。
+    set_provider(_structured_fake())
+    r = client.post(f"/api/v1/projects/{pid}/translation/start", json={})
+    assert r.status_code == 200, r.text
+    new_tid = r.json()["task_id"]
+    assert _drive_worker_until_done(new_tid) == "completed"
+
+    with dbmod.SessionLocal() as db:
+        tr = db.scalar(
+            select(Translation)
+            .where(Translation.segment_id == target_id, Translation.stage == "polished")
+            .order_by(Translation.version.desc())
+            .limit(1)
+        )
+        assert tr is not None
+        assert len([x for x in (tr.target_text or "").splitlines() if x.strip()]) == 2
+    quality = client.get(f"/api/v1/projects/{pid}/quality-report").json()
+    assert quality["gate"] == "passed", quality
+    assert quality["missing"] == 0
+
+
+def test_repeated_retry_calls_do_not_launch_duplicate_thread(
+    client, wait_task, monkeypatch
+) -> None:
+    """双击/连续点击重试时，第一次已调度后第二次必须幂等返回。"""
+    from app.api.v1 import settings_api
+
+    pid = _setup_multiline_structure(client, wait_task)
+    with dbmod.SessionLocal() as db:
+        task = Task(project_id=pid, task_type="express", status="failed")
+        db.add(task)
+        db.commit()
+        task_id = task.id
+
+    launches: list[str] = []
+    monkeypatch.setattr(settings_api, "launch_task", lambda tid: launches.append(tid))
+
+    first = client.post(f"/api/v1/tasks/{task_id}/retry")
+    second = client.post(f"/api/v1/tasks/{task_id}/retry")
+    assert first.status_code == 200
+    assert second.status_code == 200
+    assert first.json()["status"] == "running"
+    assert second.json()["status"] == "running"
+    assert launches == [task_id]

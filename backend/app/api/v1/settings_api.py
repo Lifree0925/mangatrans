@@ -324,6 +324,10 @@ def retry_task(task_id: str, db: Session = Depends(get_db)) -> dict:
         raise HTTPException(status_code=404, detail="任务不存在")
     if task.status == "completed":
         return {"id": task.id, "status": task.status}
+    # 幂等：连续点击/双击重试时，首次调用已把任务置为 running 并启动线程，
+    # 后续请求必须直接返回，不能再次 launch 同一任务。
+    if task.status in ("running", "queued"):
+        return {"id": task.id, "status": task.status}
     # 同项目并发防护：已有运行中任务时禁止重试，防止两个任务互相卡住
     other = db.scalar(
         select(Task.id).where(

@@ -32,6 +32,19 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: Verify updater signing secrets
+        shell: pwsh
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:TAURI_SIGNING_PRIVATE_KEY)) {
+            throw "缺少 GitHub Secret TAURI_SIGNING_PRIVATE_KEY，无法签名应用内更新包"
+          }
+          if ([string]::IsNullOrWhiteSpace($env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD)) {
+            throw "缺少 GitHub Secret TAURI_SIGNING_PRIVATE_KEY_PASSWORD，无法签名应用内更新包"
+          }
+
       - name: Install frontend deps
         working-directory: frontend
         run: pnpm install --frozen-lockfile
@@ -59,6 +72,8 @@ jobs:
         shell: bash
         working-directory: src-tauri
         env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
           PFX_B64: ${{ secrets.WINDOWS_SIGN_PFX_BASE64 }}
           PFX_PASS: ${{ secrets.WINDOWS_SIGN_PASSWORD }}
           WINDOWS_SIGN_TIMESTAMP_URL: http://timestamp.digicert.com
@@ -112,6 +127,38 @@ jobs:
             | ForEach-Object { "$($_.Hash.ToLower())  $(Split-Path $_.Path -Leaf)" } > checksums.txt
           Get-Content checksums.txt
 
+      - name: Generate updater manifest
+        shell: pwsh
+        env:
+          TAG: ${{ github.ref_name }}
+          REPO: ${{ github.repository }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $installer = Get-ChildItem -LiteralPath "src-tauri/target/release/bundle/nsis" -Filter "*.exe" |
+            Sort-Object LastWriteTime -Descending | Select-Object -First 1
+          if ($null -eq $installer) { throw "NSIS installer not found" }
+          $sigPath = "$($installer.FullName).sig"
+          if (-not (Test-Path -LiteralPath $sigPath)) {
+            throw "Updater signature missing: $sigPath"
+          }
+          $config = Get-Content src-tauri/tauri.conf.json -Raw | ConvertFrom-Json
+          $version = [string]$config.version
+          $signature = (Get-Content -LiteralPath $sigPath -Raw).Trim()
+          $downloadUrl = "https://github.com/$env:REPO/releases/download/$env:TAG/$($installer.Name)"
+          $manifest = [ordered]@{
+            version = $version
+            notes = "MangaTrans v$version"
+            pub_date = [DateTime]::UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ")
+            platforms = [ordered]@{
+              "windows-x86_64" = [ordered]@{
+                signature = $signature
+                url = $downloadUrl
+              }
+            }
+          }
+          $manifest | ConvertTo-Json -Depth 8 | Set-Content -Encoding utf8 latest.json
+          Get-Content latest.json
+
       - name: Upload build logs on failure
         if: failure()
         uses: actions/upload-artifact@v4
@@ -152,3 +199,4 @@ jobs:
             src-tauri/target/release/bundle/nsis/*.exe
             mangatrans_*_portable_x64.zip
             checksums.txt
+            latest.json
