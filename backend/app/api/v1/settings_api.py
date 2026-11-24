@@ -3,7 +3,7 @@
 import json
 
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
 from app.core import credentials
@@ -140,6 +140,34 @@ def patch_provider(pid: str, payload: dict, db: Session = Depends(get_db)) -> di
     return {"id": cfg.id, "config_version": cfg.config_version}
 
 
+def _reset_task_items_for_resume(
+    db: Session, task_id: str, *, reset_running: bool
+) -> bool:
+    """恢复批量任务：只把失败/中断节点放回 pending，成功节点保持原状。"""
+    has_items = db.scalar(
+        select(TaskItem.id).where(TaskItem.task_id == task_id).limit(1)
+    )
+    if has_items is None:
+        return False
+    statuses = ["failed"]
+    if reset_running:
+        statuses.append("running")
+    db.execute(
+        update(TaskItem)
+        .where(
+            TaskItem.task_id == task_id,
+            TaskItem.status.in_(statuses),
+        )
+        .values(
+            status="pending",
+            started_at=None,
+            finished_at=None,
+            error_code=None,
+        )
+    )
+    return True
+
+
 def _reset_quality_steps_for_retry(task: Task) -> None:
     """质量门禁失败后重试时，清掉 QA 完成标记，让自动质检真正重跑。"""
     if task.error_code not in ("quality_gate", "qa_incomplete"):
@@ -215,8 +243,14 @@ def resume_task(task_id: str, db: Session = Depends(get_db)) -> dict:
     else:
         if task.status not in ("paused", "failed"):
             return {"id": task.id, "status": task.status}
+        # 批量任务继续：失败节点回 pending；failed 任务额外回收无主 running 节点。
+        _reset_task_items_for_resume(
+            db, task_id, reset_running=task.status == "failed"
+        )
     _reset_quality_steps_for_retry(task)
     task.status = "running"
+    task.error_message = None
+    task.error_code = None
     db.commit()
     if has_items is None:
         # 仅改状态不会重新执行，必须重新调度
@@ -241,23 +275,17 @@ def retry_task(task_id: str, db: Session = Depends(get_db)) -> dict:
     )
     if other:
         raise HTTPException(status_code=409, detail="该项目已有任务正在执行，请等待完成后再重试")
-    from sqlalchemy import update
-
-    failed_items = db.scalar(
-        select(TaskItem.id)
-        .where(TaskItem.task_id == task_id, TaskItem.status == "failed")
-        .limit(1)
+    # 批量任务：失败节点回 pending，成功节点（Draft/Polish/QA）绝不重跑。
+    # 线程型任务没有 TaskItem，才需要重新 launch。
+    has_items = _reset_task_items_for_resume(
+        db, task_id, reset_running=task.status == "failed"
     )
-    if failed_items is not None:
-        db.execute(
-            update(TaskItem)
-            .where(TaskItem.task_id == task_id, TaskItem.status == "failed")
-            .values(status="pending")
-        )
     _reset_quality_steps_for_retry(task)
     task.status = "running"
+    task.error_message = None
+    task.error_code = None
     db.commit()
-    if failed_items is None:
+    if not has_items:
         # 线程型任务：重新调度执行
         launch_task(task_id)
     return {"id": task.id, "status": task.status}

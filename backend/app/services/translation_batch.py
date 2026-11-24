@@ -546,7 +546,7 @@ def _persist_window_translations(
 
 async def _window_material(
     db_factory, project_id: str, window: list[SourceSegment], carry_over: dict | None,
-    *, reserved_tokens: int = 0,
+    *, reserved_tokens: int = 0, lean: bool = False,
 ) -> tuple[list[dict], ContextResult, dict | None, dict | None]:
     """窗口公共材料：segment dicts、style guide、场景卡/知识/剧情卡、context。"""
     with db_factory() as db:
@@ -577,6 +577,7 @@ async def _window_material(
         carry_over=carry_over,
         storyline=storyline,
         reserved_tokens=reserved_tokens,
+        lean=lean,
     )
     return seg_dicts, context, style_guide, _card
 
@@ -678,22 +679,39 @@ async def translate_window_polish_direct(
     db_factory, project_id: str, window: list[SourceSegment], draft: list[dict],
     carry_over: dict | None, model: str, *, _depth: int = 0,
 ) -> tuple[list[dict], dict]:
-    """Polish 阶段；截断/上下文超限时自动拆半，并把左半 carry 传给右半。"""
-    try:
+    """Polish 阶段；上下文撑满时先精简知识重试，再拆半，最后单段极简兜底。"""
+
+    async def _polish_once(*, lean: bool, force_no_thinking: bool = False):
         # Draft 块在 context.prompt_text 之外追加，构建上下文时必须先预留其预算。
         reserved = estimate_tokens(draft_prompt_block(draft))
         seg_dicts, context, _sg, _card = await _window_material(
-            db_factory, project_id, window, carry_over, reserved_tokens=reserved
+            db_factory, project_id, window, carry_over,
+            reserved_tokens=reserved, lean=lean,
         )
         polished, carry = await translate_window_polish(
-            provider=get_provider(), model=model, window_id="POLISH",
+            provider=get_provider(), model=model,
+            window_id="POLISH-LEAN" if lean else "POLISH",
             context=context, draft=draft, carry_over=carry_over, segments=seg_dicts,
+            force_no_thinking=force_no_thinking,
         )
-        return await _canonicalize_polished_terms(db_factory, project_id, window, polished), carry
+        return await _canonicalize_polished_terms(
+            db_factory, project_id, window, polished
+        ), carry
+
+    try:
+        return await _polish_once(lean=False)
     except LLMError as exc:
         code = getattr(exc, "code", "")
         if code not in _WINDOW_SPLIT_CODES:
             raise
+        # 第一次撑满：不立刻拆窗，先清掉当前窗口未命中的知识再试一次。
+        try:
+            return await _polish_once(lean=True, force_no_thinking=True)
+        except LLMError as lean_exc:
+            exc = lean_exc
+            code = getattr(exc, "code", "")
+            if code not in _WINDOW_SPLIT_CODES:
+                raise
         if len(window) <= 1:
             # 单段窗口不能再拆：去掉知识库/剧情/carry 并关闭思考，优先保证完成。
             if code != "context_length":

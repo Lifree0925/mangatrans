@@ -27,12 +27,13 @@ def _seg(idx: int, text: str) -> SimpleNamespace:
 
 
 def _install_material(monkeypatch):
-    seen: dict[str, int] = {}
+    seen: dict = {"lean_calls": []}
 
     async def fake_material(
-        db_factory, project_id, window, carry_over, *, reserved_tokens=0
+        db_factory, project_id, window, carry_over, *, reserved_tokens=0, lean=False
     ):
         seen["reserved_tokens"] = reserved_tokens
+        seen["lean_calls"].append(lean)
         seg_dicts = [
             {
                 "segment_id": s.id,
@@ -81,16 +82,15 @@ def _polish_response(content: str) -> dict:
     }
 
 
-def test_context_length_splits_multi_segment_window(monkeypatch):
+def test_context_length_retries_with_lean_before_split(monkeypatch):
     seen = _install_material(monkeypatch)
     provider = FakeProvider()
-    state = {"raised": False}
+    state = {"calls": 0}
 
     def handler(messages):
+        state["calls"] += 1
         content = messages[-1]["content"]
-        ids = re.findall(r"\[([0-9a-f]{32})\]", content)
-        if len(set(ids)) > 1 and not state["raised"]:
-            state["raised"] = True
+        if state["calls"] == 1:
             raise LLMError("模拟上下文超限", retryable=False, code="context_length")
         return _polish_response(content)
 
@@ -102,7 +102,9 @@ def test_context_length_splits_multi_segment_window(monkeypatch):
         batch.translate_window_polish_direct(lambda: None, "p1", window, draft, None, "m")
     )
 
-    assert state["raised"] is True
+    # 完整上下文失败后，同一窗口先用精简上下文成功，无需拆窗。
+    assert state["calls"] == 2
+    assert seen["lean_calls"] == [False, True]
     assert {e["segment_id"] for e in polished} == {s.id for s in window}
     assert seen["reserved_tokens"] > 0
     assert validate_window(
@@ -115,15 +117,41 @@ def test_context_length_splits_multi_segment_window(monkeypatch):
     ) == []
 
 
-def test_single_segment_context_length_uses_minimal_context(monkeypatch):
-    _install_material(monkeypatch)
+def test_lean_failure_still_splits_multi_segment_window(monkeypatch):
+    seen = _install_material(monkeypatch)
     provider = FakeProvider()
     state = {"calls": 0}
 
     def handler(messages):
         state["calls"] += 1
         content = messages[-1]["content"]
-        if state["calls"] == 1:
+        if state["calls"] <= 2:
+            raise LLMError("模拟上下文超限", retryable=False, code="context_length")
+        return _polish_response(content)
+
+    set_provider(provider.on(handler))
+    window = [_seg(i, f"第{i}段动作。") for i in range(1, 5)]
+    draft = [{"segment_id": s.id, "target_text": f"Action {s.segment_no}."} for s in window]
+
+    polished, _carry = asyncio.run(
+        batch.translate_window_polish_direct(lambda: None, "p1", window, draft, None, "m")
+    )
+
+    # 完整/精简都失败后，两个半窗正常完成。
+    assert state["calls"] == 4
+    assert seen["lean_calls"] == [False, True, False, False]
+    assert {e["segment_id"] for e in polished} == {s.id for s in window}
+
+
+def test_single_segment_context_length_uses_minimal_after_lean(monkeypatch):
+    seen = _install_material(monkeypatch)
+    provider = FakeProvider()
+    state = {"calls": 0}
+
+    def handler(messages):
+        state["calls"] += 1
+        content = messages[-1]["content"]
+        if state["calls"] <= 2:
             raise LLMError("模拟上下文超限", retryable=False, code="context_length")
         return _polish_response(content)
 
@@ -135,6 +163,7 @@ def test_single_segment_context_length_uses_minimal_context(monkeypatch):
         batch.translate_window_polish_direct(lambda: None, "p1", window, draft, None, "m")
     )
 
-    assert state["calls"] == 2
+    assert state["calls"] == 3
+    assert seen["lean_calls"] == [False, True]
     assert polished[0]["segment_id"] == window[0].id
     assert "CARRY-OVER STATE" not in json.dumps(polished, ensure_ascii=False)

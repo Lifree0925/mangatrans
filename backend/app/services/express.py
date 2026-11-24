@@ -278,33 +278,24 @@ async def run_express(db_factory, project_id: str, source_document_id: str, mode
         speaker_map = _speaker_map_for_project(db, project_id)
     windows = build_windows(segs)
     total = len(windows)
-    # 续跑：已完成窗口跳过；回退一窗重跑以重建 carry（仅多花一次调用）
-    prev_trans = report["steps"].get("translation") or {}
-    prev_done = int(prev_trans.get("done", 0))
-    start_win = max(0, min(prev_done - 1, total)) if prev_done > 0 else 0
-    done = start_win
-    # Draft carry map：续跑时从进度恢复，本次运行由 Draft 阶段补齐
-    draft_carry_map: dict[str, dict] = dict(prev_trans.get("draft_carry") or {})
-    report["steps"]["translation"] = {
-        "done": done, "total": total, "phase": "draft", "draft_carry": draft_carry_map,
-    }
-    _sync_progress(db_factory, task_id, report["steps"], "translation")
 
-    # 阶段 1：未完成窗口的 Draft 并发（Draft 不依赖 carry-over）
-    todo = windows[start_win:]
-    _sem = _aio.Semaphore(WINDOW_CONCURRENCY)
-
-    draft_done_count = start_win
-
-    def _window_draft_complete(db, win) -> bool:
-        """窗口所有段都有非空 draft 译文 → 可跳过（重试不重做已完成部分）。"""
-        for seg in win:
-            t = db.scalar(
+    # 续跑以数据库实际译文为准，不用 progress.done 推算窗口起点：
+    # 并发下后段可能先完成，done 数字无法代表“哪些窗口已完成”。
+    with db_factory() as db:
+        latest_rows = list(
+            db.scalars(
                 select(Translation)
-                .where(Translation.segment_id == seg.id, Translation.stage == "draft")
+                .where(Translation.segment_id.in_([s.id for s in segs]))
                 .order_by(Translation.version.desc())
-                .limit(1)
             )
+        )
+    latest_by_key: dict[tuple[str, str], Translation] = {}
+    for t in latest_rows:
+        latest_by_key.setdefault((t.segment_id, t.stage), t)
+
+    def _window_stage_complete(win, stage: str) -> bool:
+        for seg in win:
+            t = latest_by_key.get((seg.id, stage))
             if (
                 t is None
                 or not (t.target_text or "").strip()
@@ -313,6 +304,37 @@ async def run_express(db_factory, project_id: str, source_document_id: str, mode
             ):
                 return False
         return True
+
+    polished_complete = {
+        i for i, win in enumerate(windows) if _window_stage_complete(win, "polished")
+    }
+    draft_complete = {
+        i for i, win in enumerate(windows) if _window_stage_complete(win, "draft")
+    }
+    done = len(polished_complete)
+    draft_done_count = len(draft_complete)
+    prev_trans = report["steps"].get("translation") or {}
+    # Draft carry map：续跑时从进度恢复；新完成的窗口会立即写入。
+    draft_carry_map: dict[str, dict] = dict(prev_trans.get("draft_carry") or {})
+    # 只调度尚未润色的窗口；已完成窗口保持原译文，不重新调用模型。
+    todo_indices = [i for i in range(total) if i not in polished_complete]
+    todo = [windows[i] for i in todo_indices]
+    if todo_indices:
+        # 本次会生成新的 polished 版本，旧的台词对齐/QA/术语一致性/定稿结果失效，
+        # 必须基于新译文重新执行；已完成窗口的翻译本身仍不重跑。
+        for dependent_step in ("dialogue_align", "qa", "term_consistency", "approve"):
+            report["steps"].pop(dependent_step, None)
+    report["steps"]["translation"] = {
+        "done": done,
+        "total": total,
+        "phase": "draft",
+        "draft_done": draft_done_count,
+        "draft_carry": draft_carry_map,
+    }
+    _sync_progress(db_factory, task_id, report["steps"], "translation")
+
+    # 阶段 1：未完成窗口的 Draft 并发（Draft 不依赖 carry-over）
+    _sem = _aio.Semaphore(WINDOW_CONCURRENCY)
 
     def _draft_from_db(db, win) -> list[dict]:
         out = []
@@ -332,15 +354,18 @@ async def run_express(db_factory, project_id: str, source_document_id: str, mode
         return out
 
     async def _draft_one(win_idx, win):
-        nonlocal draft_done_count
+        nonlocal draft_done_count, draft_carry_map
         carry_key = f"WIN_{win_idx:04d}"
-        # 断点续跑：窗口 Draft 已完成且 carry 已存 → 直接复用，不重做
-        with db_factory() as db:
-            if _window_draft_complete(db, win) and carry_key in draft_carry_map:
-                draft_done_count += 1
-                report["steps"]["translation"]["draft_done"] = draft_done_count
-                _sync_progress(db_factory, task_id, report["steps"], "translation")
-                return _draft_from_db(db, win), draft_carry_map[carry_key], None
+        # 已初翻窗口直接复用 DB Draft；carry 缺失也不重跑 Draft（旧版本/中断兼容）。
+        if win_idx in draft_complete:
+            carry = draft_carry_map.get(carry_key)
+            with db_factory() as db:
+                reused_draft = _draft_from_db(db, win)
+            # 复用 Draft 时仍需构建上下文快照，供润色与后续落库/追溯使用。
+            _sd, context, _sg, _card = await _window_material(
+                db_factory, project_id, win, carry
+            )
+            return reused_draft, carry, context
         async with _sem:
             try:
                 result = await _aio.wait_for(
@@ -349,21 +374,26 @@ async def run_express(db_factory, project_id: str, source_document_id: str, mode
                 )
             except Exception:  # noqa: BLE001 超时/异常：该窗口标记失败跳过，不卡住整本
                 return None
-        # 实时进度：每完成一窗写一次（窗口数最多 ~80，写库开销可忽略）
+        if result is not None and result[1] is not None:
+            draft_carry_map[carry_key] = result[1]
+        # 实时进度：每完成一窗写一次，carry 也随窗口立即持久化，
+        # 进程/任务中途失败后无需为了重建 carry 再跑一遍 Draft。
         draft_done_count += 1
         report["steps"]["translation"]["draft_done"] = draft_done_count
+        report["steps"]["translation"]["draft_carry"] = draft_carry_map
         _sync_progress(db_factory, task_id, report["steps"], "translation")
         return result
 
     async def _run_draft():
-        nonlocal draft_carry_map
         results = await _aio.gather(
-            *[_draft_one(wi, w) for wi, w in zip(range(start_win, total), todo)]
+            *[_draft_one(wi, w) for wi, w in zip(todo_indices, todo)]
         )
-        for wi, r in zip(range(start_win, total), results):
+        for wi, r in zip(todo_indices, results):
             if r is not None and r[1] is not None:
                 draft_carry_map[f"WIN_{wi:04d}"] = r[1]
+        report["steps"]["translation"]["draft_done"] = draft_done_count
         report["steps"]["translation"]["draft_carry"] = draft_carry_map
+        _sync_progress(db_factory, task_id, report["steps"], "translation")
         return results
 
     async def _lock_terms_once():
@@ -392,7 +422,11 @@ async def run_express(db_factory, project_id: str, source_document_id: str, mode
 
     # 阶段 2：Polish 并发（carry-over 取前一窗口 Draft 的 carry）
     report["steps"]["translation"] = {
-        "done": done, "total": total, "phase": "polish", "draft_carry": draft_carry_map,
+        "done": done,
+        "total": total,
+        "phase": "polish",
+        "draft_done": draft_done_count,
+        "draft_carry": draft_carry_map,
     }
     _sync_progress(db_factory, task_id, report["steps"], "translation")
     _sem2 = _aio.Semaphore(WINDOW_CONCURRENCY)
@@ -502,7 +536,7 @@ async def run_express(db_factory, project_id: str, source_document_id: str, mode
             polish_errors[win_idx] = f"拆窗重试失败：{type(exc).__name__}: {str(exc)[:240]}"
             return None
 
-    polish_jobs = list(zip(range(start_win, total), todo, draft_results))
+    polish_jobs = list(zip(todo_indices, todo, draft_results))
     polished_results = await _aio.gather(
         *[_polish_one(wi, w, dr[0] if dr else None) for wi, w, dr in polish_jobs]
     )
@@ -522,8 +556,7 @@ async def run_express(db_factory, project_id: str, source_document_id: str, mode
 
     # 顺序持久化与进度上报（单协程写，无竞争）
     failed_windows = 0
-    for idx, (window, dr, pr) in enumerate(zip(todo, draft_results, polished_results)):
-        wi = start_win + idx
+    for wi, window, dr, pr in zip(todo_indices, todo, draft_results, polished_results):
         if pr is None:
             if _paused():
                 break  # 暂停：保留进度，resume 续跑
@@ -544,7 +577,11 @@ async def run_express(db_factory, project_id: str, source_document_id: str, mode
             # 已完成窗口复用：仅推进进度，不重复落库
             done += 1
             report["steps"]["translation"] = {
-                "done": done, "total": total, "phase": "polish", "draft_carry": draft_carry_map,
+                "done": done,
+                "total": total,
+                "phase": "polish",
+                "draft_done": draft_done_count,
+                "draft_carry": draft_carry_map,
             }
             _sync_progress(db_factory, task_id, report["steps"], "translation")
             continue
@@ -598,7 +635,11 @@ async def run_express(db_factory, project_id: str, source_document_id: str, mode
             db.commit()
         done += 1
         report["steps"]["translation"] = {
-            "done": done, "total": total, "phase": "polish", "draft_carry": draft_carry_map,
+            "done": done,
+            "total": total,
+            "phase": "polish",
+            "draft_done": draft_done_count,
+            "draft_carry": draft_carry_map,
         }
         _sync_progress(db_factory, task_id, report["steps"], "translation")
 

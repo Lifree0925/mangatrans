@@ -77,11 +77,13 @@ def build_context(
     adjacent_next: str = "",
     budget: int = DEFAULT_BUDGET,
     reserved_tokens: int = 0,
+    lean: bool = False,
 ) -> ContextResult:
     """组装窗口上下文。
 
     reserved_tokens 用于 Polish：Draft 块在上下文之外追加，必须先预留其 Token，
     否则知识块会占满预算，最终请求超过模型上下文。
+    lean 为上下文撑满时的兜底模式：只保留当前窗口直接命中的必需知识。
     """
     blocks: list[str] = []
     report: dict = {
@@ -94,8 +96,14 @@ def build_context(
         "trimmed": [],
         "quality": "complete",
         "reserved_tokens": max(0, int(reserved_tokens)),
+        "lean": lean,
     }
-    snapshot: dict = {"knowledge_ids": [], "scene_card_id": None, "carry_over_hash": None}
+    snapshot: dict = {
+        "knowledge_ids": [],
+        "scene_card_id": None,
+        "carry_over_hash": None,
+        "context_mode": "lean" if lean else "full",
+    }
 
     source_text = "".join(f"[{s['segment_id']}] {s['source_text']}" for s in segments)
     blocks.append("SOURCE SEGMENTS (translate only these, one translation per segment_id):\n" + source_text.rstrip("\n"))
@@ -132,6 +140,9 @@ def build_context(
     def _related_rule(item: dict) -> bool:
         if _mentioned(item):
             return True
+        if lean:
+            # 精简模式只保留原文直接提到的规则，避免“相关人物”牵出整片规则库。
+            return False
         blob = _item_blob(item)
         return any(name and name in blob for name in focus_names)
 
@@ -141,8 +152,24 @@ def build_context(
     ]
 
     if style_guide:
-        blocks.append(_json_block("STYLE GUIDE (frozen)", style_guide))
-        snapshot["style_guide"] = style_guide.get("_version", 1)
+        style_payload = style_guide
+        if lean:
+            style_payload = {
+                key: style_guide.get(key)
+                for key in (
+                    "dialogue_register",
+                    "action_description_style",
+                    "capitalization_rules",
+                    "cultural_strategy",
+                )
+                if style_guide.get(key)
+            }
+        if style_payload:
+            blocks.append(_json_block(
+                "STYLE GUIDE (frozen, lean)" if lean else "STYLE GUIDE (frozen)",
+                style_payload,
+            ))
+            snapshot["style_guide"] = style_guide.get("_version", 1)
 
     if scene_card:
         card_body = {k: v for k, v in scene_card.items() if k != "id"}
@@ -160,11 +187,15 @@ def build_context(
             return any(name and name in raw for name in focus_names)
 
         summary = str(storyline.get("summary", "") or "")
-        key_events = [x for x in storyline.get("key_events", []) or [] if _story_related(x)]
+        key_events = (
+            []
+            if lean
+            else [x for x in storyline.get("key_events", []) or [] if _story_related(x)]
+        )
         # 前情依赖和伏笔属于当前章节连续性的硬约束，即使句中没有出现人名也必须保留；
         # 重要情节与人物状态仍按窗口人物筛选，避免整章剧情全量注入。
         prior_deps = list(storyline.get("prior_deps", []) or [])
-        foreshadowing = list(storyline.get("foreshadowing", []) or [])
+        foreshadowing = [] if lean else list(storyline.get("foreshadowing", []) or [])
         states = storyline.get("character_states", {}) or {}
         character_states = {
             name: state for name, state in states.items()
@@ -213,7 +244,7 @@ def build_context(
             for c in chars
             if (c.get("aliases") or []) or (c.get("data", {}) or {}).get("translation")
         ]
-        if alias_map:
+        if alias_map and not lean:
             blocks.append(_json_block(
                 "NAME-FORM MAP (translate each form as used; keep the same person referentially consistent)",
                 alias_map,
@@ -222,7 +253,7 @@ def build_context(
             _profile_view(c) for c in chars
             if any((c.get("data", {}) or {}).get(k) for k in _PROFILE_FIELDS[1:])
         ]
-        if profiles:
+        if profiles and not lean:
             blocks.append(_json_block("CHARACTER PROFILES (personality & speech style)", profiles))
 
         # 说话人声音卡：只放窗口内真实说话的人，避免模型拿到无关角色档案后乱套。
@@ -261,14 +292,22 @@ def build_context(
                             cues.append(cue)
                     if len(cues) >= 3:
                         break
-                row = {
-                    "speaker": c.get("canonical_key", ""),
-                    "en_name": data.get("translation") or c.get("canonical_key", ""),
-                    "personality": data.get("personality", ""),
-                    "speech_style": data.get("speech_style", ""),
-                    "emotional_range": data.get("emotional_range", ""),
-                    "local_emotional_cues": cues,
-                }
+                if lean:
+                    row = {
+                        "speaker": c.get("canonical_key", ""),
+                        "en_name": data.get("translation") or c.get("canonical_key", ""),
+                        "speech_style": data.get("speech_style", ""),
+                        "local_emotional_cues": cues,
+                    }
+                else:
+                    row = {
+                        "speaker": c.get("canonical_key", ""),
+                        "en_name": data.get("translation") or c.get("canonical_key", ""),
+                        "personality": data.get("personality", ""),
+                        "speech_style": data.get("speech_style", ""),
+                        "emotional_range": data.get("emotional_range", ""),
+                        "local_emotional_cues": cues,
+                    }
                 if any(row.get(k) for k in ("personality", "speech_style", "emotional_range", "local_emotional_cues")):
                     speaker_rows.append(row)
         if speaker_rows:
@@ -306,7 +345,7 @@ def build_context(
                 contextual_terms.append(row)
         if forced_terms:
             blocks.append(_json_block("FORCED TERMS (proper names / titles only)", forced_terms))
-        if contextual_terms:
+        if contextual_terms and not lean:
             blocks.append(_json_block(
                 "CONTEXTUAL TERMS (preferred vocabulary, not mandatory)",
                 contextual_terms,
@@ -329,9 +368,9 @@ def build_context(
         ).hexdigest()[:16]
 
     optional: list[tuple[str, str]] = []
-    if adjacent_next:
+    if adjacent_next and not lean:
         optional.append(("adjacent_next", "[NEXT SOURCE (context only, do not translate)]\n" + adjacent_next))
-    if adjacent_prev:
+    if adjacent_prev and not lean:
         optional.append(("adjacent_prev", "[PREV SOURCE (context only, do not translate)]\n" + adjacent_prev))
 
     total = sum(estimate_tokens(b) for b in blocks)
@@ -358,6 +397,7 @@ def build_context(
         ("STYLE GUIDE", "style_guide"),
         ("CHAPTER STORYLINE", "storyline"),
         ("FORESHADOWING", "foreshadowing"),
+        ("SPEAKER VOICE", "speaker_voice"),
         ("CARRY-OVER STATE", "carry_over"),
     ]
     while total > effective_budget:

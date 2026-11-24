@@ -153,3 +153,76 @@ def test_polish_reserved_tokens_trim_more_context() -> None:
     assert "STYLE GUIDE" not in result.prompt_text
     assert result.report["effective_budget"] <= 200
     assert result.total_tokens <= result.report["effective_budget"]
+
+
+def test_lean_context_drops_unused_knowledge_but_keeps_required_facts() -> None:
+    """上下文撑满时：清掉未命中规则/普通术语/档案/示例，保留原文、强制专名和声音。"""
+    result = build_context(
+        segments=[{
+            "segment_id": "S1", "segment_no": 1, "segment_type": "dialogue",
+            "speaker_name": "林晓", "source_text": "林晓：天机阁的誓约，你还记得吗？\n",
+        }],
+        scene_card=None,
+        knowledge=[
+            {
+                "id": "C1", "item_type": "character", "canonical_key": "林晓",
+                "aliases": ["小林"], "data": {
+                    "translation": "Lin Xiao", "personality": "沉稳",
+                    "speech_style": "短句、克制", "emotional_range": "压抑",
+                },
+            },
+            {
+                "id": "C2", "item_type": "character", "canonical_key": "王强",
+                "aliases": [], "data": {"personality": "冲动"},
+            },
+            {
+                "id": "T1", "item_type": "term", "canonical_key": "天机阁",
+                "aliases": [], "data": {
+                    "translation": "Tianji Pavilion", "term_kind": "place",
+                    "enforcement": "exact",
+                },
+            },
+            {
+                "id": "T2", "item_type": "term", "canonical_key": "誓约",
+                "aliases": [], "data": {
+                    "translation": "Oath", "term_kind": "concept",
+                    "enforcement": "contextual",
+                },
+            },
+            {
+                "id": "R1", "item_type": "rule", "canonical_key": "林晓的称呼规则",
+                "aliases": [], "data": {"rule": "不要直呼全名"},
+            },
+        ],
+        style_guide={
+            "dialogue_register": "natural",
+            "examples": [{"zh": "示例原文", "en": "example"}],
+            "character_voices": [{"name": "林晓", "voice": "cold"}],
+        },
+        carry_over={"ongoing_state": "继续"},
+        storyline={
+            "id": "ST1", "summary": "重逢",
+            "key_events": ["林晓与王强初次见面"],
+            "prior_deps": ["上一集分别"],
+            "foreshadowing": ["王强隐瞒秘密"],
+            "character_states": {"林晓": "警惕", "王强": "离开"},
+        },
+        lean=True,
+    )
+    text = result.prompt_text
+    assert "SOURCE SEGMENTS" in text
+    assert "APPROVED CHARACTERS" in text
+    assert "FORCED TERMS" in text
+    assert "SPEAKER VOICE" in text
+    assert "短句、克制" in text
+    assert "CARRY-OVER STATE" in text
+    assert "CONTEXTUAL TERMS" not in text
+    assert "RELEVANT RULES" not in text
+    assert "CHARACTER PROFILES" not in text
+    assert "NAME-FORM MAP" not in text
+    assert "示例原文" not in text
+    assert "character_voices" not in text
+    assert "林晓与王强初次见面" not in text
+    assert "王强隐瞒秘密" not in text
+    assert "沉稳" not in text
+    assert result.snapshot["context_mode"] == "lean"

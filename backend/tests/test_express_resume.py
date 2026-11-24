@@ -1,56 +1,45 @@
-"""Express 断点续跑：中途失败后重试，已完成步骤不重复执行。"""
+"""Express 断点续跑：只补未完成窗口，已初翻/已润色部分不重复执行。"""
 
 import json
 import re
 import time
 
+from sqlalchemy import select
+
 import app.core.database as dbmod
 from app.llm.fake import FakeProvider
-from app.llm.protocol import LLMError
 from app.llm.registry import set_provider
+from app.models.document import SourceSegment
 from app.models.task import Task
-from app.models.translation import ProviderConfig
-
-
-class _FlakyProvider:
-    """翻译 Draft 阶段第一次调用必失败一次，其余转发 FakeProvider（模拟网络抖动）。"""
-
-    def __init__(self, fake: FakeProvider):
-        self._fake = fake
-        self.calls = 0
-        self._failed_once = False
-
-    async def chat(self, **kwargs):
-        self.calls += 1
-        system = kwargs.get("messages", [{}])[0].get("content", "")
-        if "FAITHFUL DRAFT" in system and not self._failed_once:
-            self._failed_once = True
-            raise LLMError("模拟故障", retryable=True, code="network")
-        return await self._fake.chat(**kwargs)
-
-    async def test_connection(self):
-        return await self._fake.test_connection()
+from app.models.translation import ProviderConfig, Translation
+from app.services.window_planner import build_windows
 
 
 def _setup(client, wait_task):
     with dbmod.SessionLocal() as db:
-        db.add(ProviderConfig(display_name="t", base_url="http://127.0.0.1:9",
-                              model_name="m", credential_ref="r", is_default=True, is_verified=True))
+        db.add(ProviderConfig(
+            display_name="t", base_url="http://127.0.0.1:9",
+            model_name="m", credential_ref="r", is_default=True, is_verified=True,
+        ))
         db.commit()
     pid = client.post("/api/v1/projects", json={"name": "续跑测试"}).json()["id"]
+    # 体量必须超过单个 1800 字符窗口，确保存在多个翻译窗口。
     body = "\n\n".join(
-        [f"林风：第{i}句话，我们要坚持到底。" for i in range(40)]
-        + [f"夜色深沉（{i}）。" for i in range(20)]
+        [f"林风：第{i}句话，我们要坚持到底，绝不后退。" for i in range(100)]
+        + [f"夜色深沉，风声穿过长街（{i}）。" for i in range(50)]
     )
-    client.post(f"/api/v1/projects/{pid}/documents/import",
-                files={"file": ("s.txt", body.encode(), "text/plain")})
-    wait_task(client, client.post(f"/api/v1/projects/{pid}/parse", json={}).json()["task_id"])
+    client.post(
+        f"/api/v1/projects/{pid}/documents/import",
+        files={"file": ("s.txt", body.encode(), "text/plain")},
+    )
+    wait_task(
+        client,
+        client.post(f"/api/v1/projects/{pid}/parse", json={}).json()["task_id"],
+    )
     return pid
 
 
 def _fake() -> FakeProvider:
-    import re as _re
-
     from app.schemas.knowledge import SceneCardModel
 
     from conftest import fake_translation_entries
@@ -60,10 +49,16 @@ def _fake() -> FakeProvider:
     def translate_h(messages):
         content = messages[-1]["content"]
         if "FAITHFUL DRAFT" in messages[0]["content"]:
-            return {"window_id": "W", "translations": fake_translation_entries(content, "Draft", stage="draft")}
+            return {
+                "window_id": "W",
+                "translations": fake_translation_entries(content, "Draft", stage="draft"),
+            }
         if "POLISH" in messages[0]["content"]:
-            return {"window_id": "W", "translations": fake_translation_entries(content, "Polish", stage="polished"),
-                    "carry_over": {}}
+            return {
+                "window_id": "W",
+                "translations": fake_translation_entries(content, "Polish", stage="polished"),
+                "carry_over": {},
+            }
         return None
 
     def other_h(messages):
@@ -73,8 +68,11 @@ def _fake() -> FakeProvider:
         if "剧本情境分析助手" in c:
             return SceneCardModel().model_dump()
         if "风格总监" in c:
-            return {"character_voices": [], "dialogue_register": "", "action_description_style": "",
-                    "cultural_strategy": "", "capitalization_rules": "", "examples": []}
+            return {
+                "character_voices": [], "dialogue_register": "",
+                "action_description_style": "", "cultural_strategy": "",
+                "capitalization_rules": "", "examples": [],
+            }
         if "剧本翻译 QA" in c:
             return {"issues": []}
         return None
@@ -94,28 +92,96 @@ def _wait(task_id: str, timeout: float = 60) -> str:
     return "timeout"
 
 
-def test_express_retry_resumes_from_failure_point(client, wait_task) -> None:
+class _RecordingProvider:
+    """记录重试期间真正发起的 Draft 段，用于验证不会重复初翻。"""
+
+    def __init__(self, inner):
+        self.inner = inner
+        self.draft_ids: set[str] = set()
+
+    async def chat(self, **kwargs):
+        messages = kwargs.get("messages") or []
+        system = messages[0].get("content", "") if messages else ""
+        user = messages[-1].get("content", "") if messages else ""
+        if "FAITHFUL DRAFT" in system:
+            self.draft_ids.update(re.findall(r"\[([0-9a-f]{32})\]", user))
+        return await self.inner.chat(**kwargs)
+
+    async def test_connection(self):
+        return await self.inner.test_connection()
+
+
+def test_express_retry_skips_draft_and_polished_windows(client, wait_task) -> None:
     pid = _setup(client, wait_task)
     fake = _fake()
-    # 知识提取 1 批(1 次) + 场景卡 0 + 试译 1 窗×2 + 翻译窗口×2：让翻译第 1 个窗口 Draft 失败
-    flaky = _FlakyProvider(fake)
-    set_provider(flaky)
-    r = client.post(f"/api/v1/projects/{pid}/translation/express", json={})
-    tid = r.json()["task_id"]
-    assert _wait(tid) == "failed"
-
-    calls_after_fail = flaky.calls
-    # 重试：应续跑（知识/场景卡/试译不再调用），仅翻译/QA 继续
     set_provider(fake)
+    tid = client.post(f"/api/v1/projects/{pid}/translation/express", json={}).json()["task_id"]
+    assert _wait(tid, timeout=90) == "completed"
+
+    # 模拟“上次只完成了一部分”的失败任务：首个窗口的 polished 失效，
+    # 同时让旧进度丢失 draft_carry、done 归零。重试必须按 DB 实际状态恢复。
+    with dbmod.SessionLocal() as db:
+        segs = list(
+            db.scalars(
+                select(SourceSegment)
+                .where(SourceSegment.project_id == pid)
+                .order_by(SourceSegment.segment_no)
+            )
+        )
+        windows = build_windows(segs)
+        assert len(windows) >= 2, "测试剧本必须至少两个窗口"
+        target_seg = windows[0][0]
+        latest = db.scalar(
+            select(Translation)
+            .where(
+                Translation.segment_id == target_seg.id,
+                Translation.stage == "polished",
+            )
+            .order_by(Translation.version.desc())
+            .limit(1)
+        )
+        assert latest is not None
+        latest.freshness_status = "stale"
+        task = db.get(Task, tid)
+        progress = json.loads(task.progress_json)
+        translation = progress["steps"]["translation"]
+        translation["done"] = 0
+        translation.pop("draft_carry", None)
+        task.progress_json = json.dumps(progress, ensure_ascii=False)
+        task.status = "failed"
+        task.error_code = "items_failed"
+        task.error_message = "模拟部分窗口未完成"
+        db.commit()
+
+    recording = _RecordingProvider(fake)
+    set_provider(recording)
     r = client.post(f"/api/v1/tasks/{tid}/retry")
     assert r.status_code == 200
-    assert _wait(tid, timeout=90) == "completed"
+    status = _wait(tid, timeout=90)
+    with dbmod.SessionLocal() as db:
+        failed_task = db.get(Task, tid)
+        error = failed_task.error_message
+    assert status == "completed", error
+
+    # 未完成窗口的 Draft 已存在，因此重试不应发起任何 Draft 请求。
+    assert recording.draft_ids == set(), f"重试重复初翻: {recording.draft_ids}"
 
     with dbmod.SessionLocal() as db:
         task = db.get(Task, tid)
         steps = json.loads(task.progress_json)["steps"]
-    assert "knowledge" in steps
-    assert steps["translation"]["done"] == steps["translation"]["total"]
-    # 续跑后知识等前序步骤未重复执行：fake 调用总数 = 失败前 4 次 - 重试中的翻译+QA
-    # 关键断言：任务完成且翻译窗口全部完成
-    assert steps["qa"]["done"] == steps["qa"]["total"]
+        assert steps["translation"]["done"] == steps["translation"]["total"]
+        assert steps["qa"]["done"] == steps["qa"]["total"]
+        for seg in db.scalars(
+            select(SourceSegment).where(SourceSegment.project_id == pid)
+        ):
+            current = db.scalar(
+                select(Translation)
+                .where(
+                    Translation.segment_id == seg.id,
+                    Translation.stage == "polished",
+                    Translation.freshness_status == "current",
+                )
+                .order_by(Translation.version.desc())
+                .limit(1)
+            )
+            assert current is not None and (current.target_text or "").strip()

@@ -128,9 +128,13 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          $ErrorActionPreference = "Stop"
+          # 首次发版不存在旧 Release：gh release view 返回非零是正常分支，
+          # 不能被 PowerShell 的原生命令错误策略当成步骤失败。
+          $PSNativeCommandUseErrorActionPreference = $false
           $tag = "${{ github.ref_name }}"
           $repo = "${{ github.repository }}"
-          gh release view $tag --repo $repo 2>$null
+          gh release view $tag --repo $repo 2>$null | Out-Null
           if ($LASTEXITCODE -eq 0) {
             gh release delete $tag --repo $repo --yes
             if ($LASTEXITCODE -ne 0) { throw "Failed to delete stale release $tag" }
@@ -138,6 +142,8 @@ jobs:
           } else {
             Write-Host "No stale release for $tag"
           }
+          $global:LASTEXITCODE = 0
+          exit 0
 
       - name: Release
         uses: softprops/action-gh-release@v2
