@@ -18,6 +18,23 @@ interface BackendDiag {
   reused: boolean;
 }
 
+function ProjectListSkeleton() {
+  return (
+    <div className="space-y-2" role="status" aria-live="polite" aria-label="加载中">
+      {[0, 1, 2].map((i) => (
+        <div key={i} className="flex items-center gap-3 px-4 py-3">
+          <div className="h-9 w-9 shrink-0 animate-pulse rounded-lg bg-(--color-panel2)" />
+          <div className="min-w-0 flex-1 space-y-2">
+            <div className="h-3.5 animate-pulse rounded bg-(--color-panel2)" style={{ width: `${42 + i * 9}%` }} />
+            <div className="h-2.5 animate-pulse rounded bg-(--color-panel2)" style={{ width: `${62 + i * 7}%` }} />
+          </div>
+        </div>
+      ))}
+      <p className="pt-4 text-center text-sm text-(--color-muted)">加载中···</p>
+    </div>
+  );
+}
+
 export default function ProjectsPage() {
   const qc = useQueryClient();
   const [name, setName] = useState("");
@@ -178,18 +195,21 @@ export default function ProjectsPage() {
         <div className="mx-auto max-w-3xl">
           <div className="space-y-2">
             {(() => {
+              if (projects.data === undefined) {
+                return projects.error ? null : <ProjectListSkeleton />;
+              }
               const q = search.trim().toLowerCase();
               const filtered = q
-                ? (projects.data ?? []).filter((p) => p.name.toLowerCase().includes(q))
+                ? projects.data.filter((p) => p.name.toLowerCase().includes(q))
                 : projects.data;
-              if (!filtered || filtered.length === 0) {
+              if (filtered.length === 0) {
                 return (
                   <p className="py-8 text-center text-sm text-(--color-muted)">
                     {q ? "未找到匹配的项目" : "暂无文件"}
                   </p>
                 );
               }
-              return filtered?.map((p) => (
+              return filtered.map((p) => (
               <div
                 key={p.id}
                 className="group flex items-center gap-3 rounded-xl px-4 py-3 hover:bg-(--color-panel)"
@@ -264,7 +284,6 @@ export default function ProjectsPage() {
             })()}
           </div>
 
-          {connecting && !backendFailed && <div className="mt-4" /> /* 启动初始化期间静默：窗口立即显示，数据就绪后自动出现 */}
           {(projects.error || backendFailed) && (
             <div className="mt-4 rounded-xl border border-(--color-border) bg-(--color-panel) px-4 py-3 text-xs text-(--color-muted)">
               <div className="flex items-center gap-2">

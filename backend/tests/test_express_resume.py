@@ -185,3 +185,169 @@ def test_express_retry_skips_draft_and_polished_windows(client, wait_task) -> No
                 .limit(1)
             )
             assert current is not None and (current.target_text or "").strip()
+
+
+def _setup_multiline_structure(client, wait_task):
+    """构造一个含多行动作块的项目，用于复现模型合并行导致的结构失败。"""
+    with dbmod.SessionLocal() as db:
+        db.add(ProviderConfig(
+            display_name="t", base_url="http://127.0.0.1:9",
+            model_name="m", credential_ref="r", is_default=True, is_verified=True,
+        ))
+        db.commit()
+    pid = client.post("/api/v1/projects", json={"name": "结构恢复测试"}).json()["id"]
+    dialogue = [f"林风：第{i}句话，我们要坚持到底，绝不后退。" for i in range(60)]
+    marker = "△结构测试动作一。\n△结构测试动作二。"
+    body = "\n\n".join(dialogue[:30] + [marker] + dialogue[30:])
+    client.post(
+        f"/api/v1/projects/{pid}/documents/import",
+        files={"file": ("s.txt", body.encode(), "text/plain")},
+    )
+    wait_task(
+        client,
+        client.post(f"/api/v1/projects/{pid}/parse", json={}).json()["task_id"],
+    )
+    return pid
+
+
+class _CorruptPolishProvider:
+    """按需删掉多行译文的最后一行，模拟真实模型的“合并动作行”。"""
+
+    def __init__(self, inner, *, always: bool = False):
+        self.inner = inner
+        self.always = always
+
+    async def chat(self, **kwargs):
+        resp = await self.inner.chat(**kwargs)
+        if kwargs.get("stage") not in ("polish", "repair"):
+            return resp
+        messages = kwargs.get("messages") or []
+        user = messages[-1].get("content", "") if messages else ""
+        ids = set(re.findall(r"\[([0-9a-f]{32})\]", user))
+        # 精简后的单段修复只含一个 segment id，给恢复路径一个成功出口。
+        if not self.always and len(ids) <= 1:
+            return resp
+        try:
+            data = json.loads(resp.content)
+        except (TypeError, ValueError):
+            return resp
+        changed = False
+        for entry in data.get("translations") or []:
+            lines = (entry.get("target_text") or "").splitlines()
+            if len(lines) > 1:
+                entry["target_text"] = "\n".join(lines[:-1])
+                changed = True
+                break
+        if changed:
+            resp.content = json.dumps(data, ensure_ascii=False)
+        return resp
+
+    async def test_connection(self):
+        return await self.inner.test_connection()
+
+
+def _structured_fake() -> FakeProvider:
+    """只从 SOURCE SEGMENTS 块生成译文，避免上下文/Draft 中重复 ID 干扰结构测试。"""
+    from conftest import fake_translation_entries
+
+    f = _fake()
+
+    def translation_h(messages):
+        system = messages[0].get("content", "") if messages else ""
+        user = messages[-1].get("content", "") if messages else ""
+        if "FAITHFUL DRAFT" not in system and "POLISH pass" not in system:
+            return None
+        marker = "SOURCE SEGMENTS (translate only these, one translation per segment_id):\n"
+        if marker not in user:
+            return None
+        source = user.split(marker, 1)[1]
+        for end in (
+            "\nSTYLE GUIDE", "\nSCENE CONTEXT CARD", "\nSPOILER GUARD",
+            "\nCHAPTER STORYLINE", "\nFORESHADOWING", "\nAPPROVED CHARACTERS",
+            "\nCHARACTER PROFILES", "\nNAME-FORM MAP", "\nSPEAKER VOICE",
+            "\nFORCED TERMS", "\nCONTEXTUAL TERMS", "\nRELEVANT RULES",
+            "\nCARRY-OVER STATE", "\n[FAITHFUL DRAFT",
+        ):
+            if end in source:
+                source = source.split(end, 1)[0]
+        return {
+            "window_id": "W",
+            "translations": fake_translation_entries(
+                source,
+                "Polished" if "POLISH pass" in system else "Draft",
+                stage="polished" if "POLISH pass" in system else "draft",
+            ),
+            "carry_over": {},
+        }
+
+    f.handlers.insert(0, translation_h)
+    return f
+
+
+def _prepare_structure_retry(client, wait_task):
+    """先用正常 fake 跑完一次（trial 已写入进度），再让目标窗口需要重译。
+
+    这样重试时不会重新执行 trial，避免 trial 的译文版本覆盖主翻译窗口，
+    从而能单独验证 Polish 结构失败恢复路径。
+    """
+    pid = _setup_multiline_structure(client, wait_task)
+    set_provider(_fake())
+    tid = client.post(f"/api/v1/projects/{pid}/translation/express", json={}).json()["task_id"]
+    first = wait_task(client, tid, timeout=90)
+    assert first["status"] == "completed", first.get("error_message")
+
+    with dbmod.SessionLocal() as db:
+        seg = db.scalar(
+            select(SourceSegment).where(
+                SourceSegment.project_id == pid,
+                SourceSegment.source_text.contains("结构测试动作一"),
+            )
+        )
+        assert seg is not None
+        tr = db.scalar(
+            select(Translation)
+            .where(Translation.segment_id == seg.id, Translation.stage == "polished")
+            .order_by(Translation.version.desc())
+            .limit(1)
+        )
+        assert tr is not None
+        tr.freshness_status = "stale"
+        task = db.get(Task, tid)
+        task.status = "failed"
+        task.error_code = "items_failed"
+        task.error_message = "模拟结构失败重试"
+        db.commit()
+        target_id = seg.id
+    return pid, tid, target_id
+
+
+def test_polish_structure_failure_recovers_without_unpack_error(client, wait_task) -> None:
+    pid, tid, target_id = _prepare_structure_retry(client, wait_task)
+    set_provider(_CorruptPolishProvider(_structured_fake()))
+    assert client.post(f"/api/v1/tasks/{tid}/retry").status_code == 200
+    result = wait_task(client, tid, timeout=90)
+    assert result["status"] == "completed", result.get("error_message")
+    assert "not enough values" not in (result.get("error_message") or "")
+
+    with dbmod.SessionLocal() as db:
+        tr = db.scalar(
+            select(Translation)
+            .where(Translation.segment_id == target_id, Translation.stage == "polished")
+            .order_by(Translation.version.desc())
+            .limit(1)
+        )
+        assert tr is not None
+        assert len([x for x in (tr.target_text or "").splitlines() if x.strip()]) == 2
+
+
+def test_polish_structure_failure_has_actionable_error(client, wait_task) -> None:
+    """持续结构失败时必须报窗口错误，不能把内部二元解包异常泄漏给用户。"""
+    _pid, tid, _target_id = _prepare_structure_retry(client, wait_task)
+    set_provider(_CorruptPolishProvider(_structured_fake(), always=True))
+    assert client.post(f"/api/v1/tasks/{tid}/retry").status_code == 200
+    result = wait_task(client, tid, timeout=90)
+    assert result["status"] == "failed"
+    message = result.get("error_message") or ""
+    assert "个翻译窗口失败" in message
+    assert "结构校验失败" in message
+    assert "not enough values" not in message

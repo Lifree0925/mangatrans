@@ -650,6 +650,114 @@ async def run_express(db_factory, project_id: str, source_document_id: str, mode
             polish_errors[win_idx] = f"拆窗重试失败：{type(exc).__name__}: {str(exc)[:240]}"
             return None
 
+    def _seg_dicts(window) -> list[dict]:
+        return [
+            {
+                "segment_id": s.id,
+                "segment_type": s.segment_type,
+                "speaker_name": s.speaker_name,
+                "source_text": s.source_text,
+                "line_count_optional": bool(preserved_title_for_segment(s)),
+            }
+            for s in window
+        ]
+
+    def _line_counts(window) -> dict[str, int]:
+        return {
+            s.id: len([x for x in s.source_text.strip().splitlines() if x.strip()])
+            for s in window
+        }
+
+    def _apply_fixed_map(polished: list[dict], fixed_map: dict[str, str]) -> list[dict]:
+        """按 segment_id 替换问题段；重复段只保留第一份，缺失段补回。"""
+        if not fixed_map:
+            return polished
+        out: list[dict] = []
+        seen_fixed: set[str] = set()
+        for entry in polished:
+            sid = entry.get("segment_id")
+            if sid not in fixed_map:
+                out.append(entry)
+                continue
+            if sid in seen_fixed:
+                continue
+            seen_fixed.add(sid)
+            out.append({**entry, "target_text": fixed_map[sid]})
+        for sid, text in fixed_map.items():
+            if sid not in seen_fixed:
+                out.append({
+                    "segment_id": sid, "target_text": text,
+                    "notes": [], "ambiguity": [],
+                })
+        return out
+
+    async def _strict_repair_segments(
+        win_idx: int,
+        window,
+        draft: list[dict],
+        polished: list[dict],
+        errors: list[str],
+        carry_over: dict | None,
+    ) -> tuple[list[dict], list[str]]:
+        """逐段严格重译仍不合格的段，显式约束行数与结构锚点。
+
+        整窗 repair 偶尔会继续合并动作行；逐段输入能显著降低模型把多行
+        动作块压成一行的概率。只对已经失败的问题段调用，不增加正常路径成本。
+        """
+        if not errors:
+            return polished, errors
+        bad_ids = sorted(locate_problem_segments(
+            _seg_dicts(window), polished, speaker_map=speaker_map
+        ))
+        if not bad_ids:
+            return polished, errors
+        by_id = {s.id: s for s in window}
+        draft_by_id = {e.get("segment_id"): e for e in draft}
+        for sid in bad_ids[:12]:
+            seg = by_id.get(sid)
+            one_draft = draft_by_id.get(sid)
+            if seg is None or one_draft is None:
+                continue
+            one_window = [seg]
+            one_dicts = _seg_dicts(one_window)
+            counts = _line_counts(one_window)
+            try:
+                _sd, one_ctx, _sg, _card = await _window_material(
+                    db_factory, project_id, one_window, carry_over, lean=True
+                )
+                fixed = await repair_segments(
+                    provider=provider, model=model,
+                    window_id=f"FIX-STRICT-{seg.segment_no}",
+                    context=one_ctx, draft=[one_draft],
+                    issues=[
+                        {
+                            "issue_type": "line_shift",
+                            "explanation": e,
+                            "suggested_fix": "逐行对应原文，不得合并或丢失任何一行",
+                        }
+                        for e in errors
+                    ],
+                    seg_ids=[sid], line_counts=counts,
+                )
+            except Exception:  # noqa: BLE001 单段修复失败继续尝试其余问题段
+                continue
+            text = (fixed.get(sid) or "").strip()
+            if not text:
+                continue
+            candidate = [{
+                "segment_id": sid, "target_text": text,
+                "notes": [], "ambiguity": [],
+            }]
+            if validate_window(one_dicts, candidate, speaker_map=speaker_map):
+                continue
+            polished = _apply_fixed_map(polished, {sid: text})
+            errors = validate_window(
+                _seg_dicts(window), polished, speaker_map=speaker_map
+            )
+            if not errors:
+                break
+        return polished, errors
+
     polish_jobs = list(zip(todo_indices, todo))
     polish_tasks = [
         _aio.create_task(_polish_one(wi, w)) for wi, w in polish_jobs
@@ -726,16 +834,8 @@ async def run_express(db_factory, project_id: str, source_document_id: str, mode
             _sync_polish_live()
             continue
         # 段完整性校验：缺行/错位是历史漏译与标签错位的根因，拒绝静默落库
-        seg_dicts = [
-            {
-                "segment_id": s.id,
-                "segment_type": s.segment_type,
-                "speaker_name": s.speaker_name,
-                "source_text": s.source_text,
-                "line_count_optional": bool(preserved_title_for_segment(s)),
-            }
-            for s in window
-        ]
+        seg_dicts = _seg_dicts(window)
+        line_counts = _line_counts(window)
         errors = validate_window(seg_dicts, polished, speaker_map=speaker_map)
         if errors:
             # 定点修复：定位问题段，AI 只重译这些段（窗口其余段不动）
@@ -750,19 +850,25 @@ async def run_express(db_factory, project_id: str, source_document_id: str, mode
                     fixed_map = await repair_segments(
                         provider=provider, model=model, window_id=f"FIX-{window[0].segment_no}",
                         context=context, draft=draft, issues=fix_issues,
-                        seg_ids=sorted(bad_ids),
+                        seg_ids=sorted(bad_ids), line_counts=line_counts,
                     )
-                    for e in polished:
-                        if e.get("segment_id") in fixed_map:
-                            e["target_text"] = fixed_map[e["segment_id"]]
+                    polished = _apply_fixed_map(polished, fixed_map)
                     errors = validate_window(seg_dicts, polished, speaker_map=speaker_map)
                 except Exception:  # noqa: BLE001 修复失败保持原错误，走失败计数
                     pass
+        if errors:
+            polished, errors = await _strict_repair_segments(
+                wi, window, draft, polished, errors, _prev_carry(wi)
+            )
         if errors and len(window) > 1:
             recovered = await _split_repolish(wi, window, draft)
             if recovered is not None:
                 polished = recovered
                 errors = validate_window(seg_dicts, polished, speaker_map=speaker_map)
+                if errors:
+                    polished, errors = await _strict_repair_segments(
+                        wi, window, draft, polished, errors, _prev_carry(wi)
+                    )
         if errors:
             polish_errors[wi] = "结构校验失败：" + "; ".join(errors[:3])
             failed_windows += 1
@@ -786,7 +892,7 @@ async def run_express(db_factory, project_id: str, source_document_id: str, mode
     if failed_windows and not _paused():
         errors = {
             str(wi): polish_errors.get(wi, "未知错误")
-            for pos, (wi, _w, _dr) in enumerate(polish_jobs)
+            for pos, (wi, _w) in enumerate(polish_jobs)
             if polished_results[pos] == "failed" or wi in polish_errors
         }
         report["steps"]["translation"]["failed_window_errors"] = errors

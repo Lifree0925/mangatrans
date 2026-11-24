@@ -531,6 +531,10 @@ pub fn run() {
             let main_window = app
                 .get_webview_window("main")
                 .expect("main window missing");
+            // 先显示窗口，再做数据目录解析、孤儿后端探测与 sidecar 拉起。
+            // 前端会立即渲染骨架；后续连接失败由页面重试与诊断区处理。
+            let _ = main_window.show();
+            let _ = main_window.set_focus();
 
             // 复用既有后端：上次 App 崩溃遗留的孤儿 sidecar 仍健康时直接复用，
             // 不新拉进程（消除多后端进程堆积与并发写库）
@@ -551,9 +555,6 @@ pub fn run() {
                     reused_pid: Some(existing_pid),
                     restarting: AtomicBool::new(false),
                 });
-                // 立即显示窗口：用户打开即见主界面，不等任何连接
-                let _ = main_window.show();
-                let _ = main_window.set_focus();
                 return Ok(());
             }
 
@@ -577,9 +578,6 @@ pub fn run() {
                 Err(_) => None,
             };
 
-            // 窗口立即显示：不等健康检查（前端静默重试，连接失败展示诊断信息）
-            let _ = main_window.show();
-            let _ = main_window.set_focus();
             // 健康检查后台执行，仅写日志供诊断
             let health_log = log_path.clone();
             tauri::async_runtime::spawn_blocking(move || {

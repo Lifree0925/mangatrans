@@ -119,6 +119,35 @@ def test_usage_ledger_is_exposed_on_task(client, wait_task) -> None:
     assert usage["by_stage"]["draft"]["requests"] == 1
 
 
+def test_usage_ledger_exposes_local_and_provider_cache_separately(client, wait_task) -> None:
+    """DeepSeek 的 prompt_cache_hit_tokens 必须进入服务端缓存指标，
+    且不能被误算成本地响应缓存。"""
+    pid = _setup(client, wait_task)
+    tid = client.post(f"/api/v1/projects/{pid}/translation/start", json={}).json()["task_id"]
+    with usage_context(tid, pid):
+        record_usage(
+            stage="polish", model_name="fake-model", provider_id="deepseek",
+            usage={
+                "prompt_tokens": 1000,
+                "completion_tokens": 100,
+                "total_tokens": 1100,
+                "prompt_cache_hit_tokens": 600,
+                "prompt_cache_miss_tokens": 400,
+            },
+            finish_reason="stop",
+        )
+        record_usage(
+            stage="qa", model_name="fake-model", provider_id="deepseek",
+            usage={"prompt_tokens": 500, "completion_tokens": 50, "total_tokens": 550},
+            cache_hit=True, finish_reason="stop",
+        )
+    usage = client.get(f"/api/v1/tasks/{tid}").json()["usage"]
+    assert usage["cache_hits"] == 1
+    assert usage["cached_tokens"] == 600
+    assert usage["cache_token_rate"] == 60.0
+    assert usage["prompt_tokens"] == 1000
+
+
 def test_dialogue_extraction_is_deterministic_and_ordered(client, wait_task) -> None:
     from app.services import dialogue_service
 

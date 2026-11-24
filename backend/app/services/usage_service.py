@@ -17,6 +17,8 @@ def summarize_task_usage(db: Session, task_ids: list[str]) -> dict[str, dict]:
             "requests": 0,
             "failed_requests": 0,
             "cache_hits": 0,
+            "cached_tokens": 0,
+            "cache_token_rate": 0.0,
             "prompt_tokens": 0,
             "completion_tokens": 0,
             "reasoning_tokens": 0,
@@ -30,6 +32,7 @@ def summarize_task_usage(db: Session, task_ids: list[str]) -> dict[str, dict]:
             continue
         summary = grouped.setdefault(row.task_id, {
             "requests": 0, "failed_requests": 0, "cache_hits": 0,
+            "cached_tokens": 0, "cache_token_rate": 0.0,
             "prompt_tokens": 0, "completion_tokens": 0,
             "reasoning_tokens": 0, "api_total_tokens": 0, "latency_ms": 0, "by_stage": {},
             "last_call_at": None,
@@ -48,17 +51,28 @@ def summarize_task_usage(db: Session, task_ids: list[str]) -> dict[str, dict]:
             summary["prompt_tokens"] += row.prompt_tokens
             summary["completion_tokens"] += row.completion_tokens
             summary["reasoning_tokens"] += row.reasoning_tokens
+            summary["cached_tokens"] += row.cached_tokens
             summary["api_total_tokens"] += row.total_tokens
         stage = summary["by_stage"].setdefault(
             row.stage,
-            {"requests": 0, "prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0, "latency_ms": 0},
+            {
+                "requests": 0, "prompt_tokens": 0, "completion_tokens": 0,
+                "cached_tokens": 0, "total_tokens": 0, "latency_ms": 0,
+            },
         )
         stage["requests"] += 1
         stage["latency_ms"] += row.latency_ms
         if not row.cache_hit and row.success:
             stage["prompt_tokens"] += row.prompt_tokens
             stage["completion_tokens"] += row.completion_tokens
+            stage["cached_tokens"] += row.cached_tokens
             stage["total_tokens"] += row.total_tokens
+    for summary in grouped.values():
+        prompt = int(summary.get("prompt_tokens") or 0)
+        summary["cache_token_rate"] = (
+            round(int(summary.get("cached_tokens") or 0) / prompt * 100, 1)
+            if prompt else 0.0
+        )
     return grouped
 
 

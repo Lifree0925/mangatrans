@@ -62,6 +62,10 @@ def _usage_values(usage: dict) -> dict:
     cached = _int(
         usage.get("cached_tokens")
         or (usage.get("prompt_tokens_details") or {}).get("cached_tokens")
+        # DeepSeek / 兼容网关的字段名
+        or usage.get("prompt_cache_hit_tokens")
+        or usage.get("cache_read_input_tokens")
+        or usage.get("cached_prompt_tokens")
     )
     total = _int(usage.get("total_tokens")) or prompt + completion
     return {

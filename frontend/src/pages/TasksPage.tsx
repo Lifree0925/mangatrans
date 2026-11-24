@@ -150,6 +150,7 @@ function stepDetail(key: string, step: Record<string, unknown> | undefined): str
       const s = step as {
         done?: number; total?: number; phase?: string; draft_done?: number;
         model_done?: number; model_total?: number; active_polish?: number;
+        failed_windows?: number;
       };
       if (s.total == null) return "";
       if (s.phase === "draft") {
@@ -160,10 +161,8 @@ function stepDetail(key: string, step: Record<string, unknown> | undefined): str
         return `草稿锁事实 ${s.draft_done ?? 0} / ${s.total} 个窗口（${pct}%）${polishStarted}`;
       }
       const pct = s.total ? Math.round(((s.done ?? 0) / s.total) * 100) : 0;
-      const modelDone = s.model_total != null && s.model_done != null
-        ? ` · 模型返回 ${s.model_done} / ${s.model_total}`
-        : "";
-      return `润色 ${s.done ?? 0} / ${s.total} 个窗口（${pct}%）${modelDone}`;
+      const failed = s.failed_windows ? ` · ${s.failed_windows} 个窗口校验失败` : "";
+      return `润色 ${s.done ?? 0} / ${s.total} 个窗口（${pct}%）${failed}`;
     }
     case "qa": {
       const s = step as { done?: number; total?: number; issues?: number; needs_review?: number; blocked?: number; failed?: number; severity_counts?: Record<string, number>; semantic_done?: number; semantic_total?: number; gate_passed?: boolean };
@@ -575,20 +574,16 @@ export default function TasksPage() {
                   </p>
                 )}
                 {t.usage && (t.usage.requests ?? 0) > 0 && (() => {
-                  const requests = t.usage?.requests ?? 0;
-                  const cacheHits = t.usage?.cache_hits ?? 0;
-                  const cacheHitRate = requests > 0
-                    ? Math.min(100, Math.round((cacheHits / requests) * 100))
-                    : 0;
+                  const cachedTokens = t.usage?.cached_tokens ?? 0;
+                  const cacheTokenRate = t.usage?.cache_token_rate ?? 0;
                   return (
                   <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 rounded-lg bg-(--color-panel2) px-3 py-2 text-xs text-(--color-muted)">
-                    <span>模型请求 {requests}</span>
                     <span>输入 {(t.usage?.prompt_tokens ?? 0).toLocaleString()} tokens</span>
                     <span>输出 {(t.usage?.completion_tokens ?? 0).toLocaleString()} tokens</span>
                     <span>API 总用量 {(t.usage?.api_total_tokens ?? 0).toLocaleString()} tokens</span>
-                    {cacheHits > 0 && (
+                    {cachedTokens > 0 && (
                       <span className="text-emerald-600">
-                        缓存命中率 {cacheHitRate}%（{cacheHits}/{requests} 次请求）
+                        缓存命中率 {cacheTokenRate}%
                       </span>
                     )}
                     {(t.usage.failed_requests ?? 0) > 0 && <span className="text-red-600">失败请求 {t.usage.failed_requests}</span>}

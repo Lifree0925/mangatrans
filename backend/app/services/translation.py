@@ -718,6 +718,7 @@ async def repair_segments(
     draft: list[dict],
     issues: list[dict],
     seg_ids: list[str],
+    line_counts: dict[str, int] | None = None,
 ) -> dict[str, str]:
     """QA 定点修复：只重译问题段，窗口其余译文保持不变（避免整窗重做浪费时间）。
 
@@ -732,12 +733,28 @@ async def repair_segments(
         for i in issues[:12]
     )
     sub_draft = [d for d in draft if d.get("segment_id") in target]
+    line_req = ""
+    if line_counts:
+        rows = [
+            f"- {sid}: exactly {n} non-empty line(s)"
+            for sid, n in sorted(line_counts.items())
+            if sid in target and n > 1
+        ]
+        if rows:
+            line_req = (
+                "\n\n[REQUIRED LINE STRUCTURE]\n"
+                + "\n".join(rows)
+                + "\nReturn the same number of non-empty lines for each listed segment, "
+                "in the same order. Never merge two source lines into one target line. "
+                "Keep every △ / 【】 / speaker-label anchor on its corresponding line."
+            )
     user = (
         context.prompt_text
         + "\n\n[FAITHFUL DRAFT — ONLY THE PROBLEM SEGMENTS]\n"
         + json.dumps(sub_draft, ensure_ascii=False, indent=2)
         + "\n\n[QA ISSUES]\n"
         + issue_block
+        + line_req
         + "\n\nRepair ONLY these segment_ids: "
         + ", ".join(target)
         + ". Do NOT output any other segment. Keep all other segments unchanged. Return ONLY the required JSON."

@@ -68,12 +68,14 @@ export interface TaskUsage {
   requests?: number;
   failed_requests?: number;
   cache_hits?: number;
+  cached_tokens?: number;
+  cache_token_rate?: number;
   prompt_tokens?: number;
   completion_tokens?: number;
   reasoning_tokens?: number;
   api_total_tokens?: number;
   latency_ms?: number;
-  by_stage?: Record<string, { requests?: number; prompt_tokens?: number; completion_tokens?: number; total_tokens?: number; latency_ms?: number }>;
+  by_stage?: Record<string, { requests?: number; prompt_tokens?: number; completion_tokens?: number; cached_tokens?: number; total_tokens?: number; latency_ms?: number }>;
 }
 
 export interface TaskLiveInfo {
