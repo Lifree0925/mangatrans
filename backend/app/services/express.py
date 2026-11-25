@@ -21,6 +21,7 @@ from app.services import (
     style_guide_service,
 )
 from app.services.importer import sha256
+from app.services.quality_retry import retry_failed_window_quality
 from app.services.translation import (
     PROMPT_VERSION,
     locate_problem_segments,
@@ -50,6 +51,7 @@ QA_REPAIR_TIMEOUT = max(15, int(os.environ.get("MT_QA_REPAIR_TIMEOUT", "90")))
 from app.services.translation_batch import (
     _canonicalize_polished_terms,
     _forced_terms_for_text,
+    canonicalize_fixed_map,
     _load_window_context,
     _persist_window_translations,
     _window_material,
@@ -121,9 +123,8 @@ async def _repair_express_qa(
         for s in window
         if s.id in target_ids and s.id in draft_latest
     ]
-    target_window = [s for s in window if s.id in target_ids]
     _sd, ctx, _sg, _card = await _window_material(
-        db_factory, project_id, target_window, None
+        db_factory, project_id, window, None
     )
     fixed_total = 0
     remaining = list(target_ids)
@@ -154,6 +155,9 @@ async def _repair_express_qa(
             fixed_map = {}
         if not fixed_map:
             break
+        fixed_map = await canonicalize_fixed_map(
+            db_factory, project_id, window, fixed_map
+        )
         fixed_ok: dict[str, str] = {}
         for sid in list(remaining):
             text = (fixed_map.get(sid) or "").strip()
@@ -256,33 +260,14 @@ async def run_express(db_factory, project_id: str, source_document_id: str, mode
                 f"已停止翻译以避免全文不一致。请重试；原因：{last_error}"
             )
         report["steps"]["knowledge"] = knowledge_result
-    # 2. 准备阶段协程：profiles/storylines/dialogue/trial 互不依赖，
-    #    且 Draft 只锁事实、不需要 Style Guide —— 四者与 Draft 并行，缩短关键路径
+    # 2. 准备阶段协程：profiles/storylines/trial 互不依赖，
+    #    且 Draft 只锁事实、不需要 Style Guide —— 三者与 Draft 并行，缩短关键路径
     async def _prep_profiles():
         if "profiles" not in report["steps"]:
             report["steps"]["profiles"] = await profile_service.extract_profiles(
                 db_factory, project_id, source_document_id, provider, model
             )
         _sync_progress(db_factory, task_id, report["steps"], "profiles")
-
-    async def _prep_dialogue():
-        if "extracted" not in (report["steps"].get("dialogue") or {}):
-            from app.services import dialogue_service
-
-            def _dl_cb(p: dict) -> None:
-                report["steps"]["dialogue"] = {
-                    "done_batches": p["done_batches"],
-                    "total_batches": p["total_batches"],
-                    "lines": p["lines"],
-                    "discarded": p["discarded"],
-                    "failed_batches": p["failed_batches"],
-                }
-                _sync_progress(db_factory, task_id, report["steps"], "dialogue")
-
-            report["steps"]["dialogue"] = await dialogue_service.extract_dialogue_lines(
-                db_factory, project_id, source_document_id, provider, model, progress_cb=_dl_cb
-            )
-        _sync_progress(db_factory, task_id, report["steps"], "dialogue")
 
     async def _prep_trial():
         # 试译与风格基线（Polish 依赖 Style Guide）
@@ -295,7 +280,7 @@ async def run_express(db_factory, project_id: str, source_document_id: str, mode
     _sync_progress(db_factory, task_id, report["steps"], "translation")
     # 4. 全本窗口翻译：Draft/Polish 流水线并行。
     #    Polish 等自身及前一窗口 Draft、术语门控、全局角色档案/风格基线，
-    #    以及“本窗口所属章节”的剧情卡就绪后启动；不等待无关章节或台词本。
+    #    以及“本窗口所属章节”的剧情卡就绪后启动；不等待无关章节或角色档案。
     #    有待定术语时退回全量 Draft 后锁名的安全路径。
     with db_factory() as db:
         segs = list(
@@ -359,9 +344,9 @@ async def run_express(db_factory, project_id: str, source_document_id: str, mode
     todo_indices = [i for i in range(total) if i not in polished_complete]
     todo = [windows[i] for i in todo_indices]
     if todo_indices:
-        # 本次会生成新的 polished 版本，旧的台词对齐/QA/术语一致性/定稿结果失效，
+        # 本次会生成新的 polished 版本，旧的 QA/术语一致性/定稿结果失效，
         # 必须基于新译文重新执行；已完成窗口的翻译本身仍不重跑。
-        for dependent_step in ("dialogue_align", "qa", "term_consistency", "approve"):
+        for dependent_step in ("qa", "term_consistency", "approve"):
             report["steps"].pop(dependent_step, None)
     report["steps"]["translation"] = {
         "done": done,
@@ -459,7 +444,6 @@ async def run_express(db_factory, project_id: str, source_document_id: str, mode
     style_ready = _aio.Event()
     style_errors: list[Exception] = []
     storyline_errors: list[Exception] = []
-    dialogue_errors: list[Exception] = []
     chapter_ids = {w[0].chapter_id for w in windows if w and w[0].chapter_id}
     storyline_ready = {cid: _aio.Event() for cid in chapter_ids}
 
@@ -502,12 +486,6 @@ async def run_express(db_factory, project_id: str, source_document_id: str, mode
         finally:
             style_ready.set()
 
-    async def _run_dialogue_background():
-        try:
-            await _aio.wait_for(_prep_dialogue(), timeout=600)
-        except Exception as exc:  # noqa: BLE001 台词本不阻塞润色，但会在 QA 前报错
-            dialogue_errors.append(exc)
-
     terms_ready = _aio.Event()
     term_errors: list[Exception] = []
 
@@ -528,7 +506,6 @@ async def run_express(db_factory, project_id: str, source_document_id: str, mode
     profiles_task = _aio.create_task(_run_profiles_gate())
     storylines_task = _aio.create_task(_run_storylines_gate())
     style_task = _aio.create_task(_run_style_gate())
-    dialogue_task = _aio.create_task(_run_dialogue_background())
     terms_task = _aio.create_task(_run_terms_gate())
 
     # Polish 流水线实时活动：Draft 未结束时 phase 仍为 draft，
@@ -776,7 +753,6 @@ async def run_express(db_factory, project_id: str, source_document_id: str, mode
     await profiles_task
     await storylines_task
     await style_task
-    await dialogue_task
     await terms_task
     polished_results = await _aio.gather(*polish_tasks)
     if profiles_errors:
@@ -785,8 +761,6 @@ async def run_express(db_factory, project_id: str, source_document_id: str, mode
         raise style_errors[0]
     if storyline_errors:
         raise storyline_errors[0]
-    if dialogue_errors:
-        raise dialogue_errors[0]
     if term_errors:
         raise term_errors[0]
 
@@ -895,6 +869,9 @@ async def run_express(db_factory, project_id: str, source_document_id: str, mode
                             ),
                             timeout=STRUCTURE_REPAIR_TIMEOUT,
                         )
+                        fixed_map = await canonicalize_fixed_map(
+                            db_factory, project_id, window, fixed_map
+                        )
                         polished = _apply_fixed_map(polished, fixed_map)
                         errors = validate_window(
                             seg_dicts, polished, speaker_map=speaker_map
@@ -955,22 +932,6 @@ async def run_express(db_factory, project_id: str, source_document_id: str, mode
             "可重试任务；若同一窗口持续失败，请查看任务详情或缩短该段原文。"
         )
 
-    # 4b/5. 台词对齐与 QA 并行（都只依赖 polished 译文；写入不同表、进度 key 互不冲突）
-    async def _run_align():
-        from app.services import dialogue_service
-
-        if "dialogue_align" not in report["steps"]:
-            _sync_progress(db_factory, task_id, report["steps"], "dialogue_align")
-
-            def _al_cb(p: dict) -> None:
-                report["steps"]["dialogue_align"] = p
-                _sync_progress(db_factory, task_id, report["steps"], "dialogue_align")
-
-            report["steps"]["dialogue_align"] = await dialogue_service.align_dialogue_translations(
-                db_factory, project_id, source_document_id, provider, model, progress_cb=_al_cb
-            )
-        _sync_progress(db_factory, task_id, report["steps"], "dialogue_align")
-
     async def _run_qa():
         _sync_progress(db_factory, task_id, report["steps"], "qa")
         # 5. QA：确定性全量 + 风险窗口语义 QA
@@ -1001,11 +962,37 @@ async def run_express(db_factory, project_id: str, source_document_id: str, mode
         det_by_win: dict[int, dict[str, list[dict]]] = {}
         tr_id_by_win: dict[int, dict[str, str]] = {}
         qa_jobs: list[dict] = []
+        with db_factory() as db:
+            quality_by_win = {
+                row.window_id: row
+                for row in db.scalars(
+                    select(WindowQuality).where(WindowQuality.task_id == task_id)
+                )
+            }
         for wi, window in enumerate(windows):
             if _paused():
                 break  # 暂停：保留进度
             if wi < qa_done:
                 continue  # 已检查过的窗口跳过
+            wid = f"WIN_{wi:04d}"
+            qrow = quality_by_win.get(wid)
+            if qrow is not None and qrow.gate != "passed":
+                # 重试时先复用上次已定位的问题做定点修复；失败不再整窗重检。
+                retry_res = await retry_failed_window_quality(
+                    db_factory,
+                    provider=provider,
+                    model=model,
+                    project_id=project_id,
+                    task_id=task_id,
+                    window_id=wid,
+                    window=window,
+                )
+                if retry_res.get("status") == "repaired":
+                    continue
+                if retry_res.get("status") in ("failed", "blocked", "give_up"):
+                    qa_failed += 1
+                    qa_errors.append(f"{wid}: {retry_res.get('error') or '定点修复未通过'}")
+                    continue
             with db_factory() as db:
                 polished_rows = list(
                     db.scalars(
@@ -1021,6 +1008,17 @@ async def run_express(db_factory, project_id: str, source_document_id: str, mode
                     if t.source_hash != hashes.get(t.segment_id) or t.freshness_status != "current":
                         continue
                     latest.setdefault(t.segment_id, t)
+                if qrow is not None and qrow.gate == "passed":
+                    try:
+                        qdetails = json.loads(qrow.details_json or "{}")
+                    except json.JSONDecodeError:
+                        qdetails = {}
+                    if (
+                        qdetails.get("semantic_ok") is True
+                        and {str(x) for x in (qdetails.get("translation_ids") or []) if x}
+                        == {tr.id for tr in latest.values()}
+                    ):
+                        continue  # 已通过且译文未变化，跳过
                 seg_map = {s.id: s for s in window}
                 _card, knowledge, storyline, states, facts = _load_window_context(
                     db, project_id, window
@@ -1402,6 +1400,11 @@ async def run_express(db_factory, project_id: str, source_document_id: str, mode
                     timeout=180,
                 )
                 text = fixed_map.get(sid, "")
+                if text:
+                    normalized = await canonicalize_fixed_map(
+                        db_factory, project_id, [seg], {sid: text}
+                    )
+                    text = normalized.get(sid, text)
                 # 校验通过才写库（历史 bug：判定写反，导致不合格译文入库、合格译文被丢弃）
                 if not text:
                     return sid, None
@@ -1454,10 +1457,8 @@ async def run_express(db_factory, project_id: str, source_document_id: str, mode
     # 术语修正必须在 QA 之前完成，确保 QA 校验的是最终版本，而不是修正前的旧版本。
     await _fix_term_inconsistency()
 
-    # QA 与台词对齐并行执行（各自硬超时：超时任务失败，重试时已完成步骤跳过）
-    align_task = _aio.create_task(_run_align())
+    # QA 硬超时：超时任务失败，重试时已完成步骤跳过。
     await _aio.wait_for(_run_qa(), timeout=2400)
-    await _aio.wait_for(align_task, timeout=2400)
     qa_result = report.get("qa") or {}
     from app.services.quality_service import QualityGateError
 

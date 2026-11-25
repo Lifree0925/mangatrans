@@ -196,7 +196,9 @@ export default function ProjectsPage() {
           <div className="space-y-2">
             {(() => {
               if (projects.data === undefined) {
-                return projects.error ? null : <ProjectListSkeleton />;
+                // 首屏数据未到时始终保留主体骨架与“加载中···”，
+                // 即使本地服务重试失败也不能把主区域变成空白。
+                return <ProjectListSkeleton />;
               }
               const q = search.trim().toLowerCase();
               const filtered = q

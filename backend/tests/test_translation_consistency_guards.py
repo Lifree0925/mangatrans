@@ -13,6 +13,8 @@ from app.services.knowledge_service import prune_ambiguous_aliases
 from app.services.term_match import (
     build_term_records,
     forced_term_specs,
+    enforcement_for,
+    is_descriptive_place,
     is_generic_source,
     select_forced_specs_for_text,
     select_source_matches,
@@ -41,6 +43,18 @@ def test_generic_terms_never_forced():
     assert forced_term_specs(records, "狼人走进庄园的酒吧") == {}
     assert is_generic_source("庄园") is True
     assert is_generic_source("荒原边缘酒吧") is False
+
+
+def test_descriptive_locations_are_contextual_not_forced():
+    assert is_descriptive_place("城郊废弃酒庄地下室", "place") is True
+    assert is_descriptive_place("盘山公路偏僻路段", "place") is True
+    assert is_descriptive_place("Sterling庄园", "place") is False
+    assert enforcement_for(
+        "城郊废弃酒庄地下室", {"term_kind": "place", "enforcement": "exact"}
+    ) == "contextual"
+    assert enforcement_for(
+        "Sterling庄园", {"term_kind": "place", "enforcement": "exact"}
+    ) == "exact"
 
 
 def test_ambiguous_alias_is_ignored_and_explicit_place_wins():
@@ -525,6 +539,7 @@ def test_generic_carwash_and_blue_pill_are_not_exact_terms():
 
     assert is_generic_source("洗车行") is True
     assert is_generic_source("蓝色药丸") is True
+    assert is_generic_source("地下堡垒") is True
     assert is_generic_source("Old Brooklyn Car Wash") is False
 
 
@@ -544,7 +559,12 @@ def test_source_honorifics_fix_wrong_family_names():
         "Helen夫人找你。",
         family,
         {"helen夫人": "Madam Helen"},
-    ) == "Madam Helen is asking for you."
+    ) == "Mrs. Sterling is asking for you."
+    assert apply_source_honorifics(
+        "Miss Vance, let's meet.",
+        "Victoria小姐，出来见一面吧。",
+        family,
+    ) == "Victoria, let's meet."
     assert apply_source_honorifics(
         "Five years ago... Mr. Sterling died.",
         "五年前……Sterling老先生去世了。",

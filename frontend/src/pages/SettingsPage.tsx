@@ -53,15 +53,15 @@ const HELP_SECTIONS: { title: string; items: string[] }[] = [
   {
     title: "知识库与内容修改",
     items: [
-      "一键直出后，左侧「知识库」会出现该项目入口，包含角色档案、章节剧情和台词本。",
-      "角色档案记录性格、说话方式和称呼；章节剧情记录重要情节与伏笔；台词本按章节、场景和角色整理对白。",
+      "一键直出后，左侧「知识库」会出现该项目入口，包含角色档案、章节剧情和人物状态。",
+      "角色档案记录性格、说话方式和称呼；章节剧情记录重要情节与伏笔。",
       "角色卡片可以切换主要/次要；点铅笔可在浮层中修改角色资料或章节剧情。",
       "翻译时只加载与当前章节相关的角色和剧情，帮助长剧本保持人物、称呼和故事连续。",
       "修改原文或角色档案后，受影响的译文会标记为待更新；点项目顶部的「更新翻译」只补译这些片段。",
       "修改章节剧情后，建议对相关章节执行「重新翻译」，让新的剧情信息参与翻译。",
       "在项目正文中把鼠标移到段落上，点铅笔可选择修改「原文」或「译文」。修改原文会触发相关译文待更新；修改译文会新增校对版本，不覆盖历史版本。",
       "翻译完成后顶部按钮会变为「重新翻译」：可以全部重翻，也可以只选章节重译。全部重翻不会覆盖已手动修改的知识。",
-      "删除知识库会清空该项目的角色、剧情和台词本，但项目、原文和译文都会保留。",
+      "删除知识库会清空该项目的角色、剧情和人物状态，但项目、原文和译文都会保留。",
     ],
   },
   {
@@ -187,6 +187,24 @@ export default function SettingsPage() {
     } catch (err) {
       toast.error(`检查更新失败：${String(err)}`);
     }
+  };
+
+  const updateButtonLabel = updateChecking
+    ? "检查中…"
+    : updateState.phase === "available"
+      ? `更新 v${updateState.version ?? ""}`
+      : updateState.phase === "downloading"
+        ? `下载中${updateState.progress != null ? ` ${updateState.progress}%` : "…"}`
+        : updateState.phase === "installing"
+          ? "安装中…"
+          : "检查更新";
+
+  const onUpdateButtonClick = () => {
+    if (updateState.phase === "available") {
+      void installUpdate();
+      return;
+    }
+    void checkForUpdates();
   };
 
   const providers = useQuery({
@@ -330,21 +348,17 @@ export default function SettingsPage() {
             </span>
             <div className="flex shrink-0 flex-col items-end gap-1">
               <div className="flex items-center gap-2">
-                {updateState.phase === "available" && (
-                  <button
-                    onClick={() => void installUpdate()}
-                    className="rounded-lg bg-(--color-accent) px-3 py-1 text-xs font-medium text-white hover:bg-(--color-accent-hover)"
-                  >
-                    更新 v{updateState.version ?? ""}
-                  </button>
-                )}
                 <span className="font-mono text-xs text-(--color-muted)">v{APP_VERSION}</span>
                 <button
-                  onClick={checkForUpdates}
+                  onClick={onUpdateButtonClick}
                   disabled={updateChecking || updateBusy}
-                  className="rounded-lg border border-(--color-border) bg-(--color-bg) px-3 py-1 text-xs hover:bg-(--color-panel2) disabled:opacity-40"
+                  className={
+                    updateState.phase === "available"
+                      ? "rounded-lg bg-(--color-accent) px-3 py-1 text-xs font-medium text-white hover:bg-(--color-accent-hover) disabled:opacity-40"
+                      : "rounded-lg border border-(--color-border) bg-(--color-bg) px-3 py-1 text-xs hover:bg-(--color-panel2) disabled:opacity-40"
+                  }
                 >
-                  {updateChecking ? "检查中…" : "检查更新"}
+                  {updateButtonLabel}
                 </button>
               </div>
               {updateState.phase !== "idle" && updateState.phase !== "checking" && (

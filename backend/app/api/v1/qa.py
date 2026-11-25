@@ -129,6 +129,9 @@ def export_project_route(
 
             doc_title = os.path.splitext(doc.filename or "")[0] or None
     title_en = str(payload.get("title_en") or "").strip() or None
+    custom_doc_title = str(payload.get("doc_title") or "").strip() or None
+    if custom_doc_title:
+        doc_title = custom_doc_title
     delivery = bool(payload.get("delivery", True))
     if delivery and not bool(payload.get("allow_draft", False)):
         from app.services.quality_service import project_quality_report

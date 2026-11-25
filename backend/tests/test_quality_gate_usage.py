@@ -1,14 +1,12 @@
-"""自动质量门禁、交付闸门、阶段用量与确定性台词本回归。"""
+"""自动质量门禁、交付闸门与阶段用量回归。"""
 
 import asyncio
 import re
 
 import app.core.database as dbmod
 from app.llm.fake import FakeProvider
-from app.llm.protocol import ProviderTestResult
 from app.llm.registry import set_provider
 from app.llm.usage import record_usage, usage_context
-from app.models.dialogue import DialogueLine
 from app.models.translation import ProviderConfig, Translation
 from conftest import fake_translation_entries
 
@@ -148,30 +146,6 @@ def test_usage_ledger_exposes_local_and_provider_cache_separately(client, wait_t
     assert usage["prompt_tokens"] == 1000
 
 
-def test_dialogue_extraction_is_deterministic_and_ordered(client, wait_task) -> None:
-    from app.services import dialogue_service
-
-    pid = _setup(client, wait_task, "第1集 开始\n\n【房间·日】\n林风：第一句。\n夜色降临。\n林风：第二句。\n")
-    class _NoCallProvider:
-        async def chat(self, **kwargs):
-            raise AssertionError("台词本抽取不应调用模型")
-        async def test_connection(self):
-            return ProviderTestResult(ok=True, model_name="no-call")
-
-    from app.models.document import SourceDocument
-
-    with dbmod.SessionLocal() as db:
-        doc_id = db.query(SourceDocument).filter_by(project_id=pid).one().id
-    result = asyncio.run(dialogue_service.extract_dialogue_lines(
-        lambda: dbmod.SessionLocal(), pid, doc_id, _NoCallProvider(), "fake-model",
-    ))
-    assert result["extracted"] == 2
-    with dbmod.SessionLocal() as db:
-        rows = list(db.query(DialogueLine).filter_by(project_id=pid).order_by(DialogueLine.line_no))
-        assert [r.source_text for r in rows] == ["第一句。", "第二句。"]
-        assert all(r.speaker_name == "林风" for r in rows)
-
-
 def test_window_planner_uses_larger_windows() -> None:
     from app.models.document import SourceSegment
     from app.services.window_planner import TARGET_MAX, build_windows
@@ -274,3 +248,131 @@ def test_quality_failure_retry_reruns_qa(client, wait_task) -> None:
     assert retry.status_code == 200
     second = wait_task(client, tid, timeout=60)
     assert second["status"] == "completed", second.get("error_message")
+
+
+def test_quality_gate_retry_repairs_known_segment_without_full_qa(client, wait_task) -> None:
+    """已定位的严重问题重试时必须直接修该段，不能重新质检整个窗口。"""
+    pid = _setup(client, wait_task)
+
+    def _target_line(prompt: str) -> tuple[str, str]:
+        target = prompt.split("[TARGET]", 1)[1].split("[DETERMINISTIC", 1)[0]
+        m = re.search(r"^\[([0-9a-f]{32})\]\s+(Speaker.*)$", target, re.MULTILINE)
+        assert m, target
+        return m.group(1), m.group(2).strip()
+
+    first_seen = {"repairs": 0}
+
+    def first_handler(messages):
+        prompt = messages[-1]["content"]
+        system = messages[0]["content"] if messages else ""
+        if "终审 QA" in prompt:
+            sid, target = _target_line(prompt)
+            return {"issues": [{
+                "issue_type": "negation_condition",
+                "severity": "high",
+                "segment_id": sid,
+                "source_quote": "林风：我们走。",
+                "target_quote": target,
+                "explanation": "模拟已定位的严重问题",
+                "suggested_fix": "Fix the line.",
+                "confidence": 0.99,
+            }]}
+        if "REPAIRING" in system:
+            first_seen["repairs"] += 1
+            return {
+                "window_id": "W",
+                "translations": fake_translation_entries(prompt, "Repair", stage="repair"),
+            }
+        if "FAITHFUL DRAFT" in system or "POLISH pass" in system:
+            natural = "POLISH pass" in system
+            return {
+                "window_id": "W",
+                "translations": fake_translation_entries(
+                    prompt, "Polished" if natural else "Draft",
+                    stage="polished" if natural else "draft",
+                ),
+                "carry_over": {} if natural else None,
+            }
+        return None
+
+    set_provider(FakeProvider().on(first_handler))
+    tid = client.post(f"/api/v1/projects/{pid}/translation/express", json={}).json()["task_id"]
+    first = wait_task(client, tid, timeout=60)
+    assert first["status"] == "failed"
+    assert first_seen["repairs"] > 0
+
+    second_seen = {"repairs": 0, "qa_prompts": []}
+
+    def second_handler(messages):
+        prompt = messages[-1]["content"]
+        system = messages[0]["content"] if messages else ""
+        if "终审 QA" in prompt:
+            second_seen["qa_prompts"].append(prompt)
+            return {"issues": []}
+        if "REPAIRING" in system:
+            second_seen["repairs"] += 1
+            return {
+                "window_id": "W",
+                "translations": fake_translation_entries(prompt, "Fixed", stage="fixed"),
+            }
+        if "FAITHFUL DRAFT" in system or "POLISH pass" in system:
+            natural = "POLISH pass" in system
+            return {
+                "window_id": "W",
+                "translations": fake_translation_entries(
+                    prompt, "Polished" if natural else "Draft",
+                    stage="polished" if natural else "draft",
+                ),
+                "carry_over": {} if natural else None,
+            }
+        return None
+
+    set_provider(FakeProvider().on(second_handler))
+    assert client.post(f"/api/v1/tasks/{tid}/retry").status_code == 200
+    second = wait_task(client, tid, timeout=60)
+    assert second["status"] == "completed", second.get("error_message")
+    assert second_seen["repairs"] > 0
+    # 只应聚焦复检问题段，而不是重新对整窗发语义 QA。
+    assert second_seen["qa_prompts"]
+    prompt_ids = {
+        sid for prompt in second_seen["qa_prompts"]
+        for sid in re.findall(r"\[([0-9a-f]{32})\]", prompt)
+    }
+    assert len(prompt_ids) == 1, prompt_ids
+
+
+def test_quality_gate_ignores_story_outline(client, wait_task) -> None:
+    pid = _setup(
+        client,
+        wait_task,
+        body=(
+            "故事大纲\n这一段只做项目上下文，不翻译。\n\n"
+            "人物小传\n林风，冷静果断。\n\n"
+            "林风：我们走。\n夜色降临。\n"
+        ),
+    )
+    set_provider(_valid_fake())
+    tid = client.post(f"/api/v1/projects/{pid}/translation/express", json={}).json()["task_id"]
+    result = wait_task(client, tid, timeout=60)
+    assert result["status"] == "completed", result.get("error_message")
+    quality = client.get(f"/api/v1/projects/{pid}/quality-report").json()
+    assert quality["outline_segments"] >= 1
+    assert quality["translatable_segments"] == quality["translated"]
+    assert quality["missing"] == 0
+    assert quality["coverage_rate"] == 100.0
+    assert quality["qa_coverage_rate"] == 100.0
+    with dbmod.SessionLocal() as db:
+        from app.models.document import SourceSegment
+        from sqlalchemy import select
+
+        outline_ids = list(db.scalars(
+            select(SourceSegment.id).where(
+                SourceSegment.project_id == pid,
+                SourceSegment.segment_type == "outline",
+            )
+        ))
+        assert outline_ids
+        translated = db.query(Translation).filter(
+            Translation.segment_id.in_(outline_ids)
+        ).count()
+        assert translated == 0

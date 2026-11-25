@@ -103,3 +103,48 @@ def test_extract_knowledge_express_auto_approved(client: TestClient, wait_task) 
     assert lin["status"] == "auto_approved"  # Express + explicit 证据
 
 
+def test_descriptive_place_is_not_auto_approved_as_exact() -> None:
+    from types import SimpleNamespace
+
+    from app.services.knowledge_service import _auto_approved
+
+    cand = SimpleNamespace(
+        item_type="term",
+        evidence_type="explicit",
+        confidence=0.95,
+        canonical_key="城郊废弃酒庄地下室",
+    )
+    data = {
+        "translation": "Suburban Abandoned Winery Basement",
+        "term_kind": "place",
+        "enforcement": "contextual",
+    }
+    assert _auto_approved("express", cand, data) is False
+
+
+def test_conflicting_term_translation_downgrades_and_list_exposes_effective_policy(
+    client: TestClient,
+) -> None:
+    from app.services.knowledge_service import _merge_data
+
+    merged = json.loads(_merge_data(
+        json.dumps({"translation": "Imperial Hotel", "enforcement": "exact"}),
+        {"translation": "Empire Hotel"},
+    ))
+    assert merged["translation"] == "Imperial Hotel"
+    assert merged["translation_conflicts"] == ["Empire Hotel"]
+    assert merged["enforcement"] == "contextual"
+
+    pid = client.post("/api/v1/projects", json={"name": "术语表"}).json()["id"]
+    r = client.post(f"/api/v1/projects/{pid}/knowledge", json={
+        "item_type": "term",
+        "canonical_key": "城郊废弃酒庄地下室",
+        "translation": "Suburban Abandoned Winery Basement",
+        "status": "approved",
+    })
+    assert r.status_code == 201
+    items = client.get(f"/api/v1/projects/{pid}/knowledge").json()
+    term = next(i for i in items if i["canonical_key"] == "城郊废弃酒庄地下室")
+    assert term["effective_policy"] == "contextual"
+
+

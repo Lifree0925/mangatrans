@@ -11,7 +11,7 @@ import re
 from dataclasses import dataclass, field
 
 _CN_NUM = "一二三四五六七八九十百千零两"
-PARSER_VERSION = "1.1.0"
+PARSER_VERSION = "1.3.0"
 
 # 规则 ID 常量
 RULE_MD_HEADING = "md_heading"
@@ -20,6 +20,7 @@ RULE_SCENE_BRACKET = "scene_bracket"
 RULE_SCENE_LOC = "scene_location"
 RULE_SCENE_SEP = "scene_separator"
 RULE_CAST_LIST = "cast_list"
+RULE_OUTLINE = "outline"
 RULE_DIALOGUE = "dialogue"
 RULE_PAREN = "parenthetical"
 RULE_NARRATIVE = "narrative"
@@ -43,6 +44,14 @@ _DIALOGUE_RE = re.compile(
 _PAREN_RE = re.compile(r"^（[^）]{1,200}）\s*$")
 # 人物表不是对白：冒号后的角色名单必须保留原样，不能按「角色：台词」解析。
 _CAST_LIST_RE = re.compile(r"^(?:人物|角色|出场人物|登场人物|主要人物)\s*[：:]")
+# 前置故事大纲/人物小传只作为项目上下文，不进入翻译窗口；允许 Markdown 标题与冒号后缀。
+_OUTLINE_START_RE = re.compile(
+    r"^\s*(?:#{1,6}\s*)?(?:故事大纲|剧情大纲|大纲|故事梗概|剧情梗概|人物小传|人物介绍|角色介绍|角色名单)"
+    r"(?:\s*[：:].*)?\s*$"
+)
+_OUTLINE_END_RE = re.compile(
+    r"^\s*(?:#{1,6}\s*)?(?:正文|剧本正文|故事正文)(?:\s*[：:].*)?\s*$"
+)
 
 
 @dataclass
@@ -154,6 +163,30 @@ def _classify_line(line: str) -> tuple[str, str, str | None]:
     return "narrative", RULE_NARRATIVE, None
 
 
+def _first_content_line(text: str) -> str:
+    return next((line.strip() for line in (text or "").splitlines() if line.strip()), "")
+
+
+def _mark_outline_segments(segments: list[SegmentBlock]) -> None:
+    """把故事大纲/人物小传前置区标成 outline：只做机械边界识别。"""
+    active = False
+    for seg in segments:
+        first_line = _first_content_line(seg.text)
+        if not active:
+            if _OUTLINE_START_RE.match(first_line):
+                active = True
+                seg.type = "outline"
+                seg.rule_id = RULE_OUTLINE
+                seg.speaker = None
+            continue
+        if _OUTLINE_END_RE.match(first_line) or seg.type == "heading":
+            active = False
+            continue
+        seg.type = "outline"
+        seg.rule_id = RULE_OUTLINE
+        seg.speaker = None
+
+
 def parse_script(text: str) -> ParseResult:
     """全文解析：行级分类 + 覆盖校验。所有 segment 的 source_text 保留原始行（含换行），
     保证片段拼接可完整还原原文。"""
@@ -169,10 +202,16 @@ def parse_script(text: str) -> ParseResult:
     chapter_no = 0
     scene_no = 0
     pos = 0
+    # 有显式章节标题时，章节之前的标题/大纲/人物小传等前置内容不归属第1集。
+    has_explicit_chapter = any(_CHAPTER_RE.match(line.strip()) for line in lines)
 
     # narrative 合并缓冲
     buf = ""
     buf_start = 0
+    # 故事大纲独立缓冲：不进入 narrative，也不归属任何章节。
+    outline_active = False
+    outline_buf = ""
+    outline_start = 0
 
     def append_blank(pos_start: int, pos_end: int) -> None:
         """空白行 = 自然段边界：先落当前叙述缓冲，空行并入上一段尾部（保持原文还原）。
@@ -205,9 +244,25 @@ def parse_script(text: str) -> ParseResult:
             )
             buf = ""
 
+    def flush_outline(end: int) -> None:
+        nonlocal outline_buf
+        if outline_buf:
+            segments.append(
+                SegmentBlock(
+                    type="outline",
+                    text=outline_buf,
+                    start=outline_start,
+                    end=end,
+                    rule_id=RULE_OUTLINE,
+                    chapter_no=0,
+                    scene_no=0,
+                )
+            )
+            outline_buf = ""
+
     def ensure_chapter() -> None:
         nonlocal chapter_no
-        if chapter_no == 0:
+        if chapter_no == 0 and not has_explicit_chapter:
             chapter_no = 1
             chapters.append(ChapterBlock(no=1, title="", start=0, end=0, rule_id=RULE_OTHER))
 
@@ -215,6 +270,29 @@ def parse_script(text: str) -> ParseResult:
         line = raw_line.rstrip("\n")
         content = line.strip()
         ltype, rule, speaker = _classify_line(line)
+
+        if outline_active:
+            if ltype == "blank":
+                outline_buf += raw_line
+                pos += len(raw_line)
+                continue
+            if _OUTLINE_END_RE.match(content) or ltype == "heading":
+                flush_outline(pos)
+                outline_active = False
+                # 当前边界行（正文/章节/场景）继续走正常分类。
+            else:
+                outline_buf += raw_line
+                pos += len(raw_line)
+                continue
+
+        if _OUTLINE_START_RE.match(content):
+            flush_narrative(pos)
+            ensure_chapter()
+            outline_active = True
+            outline_start = pos
+            outline_buf = raw_line
+            pos += len(raw_line)
+            continue
 
         if ltype == "blank":
             append_blank(pos, pos + len(raw_line))
@@ -337,6 +415,8 @@ def parse_script(text: str) -> ParseResult:
         pos += len(raw_line)
 
     flush_narrative(pos)
+    flush_outline(pos)
+    _mark_outline_segments(segments)
 
     # 章节 end 补齐：下一章起点或文末
     for i, ch in enumerate(chapters):

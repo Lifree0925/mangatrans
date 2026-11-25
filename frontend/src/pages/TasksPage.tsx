@@ -22,7 +22,6 @@ const taskTypeLabel: Record<string, string> = {
   trial: "自动风格基线",
   knowledge: "知识提取",
   parse: "解析",
-  dialogue: "台词本抽取",
   scene_cards: "场景卡",
   qa: "质量检查",
   analyze: "分析",
@@ -41,10 +40,8 @@ const EXPRESS_STEPS = [
   { key: "knowledge", label: "知识提取（人物/术语）" },
   { key: "profiles", label: "角色档案" },
   { key: "storylines", label: "章节剧情卡" },
-  { key: "dialogue", label: "台词本抽取" },
   { key: "trial", label: "自动风格基线" },
   { key: "translation", label: "全文翻译" },
-  { key: "dialogue_align", label: "台词对齐" },
   { key: "qa", label: "自动质量检查" },
   { key: "approve", label: "自动定稿" },
 ];
@@ -123,24 +120,6 @@ function stepDetail(key: string, step: Record<string, unknown> | undefined): str
       const s = step as { generated?: number; failed?: number };
       if (s.generated == null) return "";
       return `已生成 ${s.generated} 章剧情卡${s.failed ? `（失败 ${s.failed} 章，不阻塞）` : ""}`;
-    }
-    case "dialogue": {
-      const s = step as { done_batches?: number; total_batches?: number; lines?: number; discarded?: number; failed_batches?: number; extracted?: number };
-      if (s.extracted != null) {
-        return `已抽取 ${s.extracted} 行台词${s.discarded ? `（弃用 ${s.discarded} 行）` : ""}`;
-      }
-      const parts = [
-        s.total_batches != null ? `进度 ${s.done_batches ?? 0} / ${s.total_batches} 批` : "",
-        s.lines != null ? `已识别 ${s.lines} 行` : "",
-        s.failed_batches ? `失败 ${s.failed_batches} 批（自动拆半重试）` : "",
-      ].filter(Boolean);
-      return parts.join(" · ");
-    }
-    case "dialogue_align": {
-      const s = step as { done?: number; total?: number; aligned?: number; total_lines?: number };
-      if (s.aligned != null) return `已对齐 ${s.aligned} / ${s.total_lines ?? 0} 句台词`;
-      if (s.total != null) return `对齐中 ${s.done ?? 0} / ${s.total} 段`;
-      return "";
     }
     case "trial": {
       const s = step as { windows?: number; style_guide_id?: string };
@@ -604,27 +583,6 @@ export default function TasksPage() {
                       <span>缓存输入 {cachedInput.toLocaleString()} tokens</span>
                       <span>未缓存输入 {uncachedInput.toLocaleString()} tokens</span>
                       <span>输出 {output.toLocaleString()} tokens</span>
-                    </div>
-                  );
-                })()}
-                {(() => {
-                  const quality = (t.progress as {
-                    quality?: {
-                      gate?: string; reason?: string; coverage_rate?: number;
-                      qa_coverage_rate?: number; term_consistency_rate?: number;
-                    };
-                  }).quality;
-                  if (!quality?.gate) return null;
-                  const metrics = [
-                    quality.coverage_rate != null ? `覆盖 ${quality.coverage_rate}%` : "",
-                    quality.qa_coverage_rate != null ? `质检覆盖 ${quality.qa_coverage_rate}%` : "",
-                    quality.term_consistency_rate != null ? `术语 ${quality.term_consistency_rate}%` : "",
-                  ].filter(Boolean).join(" · ");
-                  return (
-                    <div className={`mt-2 rounded-lg px-3 py-2 text-xs ${quality.gate === "passed" ? "bg-emerald-50 text-emerald-700" : "bg-amber-50 text-amber-700"}`}>
-                      自动质量门禁：{quality.gate === "passed" ? "通过" : "未通过"}
-                      {metrics ? ` · ${metrics}` : ""}
-                      {quality.reason ? ` · ${quality.reason}` : ""}
                     </div>
                   );
                 })()}

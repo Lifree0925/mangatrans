@@ -85,8 +85,9 @@ def project_quality_report(db: Session, project_id: str) -> dict:
     )
     if not segs:
         return {"gate": "blocked", "reason": "原文没有可翻译片段", "segments": 0, "translated": 0}
+    translatable = [s for s in segs if s.segment_type != "outline"]
     latest = _latest_polished(db, [s.id for s in segs])
-    missing = [s.id for s in segs if s.id not in latest]
+    missing = [s.id for s in translatable if s.id not in latest]
     stale = [sid for sid, tr in latest.items() if tr.freshness_status != "current"]
 
     # 结构完整性：逐段使用与翻译落库相同的硬校验，防止漏行/说话人/场景号错位。
@@ -120,7 +121,7 @@ def project_quality_report(db: Session, project_id: str) -> dict:
         ]
     )
     structural_errors: list[str] = []
-    for seg in segs:
+    for seg in translatable:
         tr = latest.get(seg.id)
         if tr is None:
             continue
@@ -146,6 +147,7 @@ def project_quality_report(db: Session, project_id: str) -> dict:
     ]
     validated = _validated_translation_ids(db, project_id)
     unverified = [t.id for t in latest.values() if t.id not in validated]
+    translated = sum(1 for s in translatable if s.id in latest)
 
     # 自动术语一致率：只用 exact 专名，不把普通名词/大小写/措辞偏好算成错误。
     term_expected = 0
@@ -155,7 +157,7 @@ def project_quality_report(db: Session, project_id: str) -> dict:
         from app.services.translation_batch import _forced_terms_for_text
 
         forced = _forced_terms_for_text(db, project_id, "".join(s.source_text for s in segs))
-        for seg in segs:
+        for seg in translatable:
             tr = latest.get(seg.id)
             if tr is None:
                 continue
@@ -193,16 +195,19 @@ def project_quality_report(db: Session, project_id: str) -> dict:
         "gate": gate,
         "reason": reason,
         "segments": len(segs),
-        "translated": len(latest),
+        "translatable_segments": len(translatable),
+        "outline_segments": len(segs) - len(translatable),
+        "translated": translated,
         "missing": len(missing),
         "stale": len(stale),
         "structural_errors": len(structural_errors),
         "structural_error_details": structural_errors[:20],
         "high_critical_issues": len(high_issues),
         "qa_unverified": len(unverified),
-        "coverage_rate": round((len(latest) / len(segs) * 100), 2) if segs else 100.0,
-        "qa_coverage_rate": round(((len(latest) - len(unverified)) / len(latest) * 100), 2)
-        if latest else 100.0,
+        "coverage_rate": round((translated / len(translatable) * 100), 2)
+        if translatable else 100.0,
+        "qa_coverage_rate": round(((translated - len(unverified)) / translated * 100), 2)
+        if translated else 100.0,
         "term_consistency_rate": round((term_hits / term_expected * 100), 2)
         if term_expected else 100.0,
         "term_exact_checks": term_expected,

@@ -20,7 +20,7 @@ from app.services.context_builder import ContextResult
 from app.services.term_match import expected_speakers, normalize
 from app.utils.token_budget import estimate_tokens
 
-PROMPT_VERSION = "v6"
+PROMPT_VERSION = "v7"
 
 _WINDOW_CONVERSATIONS: OrderedDict[tuple[str, str, str], dict] = OrderedDict()
 _WINDOW_CONVERSATIONS_LOCK = threading.Lock()
@@ -118,8 +118,17 @@ Finally return carry_over: forms_of_address, ongoing_state, open_threads, active
 Return ONLY the required JSON. No commentary or explanation."""
 
 POLISH_SYSTEM = """You are a professional Chinese-to-English screenplay translator and dialogue editor.
-This is the POLISH pass. Rewrite the faithful draft into natural, idiomatic screen English.
+This is the POLISH pass. Improve only what is necessary to make the faithful draft natural, idiomatic screen English.
 Only the SOURCE SEGMENTS block is source content to translate; all other blocks are reference material.
+
+NO-CHANGE DEFAULT (highest priority for lines that already work):
+- Treat a draft line as correct unless you can name a concrete defect: translationese, wrong speech act,
+  unnatural collocation, unplayable rhythm, or a fact/relationship/terminology error.
+- If a line is already faithful, natural and playable, copy it verbatim. Do not rewrite for taste,
+  variety, "more cinematic" flavor, or a different synonym.
+- Make the smallest edit that fixes the concrete defect. Never rewrite adjacent lines merely because
+  you touched one line in the segment.
+- A stylistic preference is not a defect. When in doubt, leave the draft unchanged.
 
 DRAFT IS A SEMANTIC ANCHOR, NOT A STYLE TEMPLATE:
 - The faithful draft is a fact checklist. Its wording, syntax and sentence shape are disposable.
@@ -226,8 +235,8 @@ VOICE AND ENGLISH:
 NATIVE DIALOGUE AUDIT (silent final pass before returning):
 - Read every spoken line as an actor would say it: is this the natural English speech order,
   rhythm and register for this person, relationship and immediate situation?
-- Check the line once more without looking at the draft. If the draft's sentence frame is still
-  visible, rewrite the line from the speech act rather than editing the draft.
+- Only revise a line that fails this audit. If the draft's Chinese sentence frame is still
+  visible, rebuild that one line from the speech act; do not rewrite adjacent lines that already pass.
 - Remove Chinese information order and explanatory clauses that only exist to make the source
   logic explicit. Native dialogue can imply what both speakers already know.
 - Prefer concrete verbs, contractions, idiomatic phrasing and short playable beats over
@@ -253,6 +262,18 @@ CONTINUITY AND TERMINOLOGY:
 Return ONLY the required JSON. No commentary."""
 
 
+REPAIR_SYSTEM = """You are a minimal-diff screenplay translation repairer.
+A QA pass has identified specific defects in specific segment_ids. Fix only those defects.
+
+REPAIR RULES:
+- Preserve every fact, character relationship, action, negation, condition, number, term and speech act.
+- Preserve every unaffected word and every line break. Do not restyle, summarize, shorten or embellish.
+- Do not perform a general polish or a native-dialogue audit. The rest of the window is already approved.
+- Keep speaker labels, scene numbers, △ markers, 【】 lines and (OS) cues on their original lines.
+- If a listed defect cannot be fixed without changing facts, leave the original text unchanged.
+- Return ONLY the requested JSON for the listed segment_ids. No other segment_ids and no commentary."""
+
+
 CONVERSATION_SYSTEM = """You are a professional Chinese-to-English screenplay translator working in a staged translation session.
 Follow the latest stage instruction in the user messages. The SOURCE SEGMENTS block is the only content to translate.
 Earlier assistant output may be the faithful draft for the current Polish stage; use it as the fact source.
@@ -265,7 +286,8 @@ POLISH_STAGE_INSTRUCTION = (
     "STAGE: POLISH\n\n"
     + POLISH_SYSTEM
     + "\n\nThe faithful draft JSON is the previous assistant message. "
-      "Rewrite that draft into natural screen English. Keep every segment_id and every fact. "
+      "Apply the no-change default: keep every line that already reads naturally and "
+      "fix only concrete defects. Keep every segment_id and every fact. "
       "Do not translate the project reference or repeat it in the output."
 )
 
@@ -674,10 +696,10 @@ async def repair_window(
         + (f"（建议：{i.get('suggested_fix')}）" if i.get("suggested_fix") else "")
         for i in issues[:12]
     )
-    fix_system = POLISH_SYSTEM + (
+    fix_system = REPAIR_SYSTEM + (
         "\n\nThe previous translation was rejected by QA with these issues:\n"
         + issue_block
-        + "\nRewrite the translations to fix EVERY issue above. Keep all correct parts. Return ONLY the required JSON."
+        + "\nFix EVERY listed issue with the smallest possible change. Keep all correct parts verbatim. Return ONLY the required JSON."
     )
     draft_block = "\n\n[FAITHFUL DRAFT]\n" + json.dumps(draft, ensure_ascii=False, indent=2)
     polish = await _chat_json_validate(
@@ -1061,9 +1083,9 @@ async def repair_segments(
         + ", ".join(target)
         + ". Do NOT output any other segment. Keep all other segments unchanged. Return ONLY the required JSON."
     )
-    system = POLISH_SYSTEM + (
+    system = REPAIR_SYSTEM + (
         "\n\nYou are REPAIRING only the listed segments flagged by QA. "
-        "Fix every issue for those segments while keeping their facts identical to the draft."
+        "Change only what is necessary to fix the listed defects; preserve all other wording."
     )
     # 修复通常只涉及少量问题段：给够译文与思考预算，但不固定申请 32K，
     # 避免小上下文模型因 prompt + max_tokens 超过上限而永久失败。

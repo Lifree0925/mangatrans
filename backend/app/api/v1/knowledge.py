@@ -5,8 +5,7 @@ from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
-from app.models.dialogue import DialogueLine
-from app.models.document import Chapter, SourceDocument
+from app.models.document import Chapter, SourceDocument, SourceSegment
 from app.models.knowledge import KnowledgeAlias, KnowledgeEvidence, KnowledgeItem, SceneContextCard
 from app.models.project import Project
 from app.models.storyline import ChapterStoryline
@@ -37,20 +36,13 @@ def knowledge_overview(db: Session = Depends(get_db)) -> dict:
             .group_by(ChapterStoryline.project_id)
         ).all()
     }
-    line_counts = {
-        pid: int(n)
-        for pid, n in db.execute(
-            select(DialogueLine.project_id, func.count()).group_by(DialogueLine.project_id)
-        ).all()
-    }
     docs = {d.id: d for d in db.scalars(select(SourceDocument))}
 
     items = []
     for p in projects:
         counts = kind_counts.get(p.id, {})
         storylines = story_counts.get(p.id, 0)
-        dialogue = line_counts.get(p.id, 0)
-        if not counts and not storylines and not dialogue:
+        if not counts and not storylines:
             continue  # 无知识库数据的项目不显示（入口自动生成）
         doc = docs.get(p.active_source_document_id) if p.active_source_document_id else None
         items.append({
@@ -61,7 +53,6 @@ def knowledge_overview(db: Session = Depends(get_db)) -> dict:
             "terms": counts.get("term", 0),
             "rules": counts.get("rule", 0),
             "storylines": storylines,
-            "dialogue_lines": dialogue,
             "updated_at": p.updated_at.isoformat() if p.updated_at else None,
         })
     return {"items": items}
@@ -111,32 +102,20 @@ def list_knowledge(project_id: str, db: Session = Depends(get_db)) -> list[dict]
     """知识条目列表：角色按剧本出现次数降序，其余按更新时间。"""
     from sqlalchemy import func as _func
 
-    from app.models.dialogue import DialogueLine
-
     _project(db, project_id)
     items = list(
         db.scalars(
             select(KnowledgeItem).where(KnowledgeItem.project_id == project_id)
         )
     )
-    # 角色出现次数：台词本说话人计数（无台词本时回退片段说话人计数）
+    # 角色出现次数：直接按原文片段的说话人统计，避免维护重复的台词本表。
     speak_counts: dict[str, int] = dict(
         db.execute(
-            select(DialogueLine.speaker_name, _func.count())
-            .where(DialogueLine.project_id == project_id)
-            .group_by(DialogueLine.speaker_name)
+            select(SourceSegment.speaker_name, _func.count())
+            .where(SourceSegment.project_id == project_id, SourceSegment.speaker_name.is_not(None))
+            .group_by(SourceSegment.speaker_name)
         ).all()
     )
-    if not speak_counts:
-        from app.models.document import SourceSegment
-
-        speak_counts = dict(
-            db.execute(
-                select(SourceSegment.speaker_name, _func.count())
-                .where(SourceSegment.project_id == project_id, SourceSegment.speaker_name.is_not(None))
-                .group_by(SourceSegment.speaker_name)
-            ).all()
-        )
 
     def occ(item: KnowledgeItem) -> int:
         n = speak_counts.get(item.canonical_key, 0)
@@ -164,6 +143,17 @@ def list_knowledge(project_id: str, db: Session = Depends(get_db)) -> list[dict]
     ordered = chars + others
 
     def dump(i: KnowledgeItem) -> dict:
+        effective_policy = None
+        if i.item_type == "term":
+            import json as _json
+
+            from app.services.term_match import enforcement_for
+
+            try:
+                data = _json.loads(i.data_json or "{}")
+            except Exception:  # noqa: BLE001 损坏数据不阻塞列表
+                data = {}
+            effective_policy = enforcement_for(i.canonical_key, data)
         return {
             "id": i.id,
             "item_type": i.item_type,
@@ -173,6 +163,7 @@ def list_knowledge(project_id: str, db: Session = Depends(get_db)) -> list[dict]
             "source": i.source,
             "version": i.version,
             "occurrence_count": occ(i) if i.item_type == "character" else None,
+            "effective_policy": effective_policy,
         }
 
     return [dump(i) for i in ordered]
@@ -237,7 +228,7 @@ def delete_knowledge(project_id: str, item_id: str, db: Session = Depends(get_db
 
 @router.delete("/knowledge", status_code=204)
 def delete_all_knowledge(project_id: str, db: Session = Depends(get_db)) -> None:
-    """硬删除项目全部知识库数据（角色/术语/规则、别名/证据、场景卡、章节剧情、台词本）。
+    """硬删除项目全部知识库数据（角色/术语/规则、别名/证据、场景卡、章节剧情）。
 
     保留项目、原文、译文与任务记录；重新一键直出可再次生成。
     """
@@ -248,7 +239,6 @@ def delete_all_knowledge(project_id: str, db: Session = Depends(get_db)) -> None
     db.execute(delete(KnowledgeItem).where(KnowledgeItem.project_id == project_id))
     db.execute(delete(SceneContextCard).where(SceneContextCard.project_id == project_id))
     db.execute(delete(ChapterStoryline).where(ChapterStoryline.project_id == project_id))
-    db.execute(delete(DialogueLine).where(DialogueLine.project_id == project_id))
     db.commit()
 
 

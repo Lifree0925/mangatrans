@@ -1,4 +1,4 @@
-/** 知识库：角色档案（性格/说话方式）与章节剧情卡（情节/伏笔）。修改均通过浮层完成。 */
+/** 知识库：角色档案、术语表、章节剧情与人物状态。修改均通过浮层完成。 */
 
 import { startTransition, useEffect, useRef, useState } from "react";
 import { Link, useParams } from "react-router-dom";
@@ -7,7 +7,7 @@ import { Check, ChevronLeft, ChevronRight, Loader2, Pencil, Plus, Trash2, X } fr
 import { api } from "../lib/api";
 import { chapterLabel, characterDisplayName } from "../lib/format";
 import { confirmAction, toast } from "../lib/feedback";
-import type { ChapterStoryline, DialogueLineInfo, DialogueLinesResponse, KnowledgeEntry, Project } from "../lib/types";
+import type { ChapterStoryline, KnowledgeEntry, Project } from "../lib/types";
 
 type StoryCard = {
   summary: string;
@@ -66,6 +66,25 @@ const FACT_LABELS: Record<string, string> = {
   address: "称呼",
 };
 
+const TERM_KIND_LABELS: Record<string, string> = {
+  proper_name: "专名",
+  title: "头衔",
+  place: "地点",
+  location: "地点",
+  item: "设定物",
+  common_noun: "普通名词",
+  species: "物种",
+  group: "群体",
+  concept: "概念",
+};
+
+const TERM_STATUS_LABELS: Record<string, string> = {
+  auto_approved: "自动启用",
+  approved: "已启用",
+  candidate: "候选",
+  rejected: "已忽略",
+};
+
 const STORY_FIELDS = [
   { key: "summary", label: "摘要" },
   { key: "key_events", label: "重要情节" },
@@ -77,7 +96,7 @@ export default function KnowledgePage() {
   const qc = useQueryClient();
   // 项目由路由显式指定（/knowledge/:projectId），不再使用下拉切换
   const { projectId } = useParams<{ projectId: string }>();
-  const [tab, setTab] = useState<"profiles" | "storylines" | "states" | "dialogue">("profiles");
+  const [tab, setTab] = useState<"profiles" | "terms" | "storylines" | "states">("profiles");
   const [adding, setAdding] = useState(false);
   const [addForm, setAddForm] = useState({ canonical_key: "", translation: "" });
 
@@ -85,25 +104,27 @@ export default function KnowledgePage() {
   const [editingChar, setEditingChar] = useState<KnowledgeEntry | null>(null);
   const [charDraft, setCharDraft] = useState({ translation: "", personality: "", speech_style: "", forms_of_address: "", emotional_range: "" });
 
+  // 术语表
+  const [termAdding, setTermAdding] = useState(false);
+  const [termAddForm, setTermAddForm] = useState({ canonical_key: "", translation: "" });
+  const [editingTerm, setEditingTerm] = useState<KnowledgeEntry | null>(null);
+  const [termDraft, setTermDraft] = useState({
+    translation: "",
+    term_kind: "proper_name",
+    enforcement: "exact",
+    variants: "",
+    status: "approved",
+  });
+
   // 剧情卡编辑浮层
   const [editingStory, setEditingStory] = useState<ChapterStoryline | null>(null);
   const [storyDraft, setStoryDraft] = useState<StoryCard>({ summary: "", key_events: [], foreshadowing: [], prior_deps: [], character_states: {} });
   const [storyActiveField, setStoryActiveField] = useState<(typeof STORY_FIELDS)[number]["key"]>("summary");
   const [storyFieldText, setStoryFieldText] = useState("");
 
-  // 台词编辑：复用项目页编辑模式（铅笔 → 原文/译文 → 浮层）
-  const [editingLine, setEditingLine] = useState<{ line: DialogueLineInfo; side: "source" | "target" } | null>(null);
-  const [lineDraft, setLineDraft] = useState({ speaker_name: "", source_text: "", target_text: "" });
-  const [lineMenuFor, setLineMenuFor] = useState<string | null>(null);
-  const [lineMenuPos, setLineMenuPos] = useState<{ x: number; y: number } | null>(null);
-  // 台词本目录栏（可收起）与滚动高亮
-  const [dialogueCollapsed, setDialogueCollapsed] = useState(false);
-  const [dialogueActiveChapter, setDialogueActiveChapter] = useState<string | null>(null);
-  const dialogueBodyRef = useRef<HTMLDivElement | null>(null);
   const storyAnchorsRef = useRef<{ top: number; chapterId: string }[]>([]);
-  const dialogueAnchorsRef = useRef<{ top: number; chapterId: string }[]>([]);
   const [charGroup, setCharGroup] = useState<"major" | "minor">("major");
-  // 章节剧情目录栏（与台词本同款）
+  // 章节剧情目录栏
   const [storyCollapsed, setStoryCollapsed] = useState(false);
   const [storyActiveChapter, setStoryActiveChapter] = useState<string | null>(null);
   const storyBodyRef = useRef<HTMLDivElement | null>(null);
@@ -119,6 +140,12 @@ export default function KnowledgePage() {
     queryKey: ["knowledge", active],
     queryFn: () => api<KnowledgeEntry[]>(`/projects/${active}/knowledge`),
     enabled: !!active && tab === "profiles",
+    refetchInterval: 8000,
+  });
+  const terms = useQuery({
+    queryKey: ["knowledge", active],
+    queryFn: () => api<KnowledgeEntry[]>(`/projects/${active}/knowledge`),
+    enabled: !!active && tab === "terms",
     refetchInterval: 8000,
   });
   const storylines = useQuery({
@@ -184,6 +211,46 @@ export default function KnowledgePage() {
     onError: (err) => toast.error(`添加失败：${String(err)}`),
   });
 
+  const patchTerm = useMutation({
+    mutationFn: ({ id, body }: { id: string; body: Record<string, unknown> }) =>
+      api(`/projects/${active}/knowledge/${id}`, { method: "PATCH", body: JSON.stringify(body) }),
+    onSuccess: (r: unknown) => {
+      const result = r as { stale_translations?: number };
+      qc.invalidateQueries({ queryKey: ["knowledge", active] });
+      setEditingTerm(null);
+      toast.success(result.stale_translations ? `已保存，${result.stale_translations} 条译文标记待重译` : "已保存");
+    },
+    onError: (err) => toast.error(`保存失败：${String(err)}`),
+  });
+
+  const addTerm = useMutation({
+    mutationFn: () => api(`/projects/${active}/knowledge`, {
+      method: "POST",
+      body: JSON.stringify({
+        item_type: "term",
+        canonical_key: termAddForm.canonical_key.trim(),
+        translation: termAddForm.translation.trim(),
+        status: "approved",
+      }),
+    }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["knowledge", active] });
+      setTermAdding(false);
+      setTermAddForm({ canonical_key: "", translation: "" });
+      toast.success("术语已添加");
+    },
+    onError: (err) => toast.error(`添加失败：${String(err)}`),
+  });
+
+  const removeTerm = useMutation({
+    mutationFn: (id: string) => api(`/projects/${active}/knowledge/${id}`, { method: "DELETE" }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["knowledge", active] });
+      toast.success("术语已删除");
+    },
+    onError: (err) => toast.error(`删除失败：${String(err)}`),
+  });
+
   const patchStoryline = useMutation({
     mutationFn: ({ id, card }: { id: string; card: StoryCard }) =>
       api(`/projects/${active}/storylines/${id}`, { method: "PATCH", body: JSON.stringify({ card }) }),
@@ -197,13 +264,6 @@ export default function KnowledgePage() {
     onError: (err) => toast.error(`保存失败：${String(err)}`),
   });
 
-  const dialogueLines = useQuery({
-    queryKey: ["dialogue-lines", active],
-    queryFn: () => api<DialogueLinesResponse>(`/projects/${active}/dialogue-lines`),
-    enabled: !!active && tab === "dialogue",
-    refetchInterval: 10000,
-  });
-
   useEffect(() => {
     const sc = storyBodyRef.current;
     if (sc) {
@@ -212,43 +272,7 @@ export default function KnowledgePage() {
         storyAnchorsRef.current.push({ top: el.offsetTop, chapterId: el.dataset.storyChapter ?? "" });
       });
     }
-    const dc = dialogueBodyRef.current;
-    if (dc) {
-      dialogueAnchorsRef.current = [];
-      dc.querySelectorAll<HTMLElement>("[data-dlg-chapter]").forEach((el) => {
-        dialogueAnchorsRef.current.push({ top: el.offsetTop, chapterId: el.dataset.dlgChapter ?? "" });
-      });
-    }
-  }, [storylines.data, dialogueLines.data, tab]);
-  const patchDialogueLine = useMutation({
-    mutationFn: ({ id, body }: { id: string; body: Record<string, unknown> }) =>
-      api(`/projects/${active}/dialogue-lines/${id}`, { method: "PATCH", body: JSON.stringify(body) }),
-    onSuccess: (r: unknown) => {
-      const res = r as { wrote_back?: boolean; warning?: string | null };
-      qc.invalidateQueries({ queryKey: ["dialogue-lines", active] });
-      setEditingLine(null);
-      if (res.wrote_back) toast.success("已保存，片段原文已同步更新，译文标记待重译");
-      else if (res.warning) toast.success("已保存（" + res.warning + "）");
-      else toast.success("已保存");
-    },
-    onError: (err) => toast.error(`保存失败：${String(err)}`),
-  });
-
-  const patchSegmentTranslation = useMutation({
-    mutationFn: ({ segmentId, targetText }: { segmentId: string; targetText: string }) =>
-      api(`/projects/${active}/segments/${segmentId}/translations`, {
-        method: "POST",
-        body: JSON.stringify({ target_text: targetText }),
-      }),
-    onSuccess: () => {
-      toast.success("译文已保存（新增校对版本）");
-      qc.invalidateQueries({ queryKey: ["dialogue-lines", active] });
-      qc.invalidateQueries({ queryKey: ["segments", active] });
-      qc.invalidateQueries({ queryKey: ["latest-translations", active] });
-      setEditingLine(null);
-    },
-    onError: (err) => toast.error(`译文保存失败：${String(err)}`),
-  });
+  }, [storylines.data]);
 
   const parseStory = (json: string): StoryCard => {
     try { return JSON.parse(json); } catch { return { summary: "", key_events: [], foreshadowing: [], prior_deps: [], character_states: {} }; }
@@ -287,6 +311,46 @@ export default function KnowledgePage() {
         },
       },
     });
+  };
+
+  const openTermEdit = (k: KnowledgeEntry) => {
+    const data = (() => { try { return JSON.parse(k.data_json || "{}"); } catch { return {}; } })();
+    setEditingTerm(k);
+    setTermDraft({
+      translation: data.translation || "",
+      term_kind: data.term_kind || "proper_name",
+      enforcement: data.enforcement || k.effective_policy || "contextual",
+      variants: (data.variants || []).join(" / "),
+      status: k.status || "approved",
+    });
+  };
+
+  const saveTermEdit = () => {
+    if (!editingTerm) return;
+    const data = (() => { try { return JSON.parse(editingTerm.data_json || "{}"); } catch { return {}; } })();
+    patchTerm.mutate({
+      id: editingTerm.id,
+      body: {
+        status: termDraft.status,
+        data: {
+          ...data,
+          translation: termDraft.translation.trim(),
+          term_kind: termDraft.term_kind,
+          enforcement: termDraft.enforcement,
+          variants: termDraft.variants.split(/[,，\n]/).map((x) => x.trim()).filter(Boolean),
+        },
+      },
+    });
+  };
+
+  const confirmRemoveTerm = async (name: string, id: string) => {
+    const ok = await confirmAction("删除术语", `确定删除「${name}」？相关译文会标记待重译。`, true);
+    if (ok) removeTerm.mutate(id);
+  };
+
+  const submitTermAdd = () => {
+    if (!termAddForm.canonical_key.trim() || !termAddForm.translation.trim()) return;
+    addTerm.mutate();
   };
 
   const openStoryEdit = (s: ChapterStoryline) => {
@@ -344,6 +408,12 @@ export default function KnowledgePage() {
             角色档案
           </button>
           <button
+            onClick={() => setTab("terms")}
+            className={`rounded-lg px-3 py-1 text-sm ${tab === "terms" ? "bg-(--color-panel2) font-medium" : "text-(--color-muted) hover:bg-(--color-panel)"}`}
+          >
+            术语表
+          </button>
+          <button
             onClick={() => setTab("storylines")}
             className={`rounded-lg px-3 py-1 text-sm ${tab === "storylines" ? "bg-(--color-panel2) font-medium" : "text-(--color-muted) hover:bg-(--color-panel)"}`}
           >
@@ -355,12 +425,6 @@ export default function KnowledgePage() {
           >
             人物状态
           </button>
-          <button
-            onClick={() => setTab("dialogue")}
-            className={`rounded-lg px-3 py-1 text-sm ${tab === "dialogue" ? "bg-(--color-panel2) font-medium" : "text-(--color-muted) hover:bg-(--color-panel)"}`}
-          >
-            台词本
-          </button>
         </div>
 
         {tab === "profiles" && (
@@ -371,11 +435,19 @@ export default function KnowledgePage() {
             <Plus size={15} /> 添加角色
           </button>
         )}
+        {tab === "terms" && (
+          <button
+            onClick={() => setTermAdding((v) => !v)}
+            className="ml-auto flex items-center gap-1.5 rounded-lg bg-(--color-accent) px-3 py-1.5 text-sm text-white hover:bg-(--color-accent-hover)"
+          >
+            <Plus size={15} /> 添加术语
+          </button>
+        )}
       </div>
 
-      <div className={(tab === "dialogue" || tab === "storylines") && active ? "flex-1 overflow-hidden" : "toc-hide-scroll flex-1 overflow-auto p-4"}>
+      <div className={tab === "storylines" && active ? "flex-1 overflow-hidden" : "toc-hide-scroll flex-1 overflow-auto p-4"}>
         {!active ? null : (
-        <div className={tab === "dialogue" || tab === "storylines" ? "h-full" : "mx-auto max-w-5xl"}>
+        <div className={tab === "storylines" ? "h-full" : "mx-auto max-w-5xl"}>
           {tab === "profiles" && (
             <>
               {adding && (
@@ -518,6 +590,99 @@ export default function KnowledgePage() {
                 )}
             </>
           )}
+
+          {tab === "terms" && (() => {
+            const rows = (terms.data ?? []).filter((k) => k.item_type === "term");
+            const policyLabel = (policy?: string | null) =>
+              policy === "exact" ? "强制" : policy === "lexical" ? "词形" : "参考";
+            return (
+              <div className="space-y-3">
+                {termAdding && (
+                  <div className="flex items-center gap-2 rounded-xl border border-(--color-accent) bg-(--color-panel) px-4 py-2.5">
+                    <input
+                      value={termAddForm.canonical_key}
+                      onChange={(e) => setTermAddForm((f) => ({ ...f, canonical_key: e.target.value }))}
+                      placeholder="原文术语"
+                      className="w-52 rounded-lg border border-(--color-border) bg-(--color-bg) px-2 py-1 text-sm outline-none focus:border-(--color-accent)"
+                    />
+                    <input
+                      value={termAddForm.translation}
+                      onChange={(e) => setTermAddForm((f) => ({ ...f, translation: e.target.value }))}
+                      placeholder="标准英文译名"
+                      className="w-60 rounded-lg border border-(--color-border) bg-(--color-bg) px-2 py-1 font-mono text-sm outline-none focus:border-(--color-accent)"
+                    />
+                    <button
+                      onClick={submitTermAdd}
+                      disabled={!termAddForm.canonical_key.trim() || !termAddForm.translation.trim() || addTerm.isPending}
+                      className="flex items-center gap-1 rounded-lg bg-(--color-accent) px-2.5 py-1 text-xs text-white disabled:opacity-40"
+                    >
+                      <Check size={13} /> 保存
+                    </button>
+                    <button onClick={() => setTermAdding(false)} className="rounded-lg border border-(--color-border) px-2.5 py-1 text-xs hover:bg-(--color-panel2)">取消</button>
+                  </div>
+                )}
+                {!terms.isFetchedAfterMount && (
+                  <div className="flex justify-center py-16 text-(--color-muted)"><Loader2 size={22} className="animate-spin" /></div>
+                )}
+                {terms.isFetchedAfterMount && terms.isError && (
+                  <p className="py-8 text-center text-sm text-(--color-muted)">术语表加载失败</p>
+                )}
+                {terms.isFetchedAfterMount && !terms.isError && rows.length > 0 && (
+                  <div className="overflow-x-auto rounded-xl border border-(--color-border) bg-(--color-panel)">
+                    <table className="w-full min-w-[680px] text-left text-sm">
+                      <thead className="border-b border-(--color-border) text-xs text-(--color-muted)">
+                        <tr>
+                          <th className="px-4 py-2 font-medium">原文</th>
+                          <th className="px-4 py-2 font-medium">标准译名</th>
+                          <th className="px-4 py-2 font-medium">类型</th>
+                          <th className="px-4 py-2 font-medium">策略</th>
+                          <th className="px-4 py-2 font-medium">状态</th>
+                          <th className="w-20 px-4 py-2 font-medium">操作</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {rows.map((k) => {
+                          const data = (() => { try { return JSON.parse(k.data_json || "{}"); } catch { return {}; } })();
+                          const conflicts = Array.isArray(data.translation_conflicts) ? data.translation_conflicts : [];
+                          return (
+                            <tr key={k.id} className="border-b border-(--color-border) last:border-0">
+                              <td className="px-4 py-2.5">
+                                <span className="font-medium">{k.canonical_key}</span>
+                                {conflicts.length > 0 && (
+                                  <p className="mt-0.5 text-[11px] text-amber-600">冲突：{conflicts.join(" / ")}</p>
+                                )}
+                              </td>
+                              <td className="px-4 py-2.5 font-mono text-xs text-(--color-accent)">{data.translation || "—"}</td>
+                              <td className="px-4 py-2.5 text-xs text-(--color-muted)">{TERM_KIND_LABELS[data.term_kind] || data.term_kind || "—"}</td>
+                              <td className="px-4 py-2.5">
+                                <span className={`rounded-md px-1.5 py-0.5 text-[11px] ${(k.effective_policy || data.enforcement) === "exact" ? "bg-amber-100 text-amber-700" : "bg-(--color-panel2) text-(--color-muted)"}`}>
+                                  {policyLabel(k.effective_policy || data.enforcement)}
+                                </span>
+                              </td>
+                              <td className="px-4 py-2.5 text-xs text-(--color-muted)">{TERM_STATUS_LABELS[k.status] || k.status}</td>
+                              <td className="px-4 py-2.5">
+                                <div className="flex items-center gap-1">
+                                  <button onClick={() => openTermEdit(k)} className="rounded p-1.5 text-(--color-muted) hover:text-(--color-accent)" title="编辑术语">
+                                    <Pencil size={14} />
+                                  </button>
+                                  <button onClick={() => confirmRemoveTerm(k.canonical_key, k.id)} className="rounded p-1.5 text-(--color-muted) hover:text-red-600" title="删除术语">
+                                    <Trash2 size={14} />
+                                  </button>
+                                </div>
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+                {terms.isFetchedAfterMount && !terms.isError && rows.length === 0 && (
+                  <p className="py-8 text-center text-sm text-(--color-muted)">暂无术语（一键直出会自动提取，或手动添加）</p>
+                )}
+              </div>
+            );
+          })()}
 
           {tab === "storylines" && (
           <div className="relative flex h-full">
@@ -721,184 +886,76 @@ export default function KnowledgePage() {
             </div>
           )}
 
-          {tab === "dialogue" && (
-          <div className="relative flex h-full">
-            {/* 章节目录（可收起） */}
-            {!dialogueCollapsed && (
-              <div className="toc-hide-scroll w-[179px] shrink-0 overflow-auto py-3">
-                <p className="mb-1 px-3 text-xs font-medium text-(--color-muted)">章节目录</p>
-                {(dialogueLines.data?.chapters ?? []).map((ch: { chapter_id: string | null; chapter_no: number | null; chapter_title: string | null; scenes: { scene_id: string | null; scene_no: number | null; scene_heading: string | null; lines: DialogueLineInfo[] }[] }) => (
-                  <button
-                    key={ch.chapter_id}
-                    onClick={() => {
-                      const el = dialogueBodyRef.current?.querySelector<HTMLElement>(`[data-dlg-chapter="${ch.chapter_id}"]`);
-                      el?.scrollIntoView({ behavior: "smooth", block: "start" });
-                    }}
-                    className={`block w-full truncate rounded-lg px-3 py-1.5 text-left text-sm transition-colors hover:text-(--color-accent) ${
-                      dialogueActiveChapter === ch.chapter_id
-                        ? "font-medium text-(--color-accent)"
-                        : "text-(--color-text)"
-                    }`}
-                    title={chapterLabel(ch.chapter_no, ch.chapter_title)}
-                  >
-                    {chapterLabel(ch.chapter_no, ch.chapter_title)}
-                  </button>
-                ))}
-                {dialogueLines.isFetchedAfterMount && !dialogueLines.isError && (dialogueLines.data?.chapters ?? []).length === 0 && (
-                  <p className="px-3 py-4 text-xs text-(--color-muted)">
-                    暂无台词本。一键直出时会自动抽取章节 → 场景 → 角色的纯对白流水并逐句对齐译文。
-                  </p>
-                )}
-              </div>
-            )}
-            {/* 收展箭头：贴线、无圆框 */}
-            <div
-              className={`relative w-4 shrink-0 ${dialogueCollapsed ? "" : "border-r border-(--color-border)"}`}
-            >
-              <button
-                onClick={() => setDialogueCollapsed((v) => !v)}
-                title={dialogueCollapsed ? "展开章节目录" : "收起章节目录"}
-                className={`absolute top-1/2 -translate-y-1/2 cursor-pointer text-(--color-muted) hover:text-(--color-accent) ${
-                  dialogueCollapsed ? "left-0.5" : "right-0"
-                }`}
-              >
-                {dialogueCollapsed ? <ChevronRight size={15} /> : <ChevronLeft size={15} />}
-              </button>
-            </div>
-            {/* 内容区：章节 → 场景 → 角色纯对白（上下中英对照，编辑复用项目页模式） */}
-            <div
-              ref={dialogueBodyRef}
-              onScroll={() => {
-                const c = dialogueBodyRef.current;
-                if (!c) return;
-                const st = c.scrollTop;
-                let current: string | null = null;
-                for (const a of dialogueAnchorsRef.current) {
-                  if (a.top >= st) {
-                    current = a.chapterId;
-                    break;
-                  }
-                }
-                startTransition(() => setDialogueActiveChapter(current));
-              }}
-              className="relative flex-1 overflow-auto p-4 font-mono text-[13px] leading-6"
-            >
-              {(dialogueLines.data?.chapters ?? []).map((ch: { chapter_id: string | null; chapter_no: number | null; chapter_title: string | null; scenes: { scene_id: string | null; scene_no: number | null; scene_heading: string | null; lines: DialogueLineInfo[] }[] }) => (
-                <div key={ch.chapter_id} data-dlg-chapter={ch.chapter_id} className="mx-auto max-w-4xl">
-                  <h3 className="mb-1 mt-2 text-base font-bold">
-                    {chapterLabel(ch.chapter_no, ch.chapter_title)}
-                  </h3>
-                  {ch.scenes.map((sc: { scene_id: string | null; scene_no: number | null; scene_heading: string | null; lines: DialogueLineInfo[] }) => (
-                    <div key={sc.scene_id} className="mb-3">
-                      {sc.scene_heading && (
-                        <p className="mb-1 mt-3 text-xs text-(--color-muted)">
-                          {String(sc.scene_heading).replace(/^#\s*/, "")}
-                        </p>
-                      )}
-                      {sc.lines.map((ln: DialogueLineInfo) => (
-                        <div
-                          key={ln.id}
-                          className="group relative border-b border-(--color-border) py-2 pr-8"
-                          onMouseLeave={() => {
-                            if (lineMenuFor === ln.id) {
-                              setLineMenuFor(null);
-                              setLineMenuPos(null);
-                            }
-                          }}
-                        >
-                          <button
-                            onClick={(e) => {
-                              if (lineMenuFor === ln.id) {
-                                setLineMenuFor(null);
-                                setLineMenuPos(null);
-                              } else {
-                                const rect = (e.currentTarget as HTMLButtonElement).getBoundingClientRect();
-                                const menuW = 50;
-                                const menuH = 76;
-                                const x = rect.right + 6 + menuW > window.innerWidth
-                                  ? rect.left - menuW - 6
-                                  : rect.right + 6;
-                                const y = rect.top + menuH > window.innerHeight
-                                  ? Math.max(8, rect.bottom - menuH)
-                                  : rect.top;
-                                setLineMenuFor(ln.id);
-                                setLineMenuPos({ x: Math.max(8, x), y });
-                              }
-                            }}
-                            title="编辑本行"
-                            className="absolute right-1 top-0.5 hidden p-0.5 text-(--color-muted) hover:text-(--color-accent) group-hover:block"
-                          >
-                            <Pencil size={14} />
-                          </button>
-                          {lineMenuFor === ln.id && lineMenuPos && (
-                            <div
-                              className="fixed z-[80] flex flex-col overflow-hidden rounded-lg border border-(--color-border) bg-(--color-bg) py-1 shadow-xl"
-                              style={{ left: lineMenuPos.x, top: lineMenuPos.y }}
-                            >
-                              <button
-                                onClick={() => {
-                                  setLineMenuFor(null);
-                                  setEditingLine({ line: ln, side: "source" });
-                                  setLineDraft({ speaker_name: ln.speaker_name, source_text: ln.source_text, target_text: "" });
-                                }}
-                                className="whitespace-nowrap px-3 py-1.5 text-left text-xs hover:bg-(--color-panel)"
-                              >
-                                原文
-                              </button>
-                              <button
-                                onClick={() => {
-                                  setLineMenuFor(null);
-                                  setEditingLine({ line: ln, side: "target" });
-                                  setLineDraft({ speaker_name: ln.speaker_name, source_text: ln.source_text, target_text: ln.segment_translation ?? "" });
-                                }}
-                                className="whitespace-nowrap px-3 py-1.5 text-left text-xs hover:bg-(--color-panel)"
-                              >
-                                译文
-                              </button>
-                            </div>
-                          )}
-                          {/* 原文行 */}
-                          <p className="whitespace-pre-wrap transition-colors group-hover:text-(--color-accent)">
-                            <span className="mr-2 font-medium text-(--color-accent)">
-                              {ln.speaker_name}
-                              {ln.speaker_alias && ln.speaker_alias !== ln.speaker_name && (
-                                <span className="ml-1 font-normal text-(--color-muted)">({ln.speaker_alias})</span>
-                              )}
-                              ：
-                            </span>
-                            {ln.source_text}
-                          </p>
-                          {/* 译文行：逐句对齐译文优先，无则回退片段译文 */}
-                          <p className="mt-0.5 whitespace-pre-wrap pl-4 text-(--color-muted) transition-colors group-hover:text-(--color-accent)">
-                            {ln.target_text ?? ln.segment_translation ?? "—"}
-                          </p>
-                        </div>
-                      ))}
-                    </div>
-                  ))}
-                </div>
-              ))}
-              {dialogueLines.isFetchedAfterMount && !dialogueLines.isError && (dialogueLines.data?.chapters ?? []).length === 0 && (
-                <p className="py-8 text-center text-sm text-(--color-muted)">
-                  暂无台词本。一键直出时会自动抽取章节 → 场景 → 角色的纯对白流水并逐句对齐译文。
-                </p>
-              )}
-            </div>
-            {!dialogueLines.isFetchedAfterMount && (
-              <div className="pointer-events-none absolute inset-0 flex items-center justify-center text-(--color-muted)">
-                <Loader2 size={22} className="animate-spin" />
-              </div>
-            )}
-            {dialogueLines.isFetchedAfterMount && dialogueLines.isError && (
-              <div className="absolute inset-0 flex items-center justify-center text-sm text-(--color-muted)">
-                台词本加载失败
-              </div>
-            )}
-          </div>
-          )}
         </div>
         )}
       </div>
+
+      {/* 术语编辑浮层 */}
+      {editingTerm && (() => {
+        const data = (() => { try { return JSON.parse(editingTerm.data_json || "{}"); } catch { return {}; } })();
+        const conflicts = Array.isArray(data.translation_conflicts) ? data.translation_conflicts : [];
+        return (
+          <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/30 p-6" onClick={() => setEditingTerm(null)}>
+            <div className="flex w-full max-w-lg flex-col rounded-2xl bg-(--color-bg) p-5 shadow-2xl" onClick={(e) => e.stopPropagation()}>
+              <div className="flex items-center justify-between">
+                <h2 className="text-base font-semibold">编辑术语 · {editingTerm.canonical_key}</h2>
+                <button onClick={() => setEditingTerm(null)} className="rounded-lg p-1.5 text-(--color-muted) hover:bg-(--color-panel2)"><X size={16} /></button>
+              </div>
+              {conflicts.length > 0 && (
+                <p className="mt-3 rounded-lg bg-amber-50 px-3 py-2 text-xs text-amber-700">发现译名冲突：{conflicts.join(" / ")}</p>
+              )}
+              <div className="mt-4 space-y-3">
+                <label className="block text-xs text-(--color-muted)">
+                  标准译名
+                  <input value={termDraft.translation} onChange={(e) => setTermDraft((d) => ({ ...d, translation: e.target.value }))}
+                    className="mt-1 block w-full rounded-lg border border-(--color-border) bg-(--color-bg) px-3 py-1.5 font-mono text-sm outline-none focus:border-(--color-accent)" />
+                </label>
+                <div className="grid grid-cols-2 gap-3">
+                  <label className="block text-xs text-(--color-muted)">
+                    类型
+                    <select value={termDraft.term_kind} onChange={(e) => setTermDraft((d) => ({ ...d, term_kind: e.target.value }))}
+                      className="mt-1 block w-full rounded-lg border border-(--color-border) bg-(--color-bg) px-3 py-1.5 text-sm outline-none focus:border-(--color-accent)">
+                      {Object.entries(TERM_KIND_LABELS).map(([value, label]) => <option key={value} value={value}>{label}</option>)}
+                    </select>
+                  </label>
+                  <label className="block text-xs text-(--color-muted)">
+                    策略
+                    <select value={termDraft.enforcement} onChange={(e) => setTermDraft((d) => ({ ...d, enforcement: e.target.value }))}
+                      className="mt-1 block w-full rounded-lg border border-(--color-border) bg-(--color-bg) px-3 py-1.5 text-sm outline-none focus:border-(--color-accent)">
+                      <option value="exact">强制统一</option>
+                      <option value="lexical">词形参考</option>
+                      <option value="contextual">按语境参考</option>
+                    </select>
+                  </label>
+                </div>
+                <label className="block text-xs text-(--color-muted)">
+                  合法词形（多个用 / 分隔）
+                  <input value={termDraft.variants} onChange={(e) => setTermDraft((d) => ({ ...d, variants: e.target.value }))}
+                    placeholder="如：Pandora Source Codes"
+                    className="mt-1 block w-full rounded-lg border border-(--color-border) bg-(--color-bg) px-3 py-1.5 font-mono text-sm outline-none focus:border-(--color-accent)" />
+                </label>
+                <label className="block text-xs text-(--color-muted)">
+                  状态
+                  <select value={termDraft.status} onChange={(e) => setTermDraft((d) => ({ ...d, status: e.target.value }))}
+                    className="mt-1 block w-full rounded-lg border border-(--color-border) bg-(--color-bg) px-3 py-1.5 text-sm outline-none focus:border-(--color-accent)">
+                    <option value="auto_approved">自动启用</option>
+                    <option value="approved">已启用</option>
+                    <option value="candidate">候选</option>
+                    <option value="rejected">已忽略</option>
+                  </select>
+                </label>
+              </div>
+              <div className="mt-5 flex justify-end gap-2">
+                <button onClick={() => setEditingTerm(null)} className="rounded-lg border border-(--color-border) bg-(--color-bg) px-4 py-1.5 text-sm hover:bg-(--color-panel2)">取消</button>
+                <button onClick={saveTermEdit} disabled={patchTerm.isPending}
+                  className="rounded-lg bg-(--color-accent) px-4 py-1.5 text-sm text-white hover:bg-(--color-accent-hover) disabled:opacity-50">
+                  {patchTerm.isPending ? "保存中…" : "保存"}
+                </button>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
 
       {/* 角色档案编辑浮层 */}
       {editingChar && (
@@ -989,76 +1046,6 @@ export default function KnowledgePage() {
         </div>
       )}
 
-      {/* 台词编辑浮层（复用项目页模式：原文 / 译文） */}
-      {editingLine && (
-        <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/30 p-6" onClick={() => setEditingLine(null)}>
-          <div className="flex h-[520px] w-full max-w-xl flex-col rounded-2xl bg-(--color-bg) p-5 shadow-2xl" onClick={(e) => e.stopPropagation()}>
-            <div className="flex items-center justify-between">
-              <h2 className="text-base font-semibold">
-                编辑{editingLine.side === "source" ? "原文" : "译文"}
-                <span className="ml-2 font-sans text-xs font-normal text-(--color-muted)">
-                  {editingLine.line.speaker_name} · 第 {editingLine.line.chapter_no ?? "?"} 章
-                </span>
-              </h2>
-              <button onClick={() => setEditingLine(null)} className="rounded-lg p-1.5 text-(--color-muted) hover:bg-(--color-panel2)"><X size={16} /></button>
-            </div>
-            {editingLine.side === "source" ? (
-              <>
-                <p className="mt-3 text-xs text-(--color-muted)">修改台词文本会同步回写片段原文，该段译文将标记为待重译。</p>
-                <div className="mt-3 min-h-0 flex-1 space-y-3 overflow-auto pr-1">
-                  <label className="block text-xs text-(--color-muted)">
-                    说话人
-                    <input value={lineDraft.speaker_name} onChange={(e) => setLineDraft((d) => ({ ...d, speaker_name: e.target.value }))}
-                      className="mt-1 block w-full rounded-lg border border-(--color-border) bg-(--color-bg) px-3 py-1.5 text-sm outline-none focus:border-(--color-accent)" />
-                  </label>
-                  <label className="block text-xs text-(--color-muted)">
-                    台词文本
-                    <textarea value={lineDraft.source_text} onChange={(e) => setLineDraft((d) => ({ ...d, source_text: e.target.value }))}
-                      className="mt-1 block min-h-[240px] w-full resize-none rounded-lg border border-(--color-border) bg-(--color-bg) px-3 py-1.5 text-sm outline-none focus:border-(--color-accent)" />
-                  </label>
-                </div>
-                <div className="mt-4 flex shrink-0 justify-end gap-2">
-                  <button onClick={() => setEditingLine(null)} className="rounded-lg border border-(--color-border) px-4 py-1.5 text-sm hover:bg-(--color-panel2)">取消</button>
-                  <button
-                    onClick={() => patchDialogueLine.mutate({
-                      id: editingLine.line.id,
-                      body: { speaker_name: lineDraft.speaker_name, source_text: lineDraft.source_text },
-                    })}
-                    disabled={patchDialogueLine.isPending}
-                    className="rounded-lg bg-(--color-accent) px-4 py-1.5 text-sm text-white hover:bg-(--color-accent-hover) disabled:opacity-50"
-                  >
-                    {patchDialogueLine.isPending ? "保存中…" : "保存"}
-                  </button>
-                </div>
-              </>
-            ) : (
-              <>
-                <p className="mt-3 text-xs text-(--color-muted)">
-                  本行原文：{editingLine.line.source_text}
-                  <br />
-                  修改的是该行所属片段的整段译文，保存后作为新校对版本，不会被重译覆盖。
-                </p>
-                <textarea value={lineDraft.target_text} onChange={(e) => setLineDraft((d) => ({ ...d, target_text: e.target.value }))}
-                  className="mt-3 block min-h-0 w-full flex-1 resize-none rounded-lg border border-(--color-border) bg-(--color-bg) px-3 py-1.5 font-mono text-[13px] leading-6 outline-none focus:border-(--color-accent)" />
-                <div className="mt-4 flex shrink-0 justify-end gap-2">
-                  <button onClick={() => setEditingLine(null)} className="rounded-lg border border-(--color-border) px-4 py-1.5 text-sm hover:bg-(--color-panel2)">取消</button>
-                  <button
-                    onClick={() => {
-                      if (editingLine.line.segment_id) {
-                        patchSegmentTranslation.mutate({ segmentId: editingLine.line.segment_id, targetText: lineDraft.target_text });
-                      }
-                    }}
-                    disabled={patchSegmentTranslation.isPending || !editingLine.line.segment_id}
-                    className="rounded-lg bg-(--color-accent) px-4 py-1.5 text-sm text-white hover:bg-(--color-accent-hover) disabled:opacity-50"
-                  >
-                    {patchSegmentTranslation.isPending ? "保存中…" : "保存"}
-                  </button>
-                </div>
-              </>
-            )}
-          </div>
-        </div>
-      )}
     </div>
   );
 }

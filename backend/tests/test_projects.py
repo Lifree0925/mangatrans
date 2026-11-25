@@ -41,26 +41,6 @@ def test_health_is_public(client: TestClient, wait_task) -> None:
     assert r.json()["status"] == "ok"
 
 
-def test_delete_project_with_dialogue_lines(client, wait_task) -> None:
-    """删除带台词本/剧情卡/审计的项目不因外键失败。"""
-    import app.core.database as dbmod
-    from app.models.dialogue import DialogueLine
-    from app.models.project import Project
-
-    pid = client.post("/api/v1/projects", json={"name": "待删除项目"}).json()["id"]
-    client.post(
-        f"/api/v1/projects/{pid}/documents/import",
-        files={"file": ("s.txt", "林风：你好。\n".encode(), "text/plain")},
-    )
-    wait_task(client, client.post(f"/api/v1/projects/{pid}/parse", json={}).json()["task_id"])
-    with dbmod.SessionLocal() as db:
-        p = db.get(Project, pid)
-        db.add(DialogueLine(project_id=pid, source_document_id=p.active_source_document_id, speaker_name="林风", source_text="你好。"))
-        db.commit()
-    assert client.delete(f"/api/v1/projects/{pid}").status_code == 204
-    assert client.get(f"/api/v1/projects/{pid}").status_code == 404
-
-
 def test_reparse_maps_scenes_per_chapter(client, wait_task) -> None:
     """场景号每章重置：第 2 章第 1 场不能被映射到第 1 章第 1 场。"""
     from sqlalchemy import select

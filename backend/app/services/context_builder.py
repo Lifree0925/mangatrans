@@ -12,6 +12,7 @@ from dataclasses import dataclass, field
 from app.services.term_match import (
     build_speaker_map,
     build_term_records,
+    is_address_form,
     normalize,
     select_source_matches,
 )
@@ -126,19 +127,18 @@ def build_project_bible(
         lines.extend(["[EXACT GLOSSARY]", *glossary])
 
     if style_guide:
-        if lean:
-            style_payload = {
-                key: style_guide.get(key)
-                for key in (
-                    "dialogue_register",
-                    "action_description_style",
-                    "capitalization_rules",
-                    "cultural_strategy",
-                )
-                if style_guide.get(key)
-            }
-        else:
-            style_payload = style_guide
+        # 项目前缀只放跨窗口稳定、短小且真正需要每窗遵守的风格字段。
+        # 角色声音按当前窗口动态提供；示例不必每窗重复发送。
+        style_payload = {
+            key: style_guide.get(key)
+            for key in (
+                "dialogue_register",
+                "action_description_style",
+                "capitalization_rules",
+                "cultural_strategy",
+            )
+            if style_guide.get(key)
+        }
         if style_payload:
             lines.extend(["[STYLE GUIDE]", _stable_json(style_payload)])
 
@@ -666,24 +666,31 @@ def build_qa_reference(
     """构建语义 QA 的紧凑事实基准。
 
     只包含本窗口相关角色、专名与当前章节剧情；不包含整库知识，也不要求逐字措辞。
+    输出始终是完整 JSON：超预算时按优先级删减小节，绝不从字符串中间硬截断。
     """
     window_text = "".join(seg.get("source_text", "") for seg in segments)
-    speakers = {str(seg.get("speaker_name") or "").strip() for seg in segments}
+    speakers = {normalize(str(seg.get("speaker_name") or "").strip()) for seg in segments}
+    speaker_names = {str(seg.get("speaker_name") or "").strip() for seg in segments}
     speaker_map = build_speaker_map(knowledge)
     records = build_term_records(knowledge)
     matches = select_source_matches(records, window_text)
 
-    characters: list[dict] = []
+    character_rows: list[tuple[int, dict]] = []
     for item in knowledge:
         if item.get("item_type") != "character":
             continue
+        # “Helen夫人”这类称谓条目是解析产物，不是独立角色；
+        # 放入 QA 参考会把“Madam Helen”误当成正确本人译名。
+        if is_address_form(str(item.get("canonical_key") or "")):
+            continue
         names = [item.get("canonical_key", ""), *(item.get("aliases") or [])]
+        name_norms = {normalize(n) for n in names if n}
         mentioned = any(name and name in window_text for name in names)
-        is_speaker = any(normalize(sp) in {normalize(n) for n in names if n} for sp in speakers)
+        is_speaker = any(sp in name_norms for sp in speakers)
         if not mentioned and not is_speaker:
             continue
         data = item.get("data", {}) or {}
-        characters.append({
+        row = {
             "source_name": item.get("canonical_key", ""),
             "english_name": data.get("translation") or speaker_map.get(normalize(item.get("canonical_key", "")), ""),
             "aliases": item.get("aliases", []),
@@ -692,10 +699,16 @@ def build_qa_reference(
                 data.get("role_translation") or data.get("role")
                 or data.get("identity") or data.get("occupation") or ""
             ),
-            # 自然度 QA 需要角色的说话方式；只加短字段，完整档案仍留在翻译上下文。
-            "speech_style": data.get("speech_style") or "",
+            "speech_style": data.get("speech_style") if is_speaker else "",
             "relationships": data.get("relationships") or [],
-        })
+        }
+        row = {k: v for k, v in row.items() if v not in ("", [], None)}
+        # 说话人优先，其次本窗提到的人；避免 Helen 等关键角色被无关主角挤出。
+        priority = 0 if is_speaker else 1
+        character_rows.append((priority, row))
+
+    character_rows.sort(key=lambda pair: (pair[0], str(pair[1].get("source_name") or "")))
+    characters = [row for _priority, row in character_rows]
 
     terms = [
         {
@@ -707,7 +720,6 @@ def build_qa_reference(
         for m in matches
         if m.get("en")
     ]
-    # 同一词形/译名只保留一条。
     dedup_terms: list[dict] = []
     seen_terms: set[tuple[str, str]] = set()
     for term in terms:
@@ -716,8 +728,7 @@ def build_qa_reference(
             seen_terms.add(key)
             dedup_terms.append(term)
 
-    # QA 需要人物关系/称呼/身份事实，否则只能看到人名，无法判断 "aunt" 是否该是 "mother"。
-    focus_names = {str(s).strip() for s in speakers if str(s).strip()}
+    focus_names = {str(s).strip() for s in speaker_names if str(s).strip()}
     for c in characters:
         for name in (
             c.get("source_name", ""), c.get("english_name", ""),
@@ -801,11 +812,45 @@ def build_qa_reference(
         "translation_rules": rules,
         "chapter_storyline": story,
     }
-    text = json.dumps(payload, ensure_ascii=False, indent=2)
+
+    def dump(value: dict) -> str:
+        return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+
+    text = dump(payload)
     if len(text) > max_chars:
-        # 优先保留角色、关系与专名；剧情卡只保留摘要与前情依赖。
-        story = {k: story.get(k) for k in ("summary", "prior_deps") if story.get(k)}
-        payload["chapter_storyline"] = story
-        payload["translation_rules"] = rules[:6]
-        text = json.dumps(payload, ensure_ascii=False, indent=2)
-    return text[:max_chars]
+        # 先删低优先级的风格规则和剧情扩展，再缩短角色资料。
+        payload["translation_rules"] = []
+        payload["character_states"] = []
+        payload["active_story_facts"] = []
+        text = dump(payload)
+    if len(text) > max_chars:
+        compact_chars = []
+        for c in characters[:10]:
+            compact_chars.append({
+                k: c.get(k)
+                for k in ("source_name", "english_name", "forms_of_address", "role", "relationships")
+                if c.get(k) not in ("", [], None)
+            })
+        payload = {
+            "characters": compact_chars,
+            "terms": dedup_terms[:20],
+            "relationships": relations[:10],
+            "chapter_storyline": {
+                k: story.get(k) for k in ("summary", "prior_deps") if story.get(k)
+            },
+        }
+        text = dump(payload)
+    if len(text) > max_chars:
+        # 最后仍超预算：只保留最必要的事实，不截断 JSON 字符串。
+        payload = {
+            "characters": [
+                {k: c.get(k) for k in ("source_name", "english_name", "forms_of_address", "role", "relationships")
+                 if c.get(k) not in ("", [], None)}
+                for c in characters[:6]
+            ],
+            "terms": dedup_terms[:10],
+            "relationships": relations[:6],
+            "chapter_storyline": {"summary": str(story.get("summary") or "")[:500]},
+        }
+        text = dump(payload)
+    return text

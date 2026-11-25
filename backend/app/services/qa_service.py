@@ -49,6 +49,7 @@ CORE_ISSUE_TYPES = {
     "negation_condition",
     "causality_chronology",
     "character_consistency",
+    "terminology",
 }
 
 
@@ -78,6 +79,8 @@ class NaturalnessEdit(BaseModel):
     target_quote: str = ""
     suggested_text: str = ""
     reason: str = ""
+    # 只允许明确的翻译腔类别；不放宽为“可以更好”。
+    reason_category: str = ""
     confidence: float = Field(default=0.0, ge=0, le=1)
 
 
@@ -118,6 +121,8 @@ SEMANTIC_PROMPT = """你是影视剧本翻译的终审 QA，独立于润色环�
 - causality_chronology：事件先后、因果链、人物位置与原文矛盾；
 - character_consistency：说话人、身份、立场、亲属关系、社会角色或称呼前后矛盾；
   正式英语称谓应为 Mr./Mrs./Ms./Dr. + 姓氏，不得用称谓 + 名字（除非项目明确如此）；
+  如果项目参考已明确家族关系（如 Helen 是 Damian 的母亲），把“Helen夫人”译为
+  “Mrs. Sterling”是合法姓氏称谓，不算新增身份；反过来，项目没有给出姓氏时不得猜姓。
 - terminology：专名/地点/头衔/关键设定物出现第二种实质译名，或把一种东西译成了另一种
   （不算大小写、单复数、标点差异）。
 
@@ -147,9 +152,11 @@ SEMANTIC_PROMPT = """你是影视剧本翻译的终审 QA，独立于润色环�
 每条编辑必须：
 - 保留全部事实、说话人/受话人、行为功能、情绪力度、人物关系、数字、否定、条件、术语和行结构；
 - 输出该 segment 的完整替换文本，不是片段，不是解释；
-- target_quote 必须逐字复制当前 TARGET 中该段的一个连续片段；segment_id 必须是方括号内的精确 ID；
-- confidence >= 0.9；每窗最多 6 条；没有明确问题就返回空数组。
+- target_quote 必须逐字等于当前 TARGET 中该段的完整文本；segment_id 必须是方括号内的精确 ID；
+- reason_category 必须是 translationese、unnatural_collocation、wrong_rhythm、literal_idiom 之一；
+- confidence >= 0.95；每窗最多 3 条；没有明确问题就返回空数组。
 naturalness_edits 不是 QA issue，不要放进 issues；不得修改叙述段（△、场景标题、人物表、元数据）。
+如果当前台词已经自然忠实，只是“可以更好”，不要输出编辑；原样保留是默认正确答案。
 
 severity 判定：
 - critical：核心情节或人物关系被译错，读者会误解剧情；
@@ -218,6 +225,48 @@ def build_coverage_signals(segments: list[dict], targets: dict[str, str]) -> tup
     return hint, stats
 
 
+_EN_MODAL_RE = re.compile(
+    r"\b(?:must|have to|has to|had to|need to|needs to|should|shouldn't|can|could|may|"
+    r"might|will|would|shall|can't|cannot|won't|wouldn't)\b",
+    re.IGNORECASE,
+)
+_EN_QUANTIFIER_RE = re.compile(
+    r"\b(?:all|every|each|any|some|both|none|nobody|nothing|everything|everyone|"
+    r"someone|anyone)\b",
+    re.IGNORECASE,
+)
+_ENTITY_STOPWORDS = {
+    "i", "i'm", "i've", "i'll", "i'd", "you", "your", "you're", "he", "she", "it",
+    "it's", "we", "they", "what", "who", "where", "when", "why", "how", "this", "that",
+    "these", "those", "there", "then", "now", "no", "yes", "well", "okay", "fine",
+    "please", "hey", "oh", "so", "and", "but", "if", "because", "the", "a", "an",
+    "my", "our", "his", "her", "their", "mr", "mrs", "ms", "miss", "dr", "don't",
+    "did", "do", "does", "can", "could", "would", "will", "shall", "should",
+}
+
+
+def _entity_tokens(text: str) -> set[str]:
+    """提取需要保护的角色标签/人名，避免把句首问候语当成实体。"""
+    raw = text or ""
+    out: set[str] = set()
+
+    def add(segment: str, *, skip_sentence_start: bool) -> None:
+        for m in re.finditer(r"\b[A-Z][A-Za-z'’-]*\b", segment):
+            prefix = segment[:m.start()].rstrip()
+            if skip_sentence_start and (not prefix or re.search(r"[.!?]\s*$", prefix)):
+                continue
+            norm = re.sub(r"['’]s$", "", m.group(0)).casefold()
+            if norm and norm not in _ENTITY_STOPWORDS:
+                out.add(norm)
+
+    role = re.match(r"^\s*([^:：\n]{1,80})[:：]", raw)
+    if role:
+        add(role.group(1), skip_sentence_start=False)
+        raw = raw[role.end():]
+    add(raw, skip_sentence_start=True)
+    return out
+
+
 _EN_NUMBER_WORD_RE = re.compile(
     r"\b(?:zero|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|"
     r"thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|thirty|"
@@ -258,6 +307,14 @@ def naturalness_edit_guard(
         return False, "condition"
     if _number_tokens(old) != _number_tokens(new):
         return False, "number"
+    if {m.casefold() for m in _EN_MODAL_RE.findall(old)} != {
+        m.casefold() for m in _EN_MODAL_RE.findall(new)
+    }:
+        return False, "modal"
+    if {m.casefold() for m in _EN_QUANTIFIER_RE.findall(old)} != {
+        m.casefold() for m in _EN_QUANTIFIER_RE.findall(new)
+    }:
+        return False, "quantifier"
     for zh, spec in select_forced_specs_for_text(forced_terms, source_text).items():
         en = str((spec or {}).get("en") or "")
         if not en:
@@ -265,6 +322,13 @@ def naturalness_edit_guard(
         variants = (spec or {}).get("variants", []) or []
         if not target_hits_term(new, en, variants):
             return False, f"forced_term:{zh}"
+    old_entities = _entity_tokens(old)
+    new_entities = _entity_tokens(new)
+    source_entities = _entity_tokens(source_text)
+    if not old_entities.issubset(new_entities):
+        return False, "entity_lost"
+    if new_entities - old_entities - source_entities:
+        return False, "entity_added"
     return True, ""
 
 
@@ -276,7 +340,7 @@ def select_naturalness_edits(
     forced_terms: dict[str, dict],
     speaker_map: dict[str, str] | None = None,
     exclude_sids: set[str] | None = None,
-    max_edits: int = 6,
+    max_edits: int = 3,
 ) -> dict[str, str]:
     """筛选 QA 自然度编辑；只返回可安全写回的 segment -> 完整新文本。"""
     # 延迟导入，避免 qa_service 与 translation 在模块加载期形成环。
@@ -303,9 +367,13 @@ def select_naturalness_edits(
         old = target_by_id.get(sid, "")
         quote = _quote_norm(str(edit.get("target_quote") or ""))
         new = str(edit.get("suggested_text") or "").strip()
-        if not quote or not new or quote not in _quote_norm(old):
+        if not quote or not new or quote != _quote_norm(old) or new == old.strip():
             continue
-        if float(edit.get("confidence") or 0) < 0.9:
+        if str(edit.get("reason_category") or "") not in {
+            "translationese", "unnatural_collocation", "wrong_rhythm", "literal_idiom",
+        }:
+            continue
+        if float(edit.get("confidence") or 0) < 0.95:
             continue
         ok, _reason = naturalness_edit_guard(
             source_text=str(seg.get("source_text") or ""),

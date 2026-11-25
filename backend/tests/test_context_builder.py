@@ -55,10 +55,19 @@ def test_project_bible_is_stable_prefix_and_removes_dynamic_duplicates() -> None
             },
         },
     ]
-    style = {"dialogue_register": "natural", "character_voices": [{"name": "林晓"}]}
+    style = {
+        "dialogue_register": "natural",
+        "cultural_strategy": "equivalent American English",
+        "character_voices": [{"name": "林晓"}],
+        "examples": [{"zh": "你好", "en": "Hi"}],
+    }
     bible = build_project_bible(knowledge, style)
     assert bible.startswith("[PROJECT BIBLE")
     assert "Lin Xiao" in bible and "Tianji Pavilion" in bible
+    assert "equivalent American English" in bible
+    # 角色声音按窗口动态注入，完整示例不进入每窗稳定前缀。
+    assert "character_voices" not in bible
+    assert "examples" not in bible
 
     def ctx(source: str):
         return build_context(
@@ -340,6 +349,46 @@ def test_lean_context_drops_unused_knowledge_but_keeps_required_facts() -> None:
     assert "王强隐瞒秘密" not in text
     assert "沉稳" not in text
     assert result.snapshot["context_mode"] == "lean"
+
+
+def test_qa_reference_keeps_speaker_and_valid_json_when_large() -> None:
+    knowledge = []
+    for name in ("Chloe", "Damian", "Ethan", "Marcus", "Jackson", "Helen"):
+        knowledge.append({
+            "id": name,
+            "item_type": "character",
+            "canonical_key": name,
+            "aliases": [],
+            "data": {
+                "translation": name,
+                "role_translation": "role",
+                "speech_style": "long style " * 120,
+                "relationships": ["Damian's mother" if name == "Helen" else "ally"],
+                "forms_of_address": ["some address"],
+            },
+        })
+    knowledge.append({
+        "id": "Helen夫人",
+        "item_type": "character",
+        "canonical_key": "Helen夫人",
+        "aliases": [],
+        "data": {"translation": "Madam Helen"},
+    })
+    reference = build_qa_reference(
+        segments=[{
+            "segment_id": "S1",
+            "segment_type": "dialogue",
+            "speaker_name": "Helen",
+            "source_text": "Damian，Helen夫人，你什么意思？",
+        }],
+        knowledge=knowledge,
+        max_chars=2600,
+    )
+    assert len(reference) <= 2600
+    payload = json.loads(reference)
+    assert payload["characters"][0]["source_name"] == "Helen"
+    assert any(c["source_name"] == "Damian" for c in payload["characters"])
+    assert all(c["source_name"] != "Helen夫人" for c in payload["characters"])
 
 
 def test_qa_reference_includes_relevant_relationship_and_address_facts() -> None:

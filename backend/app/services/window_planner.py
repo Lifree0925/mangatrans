@@ -21,9 +21,17 @@ def build_windows(segments: list[SourceSegment]) -> list[list[SourceSegment]]:
     last_scene = None
 
     for seg in segments:
+        if seg.segment_type == "outline":
+            continue  # 故事大纲只作为上下文，不翻译
         hard_cut = (
             (last_chapter is not None and seg.chapter_id != last_chapter)
             or (last_scene is not None and seg.scene_id != last_scene)
+            # 前置标题/大纲等 chapter_id=None 的内容不能和第一集混进同一窗口。
+            or (
+                last_chapter is None
+                and seg.chapter_id is not None
+                and bool(current)
+            )
         )
         if hard_cut and current:
             windows.append(current)

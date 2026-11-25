@@ -33,7 +33,7 @@ export interface Segment {
   chapter_id: string | null;
   scene_id: string | null;
   segment_no: number;
-  segment_type: "heading" | "dialogue" | "narrative" | "other";
+  segment_type: "heading" | "dialogue" | "narrative" | "other" | "outline";
   speaker_name: string | null;
   source_text: string;
   source_start: number;
@@ -147,6 +147,7 @@ export interface KnowledgeEntry {
   source: string;
   version: number;
   occurrence_count?: number | null;
+  effective_policy?: string | null;
 }
 
 export interface DocInfo {
@@ -165,36 +166,4 @@ export interface ChapterStoryline {
   card_json: string;
   status: string;
   version: number;
-}
-
-export interface DialogueLineInfo {
-  id: string;
-  chapter_id: string | null;
-  chapter_no: number | null;
-  chapter_title: string | null;
-  scene_id: string | null;
-  scene_no: number | null;
-  scene_heading: string | null;
-  segment_id: string | null;
-  speaker_name: string;
-  speaker_alias: string | null;
-  line_no: number;
-  source_text: string;
-  target_text: string | null;
-  segment_translation: string | null;
-}
-
-export interface DialogueLinesResponse {
-  count: number;
-  chapters: Array<{
-    chapter_id: string | null;
-    chapter_no: number | null;
-    chapter_title: string | null;
-    scenes: Array<{
-      scene_id: string | null;
-      scene_no: number | null;
-      scene_heading: string | null;
-      lines: DialogueLineInfo[];
-    }>;
-  }>;
 }

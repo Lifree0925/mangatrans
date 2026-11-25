@@ -24,6 +24,8 @@ export default function ProjectPage() {
   const [activeChapterId, setActiveChapterId] = useState<string | null>(null);
   // 本次导入触发的解析任务：任务结束后必须再拉取一次正文，避免解析太快时错过 running 状态
   const [parsingTaskId, setParsingTaskId] = useState<string | null>(null);
+  // 本次导入生成的文档 ID：project.active_source_document_id 指向它时，解析已真正落库
+  const [importedDocumentId, setImportedDocumentId] = useState<string | null>(null);
   const refreshedParsingTaskRef = useRef<string | null>(null);
   const bodyRef = useRef<HTMLDivElement | null>(null);
   const scrollRaf = useRef<number | null>(null);
@@ -64,7 +66,9 @@ export default function ProjectPage() {
   const project = useQuery({
     queryKey: ["project", id],
     queryFn: () => api<Project>(`/projects/${id}`),
+    refetchInterval: importedDocumentId ? 1000 : false,
   });
+  const refetchProject = project.refetch;
   const providers = useQuery({
     queryKey: ["providers"],
     queryFn: () => api<ProviderInfo[]>("/settings/providers"),
@@ -84,24 +88,41 @@ export default function ProjectPage() {
     queryFn: () => api<TaskInfo[]>(`/projects/${id}/tasks`),
     refetchInterval: 2000,
   });
+  // 本次解析任务直接按 ID 轮询，不依赖项目任务列表的轮询时机。
+  // 历史上列表在解析完成后仍返回旧数据，导致正文一直显示“解析中”。
+  const parseTask = useQuery({
+    queryKey: ["parse-task", parsingTaskId],
+    queryFn: () => api<TaskInfo>(`/tasks/${parsingTaskId}`),
+    enabled: !!parsingTaskId,
+    refetchInterval: 1000,
+    retry: 1,
+  });
   // 仅在项目有运行中任务时轮询（数据解析/翻译完成后停止，避免每 3 秒全列表重渲染卡顿）
   const hasActiveTask = (projectTasks.data ?? []).some(
     (t) => t.status === "running" || t.status === "queued"
   );
+  const parseTaskStatus = parseTask.data?.status;
+  const parseActive =
+    !!parsingTaskId &&
+    !parseTask.isError &&
+    (!parseTaskStatus || parseTaskStatus === "queued" || parseTaskStatus === "running");
+  const waitingForImportedDocument =
+    !!importedDocumentId && project.data?.active_source_document_id !== importedDocumentId;
+  const sourcePolling = hasActiveTask || parseActive || waitingForImportedDocument;
   const chapters = useQuery({
     queryKey: ["chapters", id],
     queryFn: () => api<Chapter[]>(`/projects/${id}/chapters`),
-    refetchInterval: hasActiveTask ? 3000 : false,
+    refetchInterval: sourcePolling ? 3000 : false,
   });
   const scenes = useQuery({
     queryKey: ["scenes", id],
     queryFn: () => api<Scene[]>(`/projects/${id}/scenes`),
-    refetchInterval: hasActiveTask ? 3000 : false,
+    refetchInterval: sourcePolling ? 3000 : false,
   });
   const segments = useQuery({
     queryKey: ["segments", id],
     queryFn: () => api<Segment[]>(`/projects/${id}/segments`),
-    refetchInterval: hasActiveTask ? 3000 : false,
+    refetchInterval: sourcePolling ? 3000 : false,
   });
 
   const latestTranslations = useQuery({
@@ -143,13 +164,28 @@ export default function ProjectPage() {
     qc.invalidateQueries({ queryKey: ["project-tasks", id] });
   }, [id, qc]);
 
+  const refreshSource = useCallback(async () => {
+    await Promise.all([
+      qc.refetchQueries({ queryKey: ["chapters", id] }),
+      qc.refetchQueries({ queryKey: ["scenes", id] }),
+      qc.refetchQueries({ queryKey: ["segments", id] }),
+      qc.refetchQueries({ queryKey: ["project", id] }),
+      qc.refetchQueries({ queryKey: ["project-tasks", id] }),
+      qc.refetchQueries({ queryKey: ["latest-translations", id] }),
+    ]);
+  }, [id, qc]);
+
   const upload = useMutation({
     mutationFn: async (file: File) => {
       const form = new FormData();
       form.append("file", file);
-      await api(`/projects/${id}/documents/import`, { method: "POST", body: form });
+      return await api<{ id: string }>(`/projects/${id}/documents/import`, {
+        method: "POST",
+        body: form,
+      });
     },
-    onSuccess: () => {
+    onSuccess: (doc) => {
+      setImportedDocumentId(doc.id);
       invalidate();
       parse.mutate(); // 导入后自动解析（解析任务与报告在任务中心展示）
     },
@@ -257,28 +293,97 @@ export default function ProjectPage() {
       invalidate();
       qc.invalidateQueries({ queryKey: ["project-tasks", id] });
     },
-    onError: (err) => toast.error(`解析失败：${String(err)}`),
+    onError: (err) => {
+      setImportedDocumentId(null);
+      toast.error(`解析失败：${String(err)}`);
+    },
   });
 
-  // 解析任务完成（或失败/取消）后刷新正文。不能只依赖 hasActiveTask 轮询：
-  // 短剧本解析可能在两次任务轮询之间结束，片段查询会一直停留在导入前的空结果。
-  const parsingTask = parsingTaskId
-    ? (projectTasks.data ?? []).find((t) => t.id === parsingTaskId)
-    : undefined;
+  // 任务失败/取消：立即结束等待，避免正文永远显示“解析中”。
   useEffect(() => {
-    if (!parsingTaskId) return;
-    if (!parsingTask || !["completed", "failed", "cancelled"].includes(parsingTask.status)) return;
-    if (refreshedParsingTaskRef.current === parsingTaskId) return;
-    refreshedParsingTaskRef.current = parsingTaskId;
-    invalidate();
-  }, [invalidate, parsingTask, parsingTaskId]);
+    if (!parsingTaskId || !parseTaskStatus) return;
+    if (parseTaskStatus === "completed") {
+      // 完成信号只用于催一次项目查询；真正的成功刷新以 active document 为准。
+      void refetchProject();
+      return;
+    }
+    if (!["failed", "cancelled"].includes(parseTaskStatus)) return;
+    const key = `parse:${parsingTaskId}`;
+    if (refreshedParsingTaskRef.current === key) return;
+    refreshedParsingTaskRef.current = key;
+    void (async () => {
+      try {
+        await refreshSource();
+      } finally {
+        setParsingTaskId(null);
+        setImportedDocumentId(null);
+      }
+    })();
+    if (parseTaskStatus === "failed") {
+      toast.error(`解析失败：${parseTask.data?.error_message || "请稍后重试"}`);
+    }
+  }, [parseTask.data?.error_message, parseTaskStatus, parsingTaskId, refetchProject, refreshSource]);
+
+  // 成功判据：项目当前文档已经切到本次导入的文档。这样即使解析任务状态
+  // 更新延迟，只要章节/片段已经落库，正文也会立即刷新。
+  useEffect(() => {
+    if (!importedDocumentId || project.data?.active_source_document_id !== importedDocumentId) return;
+    const key = `doc:${importedDocumentId}`;
+    if (refreshedParsingTaskRef.current === key) return;
+    refreshedParsingTaskRef.current = key;
+    void (async () => {
+      try {
+        await refreshSource();
+      } catch {
+        toast.error("解析完成，但正文刷新失败，请重新进入项目");
+      } finally {
+        setImportedDocumentId(null);
+        setParsingTaskId(null);
+      }
+    })();
+  }, [importedDocumentId, project.data?.active_source_document_id, refreshSource]);
+
+  // 查询解析任务状态本身失败时也要释放等待态，避免轮询永久卡住。
+  useEffect(() => {
+    if (!parsingTaskId || !parseTask.isError) return;
+    const key = `error:${parsingTaskId}`;
+    if (refreshedParsingTaskRef.current === key) return;
+    refreshedParsingTaskRef.current = key;
+    void (async () => {
+      try {
+        await refreshSource();
+      } finally {
+        setParsingTaskId(null);
+        setImportedDocumentId(null);
+        toast.error("解析状态查询失败，请到任务中心查看解析结果");
+      }
+    })();
+  }, [parseTask.isError, parsingTaskId, refreshSource]);
+
+  // 最后兜底：解析是本地机械切分，正常几秒内完成。超过 90 秒仍未拿到
+  // active document / 任务终态时释放等待态，避免任何情况下永久卡在“解析中”。
+  useEffect(() => {
+    if (!parsingTaskId && !importedDocumentId) return;
+    const timer = window.setTimeout(() => {
+      void (async () => {
+        try {
+          await refreshSource();
+        } finally {
+          setParsingTaskId(null);
+          setImportedDocumentId(null);
+          toast.error("解析超时，请到任务中心查看解析结果");
+        }
+      })();
+    }, 90_000);
+    return () => window.clearTimeout(timer);
+  }, [importedDocumentId, parsingTaskId, refreshSource]);
 
   const segs = segments.data ?? [];
   const preparingSource =
     upload.isPending ||
     parse.isPending ||
-    (parsingTaskId !== null &&
-      (!parsingTask || parsingTask.status === "queued" || parsingTask.status === "running"));
+    parseActive ||
+    waitingForImportedDocument;
   const trMap = useMemo(() => {
     const m = new Map<string, LatestTranslation>();
     for (const i of latestTranslations.data?.items ?? []) m.set(i.segment_id, i);
@@ -564,12 +669,14 @@ export default function ProjectPage() {
                             >
                               原文
                             </button>
-                            <button
-                              onClick={() => { setEditMenuFor(null); startEdit("target"); }}
-                              className="whitespace-nowrap px-3 py-1.5 text-left text-xs hover:bg-(--color-panel)"
-                            >
-                              译文
-                            </button>
+                            {s.segment_type !== "outline" && (
+                              <button
+                                onClick={() => { setEditMenuFor(null); startEdit("target"); }}
+                                className="whitespace-nowrap px-3 py-1.5 text-left text-xs hover:bg-(--color-panel)"
+                              >
+                                译文
+                              </button>
+                            )}
                           </div>
                         )}
                         <p className="whitespace-pre-wrap transition-colors group-hover:text-(--color-accent)">
@@ -577,25 +684,27 @@ export default function ProjectPage() {
                         </p>
                       </>
                   </div>
-                  <div className="relative mt-0.5 min-w-0 pl-4">
-                      <>
-                        {tr ? (
-                          <p className={`translation-fade-in whitespace-pre-wrap text-(--color-muted) transition-colors group-hover:text-(--color-accent) ${tr.freshness_status === "stale" ? "italic" : ""}`}>
-                            {tr.target_text}
-                            {tr.freshness_status === "stale" && (
-                              <span
-                                title="原文已修改，译文需重新翻译"
-                                className="ml-2 rounded-md bg-amber-100 px-1.5 py-0.5 font-sans text-[11px] font-medium text-amber-700"
-                              >
-                                待重译
-                              </span>
-                            )}
-                          </p>
-                        ) : (
-                          <p className="text-(--color-muted) transition-colors group-hover:text-(--color-accent)">—</p>
-                        )}
-                      </>
-                  </div>
+                  {s.segment_type !== "outline" && (
+                    <div className="relative mt-0.5 min-w-0 pl-4">
+                        <>
+                          {tr ? (
+                            <p className={`translation-fade-in whitespace-pre-wrap text-(--color-muted) transition-colors group-hover:text-(--color-accent) ${tr.freshness_status === "stale" ? "italic" : ""}`}>
+                              {tr.target_text}
+                              {tr.freshness_status === "stale" && (
+                                <span
+                                  title="原文已修改，译文需重新翻译"
+                                  className="ml-2 rounded-md bg-amber-100 px-1.5 py-0.5 font-sans text-[11px] font-medium text-amber-700"
+                                >
+                                  待重译
+                                </span>
+                              )}
+                            </p>
+                          ) : (
+                            <p className="text-(--color-muted) transition-colors group-hover:text-(--color-accent)">—</p>
+                          )}
+                        </>
+                    </div>
+                  )}
                 </div>
               );
             })}
@@ -615,7 +724,7 @@ export default function ProjectPage() {
                   编辑{sideLabel}
                   {seg && (
                     <span className="ml-2 font-sans text-xs font-normal text-(--color-muted)">
-                      片段 {seg.segment_no} · {seg.segment_type === "dialogue" ? "对白" : seg.segment_type === "narrative" ? "叙述" : seg.segment_type}
+                      片段 {seg.segment_no} · {seg.segment_type === "dialogue" ? "对白" : seg.segment_type === "narrative" ? "叙述" : seg.segment_type === "outline" ? "大纲" : seg.segment_type}
                     </span>
                   )}
                 </h3>
@@ -693,7 +802,7 @@ export default function ProjectPage() {
                 <span>
                   全部重翻（完整流程）
                   <span className="mt-0.5 block text-xs font-normal text-(--color-muted)">
-                    重新抽取知识库、角色档案、章节剧情卡、台词本，再全本翻译（已编辑知识不会被覆盖）
+                    重新抽取知识库、角色档案、章节剧情卡，再全本翻译（已编辑知识不会被覆盖）
                   </span>
                 </span>
               </button>

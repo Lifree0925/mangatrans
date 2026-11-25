@@ -27,7 +27,8 @@ from app.models.document import SourceSegment
 from app.models.knowledge import KnowledgeAlias, KnowledgeEvidence, KnowledgeItem
 from app.schemas.knowledge import ExtractionOutput
 from app.services.term_match import (
-    classify_term, enforcement_for, is_address_form, is_generic_source, normalize,
+    classify_term, enforcement_for, is_address_form, is_descriptive_place,
+    is_generic_source, normalize,
 )
 
 EXTRACT_PROMPT = """你是剧本分析助手。任务：提取人物、术语与显式人物关系候选，并治理具名实体与跨章节设定术语。
@@ -105,10 +106,15 @@ def _candidate_data(cand) -> dict:
 def _auto_approved(mode: str, cand, data: dict) -> bool:
     if mode != "express" or cand.evidence_type != "explicit":
         return False
-    if float(getattr(cand, "confidence", 0) or 0) < 0.75:
+    # 自动批准只接受更高置信度；低置信度仍可在知识库中作为候选编辑。
+    if float(getattr(cand, "confidence", 0) or 0) < 0.85:
         return False
     if cand.item_type == "term":
         if is_generic_source(cand.canonical_key):
+            return False
+        if is_descriptive_place(cand.canonical_key, str(data.get("term_kind") or "")):
+            return False
+        if data.get("translation_conflicts"):
             return False
         if not data.get("translation"):
             return False
@@ -130,6 +136,8 @@ def _merge_data(existing_json: str, incoming: dict) -> str:
                 if incoming_translation not in conflicts:
                     conflicts.append(incoming_translation)
                 merged["translation_conflicts"] = conflicts
+                # 译名冲突时降级为情境参考，禁止错误/未确认译名被逐字强制。
+                merged["enforcement"] = "contextual"
             continue
         if key == "variants":
             vals = list(merged.get("variants") or [])
@@ -213,7 +221,12 @@ def merge_candidates(
         else:
             item.data_json = _merge_data(item.data_json, data)
             item.version += 1
-            if _auto_approved(mode, cand, data) and item.status == "candidate":
+            merged_data = json.loads(item.data_json or "{}")
+            if (
+                not merged_data.get("translation_conflicts")
+                and _auto_approved(mode, cand, data)
+                and item.status == "candidate"
+            ):
                 item.status = "auto_approved"
 
         for alias in cand.aliases:

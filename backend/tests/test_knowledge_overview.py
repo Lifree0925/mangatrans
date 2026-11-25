@@ -3,7 +3,6 @@
 from sqlalchemy import select
 
 import app.core.database as dbmod
-from app.models.dialogue import DialogueLine
 from app.models.document import Chapter, SourceSegment
 from app.models.knowledge import KnowledgeItem
 from app.models.project import Project
@@ -27,8 +26,6 @@ def _setup(client, wait_task) -> tuple[str, str, str]:
             KnowledgeItem(project_id=pid, item_type="term", canonical_key="狼王",
                           data_json="{}", status="approved"),
             ChapterStoryline(project_id=pid, chapter_id=ch.id, card_json="{}"),
-            DialogueLine(project_id=pid, chapter_id=ch.id, segment_id=seg.id,
-                         speaker_name="Elara", source_text="你好。", line_no=1),
         ])
         db.add(Translation(segment_id=seg.id, version=1, stage="polished",
                            target_text="Hello.", review_status="approved",
@@ -48,7 +45,6 @@ def test_knowledge_overview_lists_project_with_stats(client, wait_task):
     assert item["characters"] == 1
     assert item["terms"] == 1
     assert item["storylines"] == 1
-    assert item["dialogue_lines"] == 1
 
 
 def test_hard_delete_clears_knowledge_but_keeps_project_and_translation(client, wait_task):
@@ -59,7 +55,6 @@ def test_hard_delete_clears_knowledge_but_keeps_project_and_translation(client, 
     with dbmod.SessionLocal() as db:
         assert db.scalar(select(KnowledgeItem).where(KnowledgeItem.project_id == pid)) is None
         assert db.scalar(select(ChapterStoryline).where(ChapterStoryline.project_id == pid)) is None
-        assert db.scalar(select(DialogueLine).where(DialogueLine.project_id == pid)) is None
         # 项目与译文保留
         assert db.get(Project, pid) is not None
         assert db.scalar(select(Translation).where(Translation.segment_id == seg_id)) is not None

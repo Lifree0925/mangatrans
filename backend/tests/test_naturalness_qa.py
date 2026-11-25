@@ -30,6 +30,7 @@ def test_semantic_output_accepts_naturalness_edits() -> None:
             "target_quote": "What you learned is only the me from five years ago.",
             "suggested_text": "You only know who I was five years ago.",
             "reason": "中文话题结构",
+            "reason_category": "translationese",
             "confidence": 0.95,
         }],
     })
@@ -57,6 +58,20 @@ def test_naturalness_guard_rejects_meaning_changes() -> None:
         new_text="Give me six.", forced_terms={},
     )
     assert not ok and reason == "number"
+
+    ok, reason = qa_service.naturalness_edit_guard(
+        source_text="你可以留下。", old_text="You can stay.",
+        new_text="You should stay.", forced_terms={},
+    )
+    assert not ok and reason == "modal"
+
+    ok, reason = qa_service.naturalness_edit_guard(
+        source_text="我看见她和Richard在一起。",
+        old_text="I saw her with Richard.",
+        new_text="I saw her with Richard at Sterling Manor.",
+        forced_terms={},
+    )
+    assert not ok and reason == "entity_added"
 
 
 def test_naturalness_guard_preserves_forced_term() -> None:
@@ -90,6 +105,7 @@ def test_naturalness_guard_preserves_forced_term() -> None:
             "segment_id": sid,
             "target_quote": "Pandora is attacking the core database.",
             "suggested_text": "Pandora's hitting the core database right now.",
+            "reason_category": "translationese",
             "confidence": 0.95,
         }],
         forced_terms=forced,
@@ -105,6 +121,7 @@ def test_select_naturalness_edits_requires_quote_and_dialogue() -> None:
         "segment_id": sid,
         "target_quote": old,
         "suggested_text": "Chloe (smirks): You only know who I was five years ago.",
+        "reason_category": "translationese",
         "confidence": 0.95,
     }
     assert qa_service.select_naturalness_edits(
@@ -114,6 +131,11 @@ def test_select_naturalness_edits_requires_quote_and_dialogue() -> None:
     bad_quote = {**edit, "target_quote": "not in target"}
     assert qa_service.select_naturalness_edits(
         segments=[seg], targets={sid: old}, edits=[bad_quote], forced_terms={},
+    ) == {}
+
+    bad_category = {**edit, "reason_category": ""}
+    assert qa_service.select_naturalness_edits(
+        segments=[seg], targets={sid: old}, edits=[bad_category], forced_terms={},
     ) == {}
 
     narrative = {**_seg(sid), "segment_type": "narrative"}

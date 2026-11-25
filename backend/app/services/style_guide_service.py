@@ -58,13 +58,14 @@ def pick_trial_windows(db: Session, source_document_id: str) -> list[list[dict]]
             .order_by(Scene.scene_no)
         )
     )
-    segs = list(
-        db.scalars(
+    segs = [
+        seg for seg in db.scalars(
             select(SourceSegment)
             .where(SourceSegment.source_document_id == source_document_id)
             .order_by(SourceSegment.segment_no)
         )
-    )
+        if seg.segment_type != "outline"
+    ]
 
     def seg_dict(s):
         return {

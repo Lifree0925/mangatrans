@@ -441,7 +441,12 @@ def _mark_task_completed(factory, task_id: str) -> None:
         if failed:
             settle_task_timer(task)
             task.status = "failed"
-            if any(code in ("qa_incomplete", "quality_gate") for code in failed_codes):
+            if any(code == "quality_retry_exhausted" for code in failed_codes):
+                task.error_code = "quality_gate"
+                task.error_message = (
+                    "自动质检未通过：定点修复次数已用尽，请重新翻译相关章节或人工处理。"
+                )
+            elif any(code in ("qa_incomplete", "quality_gate") for code in failed_codes):
                 task.error_code = "quality_gate"
                 task.error_message = (
                     f"自动质检未通过：{failed} 个质检节点失败或仍有严重问题，请重试。"

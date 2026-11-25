@@ -13,7 +13,6 @@ interface OverviewItem {
   terms: number;
   rules: number;
   storylines: number;
-  dialogue_lines: number;
   updated_at: string | null;
 }
 
@@ -73,7 +72,6 @@ export default function KnowledgeOverviewPage() {
                 {[
                   { n: item.characters, label: "角色" },
                   { n: item.storylines, label: "章节剧情" },
-                  { n: item.dialogue_lines, label: "台词" },
                   { n: item.terms, label: "术语" },
                 ].map((s) => (
                   <span key={s.label} className="flex items-baseline gap-1.5">
@@ -98,7 +96,7 @@ export default function KnowledgeOverviewPage() {
                   e.stopPropagation();
                   const ok = await confirmAction(
                     "删除知识库？",
-                    "将清空该项目的角色档案、术语表、章节剧情与台词本，且不可恢复。项目、原文与译文不受影响。",
+                    "将清空该项目的角色档案、术语表、章节剧情与人物状态，且不可恢复。项目、原文与译文不受影响。",
                     true
                   );
                   if (ok) remove.mutate(item.project_id);

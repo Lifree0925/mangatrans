@@ -11,7 +11,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from app import __version__
-from app.api.v1 import dialogue, documents, knowledge, projects, qa, settings_api, translation
+from app.api.v1 import documents, knowledge, projects, qa, settings_api, translation
 from app.core import security
 from app.core.config import settings
 from app.core.credentials import CredentialStoreError
@@ -176,7 +176,6 @@ def create_app() -> FastAPI:
     app.include_router(translation.router, prefix="/api/v1")
     app.include_router(qa.router, prefix="/api/v1")
     app.include_router(settings_api.router, prefix="/api/v1")
-    app.include_router(dialogue.router, prefix="/api/v1")
     return app
 
 

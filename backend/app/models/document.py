@@ -74,7 +74,7 @@ class SourceSegment(Base):
     chapter_id: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
     scene_id: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
     segment_no: Mapped[int] = mapped_column(Integer)
-    segment_type: Mapped[str] = mapped_column(String(16))  # heading/dialogue/narrative/other
+    segment_type: Mapped[str] = mapped_column(String(16))  # heading/dialogue/narrative/other/outline
     speaker_name: Mapped[str | None] = mapped_column(String(100), nullable=True)
     source_text: Mapped[str] = mapped_column(Text)
     source_start: Mapped[int] = mapped_column(Integer)

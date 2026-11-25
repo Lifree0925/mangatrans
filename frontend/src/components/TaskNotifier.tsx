@@ -15,7 +15,6 @@ const typeLabel: Record<string, string> = {
   trial: "试译",
   knowledge: "知识提取",
   parse: "解析",
-  dialogue: "台词本抽取",
   scene_cards: "场景卡",
   qa: "质量检查",
   analyze: "分析",

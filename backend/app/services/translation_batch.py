@@ -201,6 +201,47 @@ async def process_window_qa_item(db_factory, task_id: str, item_id: str, model: 
             "retryable": False,
         }
 
+    # 上次 QA 已把问题定位到具体段：重试时直接修复这些问题段，
+    # 不再先对整个窗口重新调用语义 QA。只有无法定位时才回退完整 QA。
+    from app.services.quality_retry import retry_failed_window_quality
+
+    retry_result = await retry_failed_window_quality(
+        db_factory,
+        provider=get_provider(),
+        model=model,
+        project_id=project_id,
+        task_id=task_id,
+        window_id=item.window_id or item.id,
+        window=window,
+    )
+    if retry_result.get("status") == "repaired":
+        with db_factory() as db:
+            current = db.get(TaskItem, item_id)
+            if current is not None:
+                current.status = "succeeded"
+                current.finished_at = func.now()
+                db.commit()
+        return {
+            "done": 1,
+            "window_id": item.window_id,
+            "qa_issues": 0,
+            "repaired": int(retry_result.get("repaired") or 0),
+            "gate": "passed",
+            "retry_mode": "direct-repair",
+        }
+    if retry_result.get("status") in ("failed", "blocked", "give_up"):
+        return {
+            "error": str(retry_result.get("error") or "定点修复未通过"),
+            "error_code": (
+                "quality_retry_exhausted"
+                if retry_result.get("status") == "give_up"
+                else "quality_gate"
+            ),
+            "retryable": False,
+            "qa_issues": 0,
+            "gate": "needs_review" if retry_result.get("status") == "failed" else "blocked",
+        }
+
     seg_by_id = {s.id: s for s in window}
     source_block = "\n".join(f"[{s.id}] {s.source_text}" for s in window)
     target_block = "\n".join(f"[{s.id}] {polished[s.id].target_text}" for s in window)
@@ -337,6 +378,7 @@ async def process_window_qa_item(db_factory, task_id: str, item_id: str, model: 
         if not fixed_map:
             leftover = target
             break
+        fixed_map = await canonicalize_fixed_map(db_factory, project_id, window, fixed_map)
         fixed_ok: dict[str, str] = {}
         for sid in target:
             text = (fixed_map.get(sid) or "").strip()
@@ -784,19 +826,34 @@ def apply_source_honorifics(
         return text
     known_families = {str(v).casefold() for v in family_by_given.values() if v}
     expected: list[str | None] = []
-    for match in addresses:
+    aligned_targets = targets if len(targets) == len(addresses) else []
+    for idx, match in enumerate(addresses):
         given, suffix = match.group(1), match.group(2)
         title = _ADDRESS_TITLES.get(suffix, "Mr.")
         approved = (approved_addresses or {}).get(normalize(match.group(0)))
-        if approved:
-            expected.append(approved)
-            continue
         family = family_by_given.get(given.casefold())
+        target_name = aligned_targets[idx].group(2) if aligned_targets else ""
+        # 已确认家族姓氏优先于旧的人工称谓；否则 Helen 会被固定成“Madam Helen”。
         if family:
             expected.append(f"{title} {family}")
+        elif approved:
+            expected.append(approved)
         elif given.casefold() in known_families:
             expected.append(f"{title} {given}")
+        elif target_name and normalize(target_name) in known_families:
+            # 目标错误套用了别的已知家族姓（如 Victoria 被写成 Miss Vance）：
+            # 原文没有可证实姓氏时，退回自然的名称呼。
+            expected.append(given)
+        elif (
+            suffix in ("小姐", "女士", "夫人")
+            and target_name
+            and normalize(target_name) == normalize(given)
+        ):
+            # 未知女性姓氏时不要生成 Miss Victoria / Madam Helen；
+            # 直接称呼名，避免称谓+名的非母语形式。
+            expected.append(given)
         else:
+            # 无法确认原称谓的姓氏时，保留目标中已有的未知称谓，不凭空猜姓。
             expected.append(None)
 
     if len(targets) == len(expected):
@@ -909,6 +966,29 @@ async def _canonicalize_polished_terms(db_factory, project_id, window, polished)
             text, source_text, honorifics, approved_addresses
         )
     return polished
+
+
+async def canonicalize_fixed_map(
+    db_factory, project_id: str, window, fixed_map: dict[str, str]
+) -> dict[str, str]:
+    """修复模型输出落库前统一专名、称谓与剧本标记。"""
+    if not fixed_map:
+        return {}
+    entries = [
+        {"segment_id": sid, "target_text": text}
+        for sid, text in fixed_map.items()
+        if text
+    ]
+    if not entries:
+        return {}
+    normalized = await _canonicalize_polished_terms(
+        db_factory, project_id, window, entries
+    )
+    return {
+        str(e.get("segment_id")): str(e.get("target_text") or "")
+        for e in normalized
+        if e.get("segment_id")
+    }
 
 
 def _minimal_context(seg_dicts: list[dict]) -> ContextResult:
@@ -1197,6 +1277,9 @@ async def process_window_polish_item(db_factory, task_id: str, item_id: str, mod
                     window_id=f"BATCH-FIX-{window[0].segment_no}",
                     context=repair_ctx, draft=draft, issues=fix_issues,
                     seg_ids=sorted(bad_ids),
+                )
+                fixed_map = await canonicalize_fixed_map(
+                    db_factory, project_id, window, fixed_map
                 )
                 for entry in polished:
                     if entry.get("segment_id") in fixed_map:

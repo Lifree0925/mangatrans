@@ -233,7 +233,7 @@ def _reset_task_items_for_resume(
 
 
 def _reset_quality_steps_for_retry(task: Task, error_code: str | None = None) -> None:
-    """质量门禁失败后重试时，清掉 QA 完成标记，让自动质检真正重跑。"""
+    """质量门禁失败后重试时，清掉 QA/术语步骤标记；窗口质量表保留供定点修复。"""
     error_code = error_code if error_code is not None else task.error_code
     if error_code not in ("quality_gate", "qa_incomplete"):
         return
@@ -245,6 +245,9 @@ def _reset_quality_steps_for_retry(task: Task, error_code: str | None = None) ->
     if isinstance(steps, dict):
         steps.pop("qa", None)
         steps.pop("approve", None)
+        # 术语一致性在 QA 前执行；上次如果仍有未修复术语，重试必须重跑该步，
+        # 否则会直接跳过并再次卡在同一个项目级门禁。
+        steps.pop("term_consistency", None)
         progress["steps"] = steps
         task.progress_json = json.dumps(progress, ensure_ascii=False)
 

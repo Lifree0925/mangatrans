@@ -7,11 +7,12 @@ from app.services.translation import (
     DRAFT_SYSTEM,
     POLISH_SYSTEM,
     PROMPT_VERSION,
+    REPAIR_SYSTEM,
 )
 
 
 def test_prompt_version_is_bumped_for_quality_contract() -> None:
-    assert PROMPT_VERSION == "v6"
+    assert PROMPT_VERSION == "v7"
 
 
 def test_draft_prompt_locks_scope_relations_and_metadata() -> None:
@@ -22,6 +23,14 @@ def test_draft_prompt_locks_scope_relations_and_metadata() -> None:
     assert "Mr. Smith" in DRAFT_SYSTEM
     assert "use\n  that relationship" in DRAFT_SYSTEM
     assert "a speaker normally refers to themselves as I/me/my" in DRAFT_SYSTEM
+
+
+def test_polish_prompt_requires_no_change_default() -> None:
+    assert "NO-CHANGE DEFAULT" in POLISH_SYSTEM
+    assert "copy it verbatim" in POLISH_SYSTEM
+    assert "A stylistic preference is not a defect" in POLISH_SYSTEM
+    assert "REPAIR RULES" in REPAIR_SYSTEM
+    assert "Do not perform a general polish" in REPAIR_SYSTEM
 
 
 def test_polish_prompt_requires_english_first_dialogue_localization() -> None:
@@ -45,6 +54,9 @@ def test_semantic_qa_checks_scope_and_relationship_not_style() -> None:
     assert "source-first 两遍法" in SEMANTIC_PROMPT
     assert "[NATURALNESS TABLE READ" in SEMANTIC_PROMPT
     assert "naturalness_edits 不是 QA issue" in SEMANTIC_PROMPT
+    assert "reason_category" in SEMANTIC_PROMPT
+    assert "confidence >= 0.95" in SEMANTIC_PROMPT
+    assert "每窗最多 3 条" in SEMANTIC_PROMPT
     assert "[DETERMINISTIC COVERAGE SIGNALS]" in SEMANTIC_PROMPT
 
 

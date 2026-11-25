@@ -15,11 +15,15 @@ from app.models.knowledge import KnowledgeItem
 from app.models.translation import Translation
 from app.services.term_match import classify_term, enforcement_for
 
-TERM_LOCK_SYSTEM = """You are a terminology editor for an English translation of a Chinese werewolf
-screenplay. For each Chinese term below, decide ONE canonical English rendering.
+TERM_LOCK_SYSTEM = """You are a terminology editor for an English translation of a screenplay.
+For each Chinese term below, decide ONE canonical English rendering.
+
 Rules:
-- Choose the most idiomatic genre convention (e.g. werewolf-fandom usage), not a literal gloss.
-- Preserve capitalization conventions (e.g. Luna, Wolf King, Moon Goddess).
+- Infer the genre, setting and register only from the supplied source samples and context.
+- Never assume a genre or import terminology from an unrelated story.
+- Prefer a natural, idiomatic name that preserves the term's identity and story-world function.
+- For people, places and organizations, preserve the established naming convention.
+- Preserve capitalization conventions used by the project; do not invent a new title or rank.
 - Return ONLY the required JSON. No commentary."""
 
 

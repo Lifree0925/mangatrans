@@ -31,11 +31,12 @@ AI 漫剧剧本翻译系统（Windows 桌面版）：本地优先工作台，将
 
 ## 工程原则（硬约束，摘自开发文档 24 章与附录 B）
 
-1. 解析只做机械切分（heading / dialogue / narrative / other），**不做语义分类**；复杂度 O(n log n) 以内，8 万字解析 < 2 秒；解析结果不阻塞翻译，覆盖率必须 100%。
+1. 解析只做机械切分（heading / dialogue / narrative / other / outline），**不做语义分类**；复杂度 O(n log n) 以内，8 万字解析 < 2 秒；解析结果不阻塞翻译，覆盖率必须 100%。
+   故事大纲/剧情大纲/人物小传等前置资料区域标记为 `outline`，只作为上下文，不翻译、不计入翻译覆盖率与 QA，导出保留中文原文。
 2. 翻译必须两段式：Draft 锁事实（允许生硬）→ Polish 情境自然化（不得改变 Draft 事实）；两轮都入库，polished 为对外默认版本。
 3. Express 与 Guided 共用同一管线，差异只在确认节点是否自动通过；`auto_approved` 仅限高置信度、explicit 证据的人名/术语。
 4. 场景卡已剔除；情境准确翻译由知识库、章节剧情卡、speaker voice 与 carry-over 承担。
-5. carry-over 由 Draft 阶段前置生成并随任务进度持久化；Draft 与 Polish 均窗口级并发（`MT_WINDOW_CONCURRENCY` 默认 3），Polish 消费前一窗口 Draft 的 carry。无待定术语时 Draft/Polish 流水线并行，Polish 在自身及前一窗口 Draft 完成、术语锁定、全局角色档案/风格基线就绪、且本窗口所属章节剧情卡完成后启动，不等待无关章节剧情卡或台词本抽取；存在待定术语时等待全量 Draft 完成并锁定术语后再启动 Polish。任务级进度由调度层单协程顺序写。
+5. carry-over 由 Draft 阶段前置生成并随任务进度持久化；Draft 与 Polish 均窗口级并发（`MT_WINDOW_CONCURRENCY` 默认 3），Polish 消费前一窗口 Draft 的 carry。无待定术语时 Draft/Polish 流水线并行，Polish 在自身及前一窗口 Draft 完成、术语锁定、全局角色档案/风格基线就绪、且本窗口所属章节剧情卡完成后启动，不等待无关章节剧情卡；存在待定术语时等待全量 Draft 完成并锁定术语后再启动 Polish。任务级进度由调度层单协程顺序写。
 6. 思考模式：仅 Polish 与语义 QA 开启；Draft、抽取、对齐等环节关闭。禁止无意义地对不可重试错误反复重试。
 7. 结构完整性：`validate_window` 除 segment/行数/重复外，必须校验说话人、场景号、△/【】标记；单行对白被换成相邻段也必须判错。截断（finish_reason=length）优先自动拆半重跑，不能无限重复同一请求。
 8. 术语策略：`exact` 只用于专名/地点/头衔/具名物件；普通名词、物种、群体、泛称只做 `contextual` 参考。地点别名统一，头衔/称谓别名按语境翻译，不能一律替换为正式名。
@@ -55,7 +56,7 @@ AI 漫剧剧本翻译系统（Windows 桌面版）：本地优先工作台，将
 22. 用量账本：所有真实 Provider 调用写入 `llm_calls`（task/stage/model/prompt/completion/reasoning/cache_hit/latency/error）；缓存命中不计 API Token。
 23. 性能：默认窗口上限 1800 字符（环境变量可调）；上下文超预算按低优先级裁剪，源文永不裁剪；知识/别名按项目签名缓存。
 24. 重试：只有 timeout/network/429/5xx/明确 retryable 才重排；质量门禁、结构校验、认证、参数错误、截断最终失败不得无限重试。
-25. 台词本：从解析器 dialogue 片段与 speaker_name 确定性生成；只有多行对白无法按行数对齐时才允许模型介入。
+25. 台词本已剔除：解析器的 dialogue 片段就是唯一对白来源，翻译/QA/导出直接使用 `source_segments`，不再生成重复的 `dialogue_lines`。
 26. 任务并发：数据库必须保证同一项目最多一个 `queued/running/paused` 任务；重试、暂停、恢复和窗口领取使用条件更新/原子领取，
     不能只依赖应用层“先查再写”。
 27. LLM 兼容降级：400 时按 `thinking/reasoning_effort` → `response_format` 逐级移除并记录原因；缓存 Key 必须包含实际请求体
@@ -64,6 +65,8 @@ AI 漫剧剧本翻译系统（Windows 桌面版）：本地优先工作台，将
     不单独制造整窗失败。人物状态为章节级状态 + 段落级秘密揭示，暂不做场景级细粒度追踪；
     `character_states` / `story_facts` 由剧情卡确定性派生，不额外增加 LLM 调用，翻译上下文与 QA 只能读取
     当前章节及以前生效的信息，未来章节事实不得提前进入。
+29. 质量门禁重试：复用已通过窗口与当前译文；已定位问题只做定点修复 + 聚焦复检，禁止整本或整窗重跑 QA；
+    定点修复最多 2 次，仍失败必须明确提示重新翻译/人工处理，不能无限消耗模型调用。
 
 ## 开发内循环
 
@@ -106,12 +109,12 @@ AI 漫剧剧本翻译系统（Windows 桌面版）：本地优先工作台，将
 
 ## 数据模型速查
 
-`projects` / `source_documents` / `chapters` / `scenes` / `source_segments` / `knowledge_items` / `knowledge_aliases` / `knowledge_evidence` / `scene_context_cards` / `translations` / `qa_issues` / `window_quality` / `tasks` / `task_items` / `llm_calls` / `dialogue_lines` / `chapter_storylines` / `character_states` / `story_facts` / `audit_logs` / `provider_configs` / `style_guides`。
+`projects` / `source_documents` / `chapters` / `scenes` / `source_segments` / `knowledge_items` / `knowledge_aliases` / `knowledge_evidence` / `scene_context_cards` / `translations` / `qa_issues` / `window_quality` / `tasks` / `task_items` / `llm_calls` / `chapter_storylines` / `character_states` / `story_facts` / `audit_logs` / `provider_configs` / `style_guides`。
 
 ## 当前进度
 
-- Sprint 1–6 ✅ 完成；后端 112 个测试全过（含自动质量门禁、用量账本、确定性台词本、窗口/上下文预算、FakeProvider 全链路）。前端 tsc/lint 通过。
+- Sprint 1–6 ✅ 完成；后端测试覆盖自动质量门禁、用量账本、窗口/上下文预算与 FakeProvider 全链路。前端 tsc/lint 通过。
 - 最近已发布 v0.1.0；本轮 0–4 阶段优化尚未发版。新安装包必须通过 Windows 静默安装/启动/卸载门禁。
-- 软件更新：启动检查 GitHub Releases + 侧栏提示 + 设置页手动检查（缓存 24h）。
+- 软件更新：设置页手动检查 GitHub Releases；发现新版后，同一按钮原位切换为更新按钮，不再在侧栏新增入口。
 - 开发文档仅存本地 `docs/`（.gitignore 排除，不入仓库）。
 - 签名注意：自签名证书不校验公共信任链，只校验 Authenticode 签名者；换正式证书只需替换 Secrets。

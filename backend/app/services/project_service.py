@@ -12,7 +12,6 @@ from app.models.knowledge import (
 )
 from app.models.project import Project
 from app.models.qa import QAIssue, WindowQuality
-from app.models.dialogue import DialogueLine
 from app.models.task import Task, TaskItem
 from app.models.audit import AuditLog
 from app.models.storyline import ChapterStoryline
@@ -56,7 +55,6 @@ def delete_project_cascade(db: Session, project_id: str) -> bool:
     )
     db.execute(delete(KnowledgeItem).where(KnowledgeItem.project_id == project_id))
     db.execute(delete(StyleGuide).where(StyleGuide.project_id == project_id))
-    db.execute(delete(DialogueLine).where(DialogueLine.project_id == project_id))
     db.execute(delete(AuditLog).where(AuditLog.project_id == project_id))
     db.execute(delete(StoryFact).where(StoryFact.project_id == project_id))
     db.execute(delete(CharacterState).where(CharacterState.project_id == project_id))

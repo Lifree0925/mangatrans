@@ -140,3 +140,46 @@ def test_numbered_scene_and_cast_list_never_merge_into_action() -> None:
         "△进度条跳到99%。\n",
         "△屏幕黑屏。\n",
     ]
+
+
+def test_story_outline_is_marked_and_excluded_from_translation_scope() -> None:
+    text = (
+        "故事大纲\n故事讲述女主带着孩子复仇。\n\n"
+        "人物小传\n林晓：冷静果断的母亲。\n\n"
+        "第一集\n林晓：你好。\n"
+    )
+    r = parse_script(text)
+    outline = [s for s in r.segments if s.type == "outline"]
+    assert len(outline) == 1
+    assert "故事大纲" in outline[0].text
+    assert "人物小传" in outline[0].text
+    assert "林晓：冷静果断的母亲。" in outline[0].text
+    assert outline[0].rule_id == "outline"
+    assert outline[0].chapter_no == 0
+    assert r.report.coverage_ok
+    assert "".join(s.text for s in r.segments) == text
+    assert not any(s.type == "narrative" and s.text.startswith("人物小传") for s in r.segments)
+    assert any(s.type == "dialogue" and s.text.startswith("林晓") for s in r.segments)
+
+
+def test_front_matter_without_blank_lines_is_not_chapter_one() -> None:
+    text = (
+        "My Title\n《中文标题》\n"
+        "故事大纲\n这是开头大纲。\n"
+        "人物小传\n角色甲，简介。\n"
+        "第1集\n1-1 咖啡厅 白天 内\n甲：你好。\n"
+    )
+    r = parse_script(text)
+    assert r.report.coverage_ok
+    assert r.report.chapter_count == 1
+    assert [s.type for s in r.segments[:3]] == ["narrative", "outline", "heading"]
+    assert [s.chapter_no for s in r.segments[:3]] == [0, 0, 1]
+    assert "故事大纲" in r.segments[1].text
+    assert "人物小传" in r.segments[1].text
+    assert r.segments[2].text.strip() == "第1集"
+    assert "".join(s.text for s in r.segments) == text
+
+
+def test_outline_marker_only_matches_section_header_not_body_sentence() -> None:
+    r = parse_script("林晓：我写了一份大纲。\n她继续解释。\n")
+    assert all(s.type != "outline" for s in r.segments)

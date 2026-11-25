@@ -451,3 +451,18 @@ def test_worker_qa_failure_blocks_success(client, wait_task) -> None:
         assert "自动质检未通过" in (task.error_message or "") or "质检" in (task.error_message or "")
         approved = db.query(Translation).filter(Translation.review_status == "approved").count()
         assert approved == 0
+
+
+def test_window_planner_excludes_story_outline() -> None:
+    outline = _mk_seg(2, text="故事大纲\n这一段不翻译。\n")
+    outline.segment_type = "outline"
+    windows = build_windows([_mk_seg(1, "c1"), outline, _mk_seg(3, "c1")])
+    assert [[s.segment_no for s in w] for w in windows] == [[1, 3]]
+
+
+def test_window_planner_cuts_front_matter_before_first_chapter() -> None:
+    title = _mk_seg(1, chapter_id=None, text="My Title\n")
+    title.chapter_id = None
+    first = _mk_seg(2, "c1")
+    windows = build_windows([title, first])
+    assert [[s.segment_no for s in w] for w in windows] == [[1], [2]]

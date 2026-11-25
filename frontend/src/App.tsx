@@ -13,7 +13,6 @@ import {
 } from "lucide-react";
 import TaskNotifier from "./components/TaskNotifier";
 import Toaster from "./components/Toaster";
-import UpdateNotice from "./components/UpdateNotice";
 import ProjectsPage from "./pages/ProjectsPage";
 import ProjectPage from "./pages/ProjectPage";
 import KnowledgePage from "./pages/KnowledgePage";
@@ -30,13 +29,23 @@ const nav = [
 
 const COLLAPSE_KEY = "mt-sidebar-collapsed";
 
+function readCollapsed(): boolean {
+  try {
+    return localStorage.getItem(COLLAPSE_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
+
 export default function App() {
-  const [collapsed, setCollapsed] = useState(
-    () => localStorage.getItem(COLLAPSE_KEY) === "1"
-  );
+  const [collapsed, setCollapsed] = useState(readCollapsed);
 
   useEffect(() => {
-    localStorage.setItem(COLLAPSE_KEY, collapsed ? "1" : "0");
+    try {
+      localStorage.setItem(COLLAPSE_KEY, collapsed ? "1" : "0");
+    } catch {
+      /* 存储不可用不影响主界面渲染 */
+    }
   }, [collapsed]);
 
   return (
@@ -84,7 +93,6 @@ export default function App() {
             </NavLink>
           ))}
         </nav>
-        {!collapsed && <UpdateNotice />}
       </aside>
       <main className="flex-1 overflow-hidden">
         <Routes>

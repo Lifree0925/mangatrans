@@ -25,7 +25,7 @@ GENERIC_SOURCE_TERMS = {
     # 场所/建筑
     "庄园", "大厅", "宴会厅", "主厅", "祭坛", "高台", "高台祭坛", "前院", "后院",
     "大门", "二楼", "地牢", "墓园", "墓地", "修道院", "树林", "森林", "酒吧",
-    "房间", "密室", "地下室", "地下密室", "山洞", "洞穴", "走廊", "楼梯", "广场",
+    "房间", "密室", "地下室", "地下密室", "地下堡垒", "堡垒", "山洞", "洞穴", "走廊", "楼梯", "广场",
     "荒原", "城堡", "古堡", "阳台", "后巷", "庭院", "医院", "办公室", "教堂",
     "祈祷室", "实验室", "仓库", "车厢", "池塘", "花园", "卧室", "书房", "厨房",
     "训练场", "会议室", "会客厅", "餐厅", "酒窖", "地下俱乐部", "大堂", "门口",
@@ -62,6 +62,20 @@ PLACE_SUFFIXES = (
     "医院", "办公室", "房间", "走廊", "楼梯", "广场", "营地", "领地", "俱乐部",
     "家族", "家族领地", "部落", "部族", "族", "组织", "教团", "议会", "帮派",
     "阁", "殿", "楼", "堂", "院", "府", "宫", "塔", "寺", "庙",
+)
+
+# 描述性场景/场地短语：即使被模型标成 place，也不能在对白里逐字强制。
+# 真正的具名地标（含英文专名或 Short proper place）仍可 exact。
+_DESCRIPTIVE_PLACE_MARKERS = {
+    "城郊", "郊区", "废弃", "老旧", "破旧", "顶层", "高层", "地下", "地面",
+    "露天", "私人", "秘密", "隐蔽", "偏僻", "盘山", "一楼", "二楼", "三楼",
+    "主别墅", "核心", "控制", "安全通道", "总统套房", "套房", "临时", "野外",
+}
+
+_DESCRIPTIVE_PLACE_SUFFIXES = (
+    *PLACE_SUFFIXES,
+    "餐厅", "路段", "机房", "控制室", "停车场", "公寓", "基地", "实验室", "露台",
+    "休息室", "前台", "接待区", "通道", "楼梯间",
 )
 
 _IRREGULAR_PLURALS = {
@@ -109,6 +123,28 @@ def _is_place_like(canonical: str, kind: str) -> bool:
     return any(canonical.endswith(s) for s in PLACE_SUFFIXES)
 
 
+def is_descriptive_place(term: str, kind: str = "") -> bool:
+    """是否为纯描述性地点（如“城郊废弃酒庄地下室”）。
+
+    这类短语可以出现在场景标题里，但在对白中应随语境自然表达；
+    只有真正具名地标（Sterling Manor、Cross Tech Tower 等）才应 exact。
+    """
+    t = (term or "").strip()
+    k = (kind or "").strip().lower()
+    if not t or not _has_cjk(t):
+        return False
+    place_like = k in ("place", "location") or any(
+        t.endswith(suffix) for suffix in _DESCRIPTIVE_PLACE_SUFFIXES
+    )
+    if not place_like:
+        return False
+    if t in EXACT_TITLE_TERMS or re.search(r"[A-Za-z]", t):
+        return False
+    if len(t) < 6:
+        return False
+    return any(marker in t for marker in _DESCRIPTIVE_PLACE_MARKERS)
+
+
 def classify_term(canonical: str, data: dict | None = None) -> str:
     """推断术语类型；优先使用模型/人工写入的 term_kind。"""
     data = data or {}
@@ -129,13 +165,15 @@ def classify_term(canonical: str, data: dict | None = None) -> str:
 def enforcement_for(canonical: str, data: dict | None = None) -> str:
     """返回术语执行策略：exact 精确强制 / lexical 词形参考 / contextual 情境参考。"""
     data = data or {}
-    # 泛词优先级最高：即使模型误标成 place/title，也不能获得逐字强制权。
+    kind = classify_term(canonical, data)
+    # 泛词/描述性场景优先级最高：即使模型误标成 place/title，也不能获得逐字强制权。
     if is_generic_source(canonical) and canonical not in EXACT_TITLE_TERMS:
+        return CONTEXTUAL
+    if is_descriptive_place(canonical, kind):
         return CONTEXTUAL
     declared = str(data.get("enforcement") or "").strip().lower()
     if declared in _POLICIES:
         return declared
-    kind = classify_term(canonical, data)
     if kind in ("proper_name", "proper_noun", "title", "place", "location", "item"):
         return EXACT
     if kind in ("common_noun", "species", "group", "concept"):

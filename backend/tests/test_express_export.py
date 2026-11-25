@@ -210,6 +210,7 @@ def test_express_applies_qa_naturalness_edit(client: TestClient, wait_task) -> N
                 "target_quote": old,
                 "suggested_text": old.replace("Hello", "Hi"),
                 "reason": "table-read naturalness",
+                "reason_category": "translationese",
                 "confidence": 0.95,
             }],
         }
@@ -488,3 +489,66 @@ def test_delivery_role_map_normalizes_all_caps_names():
     trans = SimpleNamespace(target_text="LEO (laughs): Done.\n")
     role_map = _build_role_map([seg], {"s1": trans})
     assert role_map["Leo"] == "Leo"
+
+
+def test_delivery_normalizes_known_family_addresses():
+    from types import SimpleNamespace
+
+    from app.services.exporter import _export_delivery_markdown
+
+    seg = SimpleNamespace(
+        id="s1",
+        chapter_id="c1",
+        scene_id=None,
+        segment_type="dialogue",
+        speaker_name="Chloe",
+        source_text="Chloe（低声）：Helen夫人，你什么意思？\n",
+    )
+    trans = SimpleNamespace(
+        target_text="Chloe (quietly): Madam Helen, what do you mean?"
+    )
+    body = _export_delivery_markdown(
+        SimpleNamespace(name="测试"),
+        [seg],
+        {"c1": SimpleNamespace(chapter_no=1)},
+        {},
+        {"s1": trans},
+        None,
+        None,
+        None,
+        {"helen": "Sterling"},
+        {"helen夫人": "Madam Helen"},
+    )
+    assert "Mrs. Sterling" in body
+    assert "Madam Helen" not in body
+
+
+def test_delivery_keeps_story_outline_in_source_language():
+    from types import SimpleNamespace
+
+    from app.services.exporter import _export_delivery_markdown, _report
+
+    seg = SimpleNamespace(
+        id="s1",
+        chapter_id="c1",
+        scene_id=None,
+        segment_type="outline",
+        speaker_name=None,
+        source_text="故事大纲\n女主带着孩子复仇。\n",
+    )
+    body = _export_delivery_markdown(
+        SimpleNamespace(name="测试"),
+        [seg],
+        {"c1": SimpleNamespace(chapter_no=1)},
+        {},
+        {},
+        None,
+        None,
+        None,
+    )
+    assert "故事大纲" in body
+    assert "女主带着孩子复仇" in body
+    report = _report([seg], {}, [])
+    assert report["outline_segments"] == 1
+    assert report["translatable_segments"] == 0
+    assert report["untranslated"] == 0

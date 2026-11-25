@@ -1,6 +1,6 @@
 [package]
 name = "mangatrans"
-version = "0.1.3"
+version = "0.1.4"
 description = "AI 漫剧剧本翻译系统桌面应用"
 authors = ["you"]
 license = ""

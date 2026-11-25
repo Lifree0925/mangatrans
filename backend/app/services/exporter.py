@@ -76,10 +76,13 @@ def _load(db: Session, project: Project):
 
 
 def _report(segs, trans, issues) -> dict:
-    untranslated = sum(1 for s in segs if not trans.get(s.id))
+    translatable = [s for s in segs if s.segment_type != "outline"]
+    untranslated = sum(1 for s in translatable if not trans.get(s.id))
     high_critical = [i for i in issues if i.severity in ("high", "critical")]
     return {
         "segments": len(segs),
+        "translatable_segments": len(translatable),
+        "outline_segments": len(segs) - len(translatable),
         "untranslated": untranslated,
         "issues_total": len(issues),
         "high_critical_issues": len(high_critical),
@@ -277,7 +280,9 @@ def _export_markdown(project: Project, segs, trans, bilingual: bool) -> str:
     for s in segs:
         t = trans.get(s.id)
         text = t.target_text if t else ""
-        if s.segment_type == "heading":
+        if s.segment_type == "outline":
+            lines.append(f"\n{s.source_text.strip()}")
+        elif s.segment_type == "heading":
             lines.append(f"\n## {s.source_text.strip()}")
         elif s.segment_type == "dialogue":
             speaker = s.speaker_name or ""
@@ -299,7 +304,9 @@ def _export_txt(project: Project, segs, trans, bilingual: bool) -> str:
     for s in segs:
         t = trans.get(s.id)
         text = t.target_text if t else ""
-        if s.segment_type == "heading":
+        if s.segment_type == "outline":
+            lines.append(s.source_text.strip())
+        elif s.segment_type == "heading":
             lines.append(f"\n{s.source_text.strip()}\n")
         elif s.segment_type == "dialogue":
             speaker = s.speaker_name or ""
@@ -325,7 +332,9 @@ def _export_docx(project: Project, segs, trans, bilingual: bool) -> bytes:
     for s in segs:
         t = trans.get(s.id)
         text = t.target_text if t else ""
-        if s.segment_type == "heading":
+        if s.segment_type == "outline":
+            doc.add_paragraph(s.source_text.strip())
+        elif s.segment_type == "heading":
             doc.add_heading(s.source_text.strip(), level=2)
         elif s.segment_type == "dialogue":
             p = doc.add_paragraph()
@@ -354,6 +363,8 @@ def _export_delivery_markdown(
     title_en: str | None,
     doc_title: str | None,
     source_title: SourceTitle | None = None,
+    honorifics: dict[str, str] | None = None,
+    approved_addresses: dict[str, str] | None = None,
 ) -> str:
     """按交付模板生成 .md 正文。
 
@@ -399,10 +410,23 @@ def _export_delivery_markdown(
 
         t = trans.get(s.id)
         text = t.target_text.strip() if t else ""
+        if text and honorifics:
+            from app.services.translation_batch import (
+                apply_known_honorifics,
+                apply_source_honorifics,
+            )
+
+            text = apply_known_honorifics(text, honorifics)
+            text = apply_source_honorifics(
+                text, s.source_text, honorifics, approved_addresses or {}
+            )
 
         # 解析器把「人物：」行归为 narrative；交付模板要求角色名英文化，
         # 因此这里必须独立识别，不能只依赖 heading 分支。
         source_body = s.source_text.strip()
+        if s.segment_type == "outline":
+            lines.append(source_body)
+            continue
         if _CAST_HEADING_RE.match(source_body):
             lines.append(_render_cast_line(source_body, role_map))
             continue
@@ -472,8 +496,21 @@ def export_project(
     if fmt not in FORMATS:
         fmt = "md"
     if delivery:
+        honorifics: dict[str, str] = {}
+        approved_addresses: dict[str, str] = {}
+        try:
+            from app.services.translation_batch import (
+                _approved_address_forms,
+                _honorific_family_map,
+            )
+
+            honorifics = _honorific_family_map(db, project.id)
+            approved_addresses = _approved_address_forms(db, project.id)
+        except Exception:  # noqa: BLE001 导出门禁不应因称谓推断失败而中断
+            pass
         body = _export_delivery_markdown(
-            project, segs, chapters, scenes, trans, title_en, doc_title, source_title
+            project, segs, chapters, scenes, trans, title_en, doc_title,
+            source_title, honorifics, approved_addresses,
         )
         name = (
             (source_title.chinese_title if source_title else None)
