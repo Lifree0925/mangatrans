@@ -44,7 +44,7 @@ const HELP_SECTIONS: { title: string; items: string[] }[] = [
     items: [
       "一键直出会自动完成：人物与术语整理 → 角色档案 → 章节剧情 → 台词整理 → 全文翻译 → 自动质检与定点修正 → 自动定稿。",
       "质量检查由系统自动完成：QA 未完成、严重问题未解决或结构校验失败时，任务不会标记成功，交付版也不会放行。",
-      "任务中心会实时显示当前步骤、已完成内容、进度、失败原因，以及各阶段模型请求数和 Token 用量。",
+      "任务中心会实时显示当前步骤、已完成内容、进度、失败原因，以及缓存输入、未缓存输入和输出 tokens。",
       "任务可以暂停和继续；暂停会等当前片段完成后停下，继续时从断点恢复。",
       "失败或暂停后点「重试」，系统会从失败节点继续，不会重新执行已经完成的步骤。",
       "已完成任务可以归档到「历史记录」。历史记录中的任务记录可永久删除，已生成的译文不受影响。",
@@ -102,6 +102,13 @@ interface StorageInfo {
 
 const PRESETS = [
   {
+    id: "deepseek",
+    label: "DeepSeek（Flash，低成本）",
+    baseUrl: "https://api.deepseek.com",
+    model: "deepseek-flash",
+    hint: "长剧本批量翻译优先使用 Flash，成本更低。",
+  },
+  {
     id: "openai",
     label: "OpenAI",
     baseUrl: "https://api.openai.com/v1",
@@ -132,15 +139,15 @@ function maskKey(key: string): string {
 
 export default function SettingsPage() {
   const qc = useQueryClient();
-  const [model, setModel] = useState("");
-  const [baseUrl, setBaseUrl] = useState("");
+  const [model, setModel] = useState(PRESETS[0].model);
+  const [baseUrl, setBaseUrl] = useState(PRESETS[0].baseUrl);
   const [apiKey, setApiKey] = useState("");
   const [showKey, setShowKey] = useState(false);
   const [keyDraft, setKeyDraft] = useState("");
   const [editingKeyFor, setEditingKeyFor] = useState<string | null>(null);
   const [showEditKey, setShowEditKey] = useState(false);
   const [activePanel, setActivePanel] = useState<"models" | "help" | null>(null);
-  const [preset, setPreset] = useState("openai");
+  const [preset, setPreset] = useState(PRESETS[0].id);
   const { state: updateState, check: checkUpdate, install: installUpdate } = useAppUpdate(false);
   const updateChecking = updateState.phase === "checking";
   const updateBusy = updateState.phase === "downloading" || updateState.phase === "installing";
@@ -216,6 +223,7 @@ export default function SettingsPage() {
       }
       qc.invalidateQueries({ queryKey: ["providers"] });
     },
+    onError: (err) => toast.error(`保存模型服务失败：${String(err)}`),
   });
 
   const testOne = useMutation({
@@ -242,6 +250,7 @@ export default function SettingsPage() {
       setEditingKeyFor(null);
       qc.invalidateQueries({ queryKey: ["providers"] });
     },
+    onError: (err) => toast.error(`保存 Key 失败：${String(err)}`),
   });
 
   const remove = useMutation({
@@ -427,7 +436,7 @@ export default function SettingsPage() {
                 <input
                   value={model}
                   onChange={(e) => setModel(e.target.value)}
-                  placeholder="gpt-4o-mini"
+                  placeholder="deepseek-flash"
                   className="mt-1 block w-full rounded-lg border border-(--color-border) bg-(--color-bg) px-3 py-2 text-sm outline-none focus:border-(--color-text)"
                 />
               </label>
@@ -436,7 +445,7 @@ export default function SettingsPage() {
                 <input
                   value={baseUrl}
                   onChange={(e) => setBaseUrl(e.target.value)}
-                  placeholder="https://api.openai.com/v1"
+                  placeholder="https://api.deepseek.com"
                   className="mt-1 block w-full rounded-lg border border-(--color-border) bg-(--color-bg) px-3 py-2 font-mono text-sm outline-none focus:border-(--color-text)"
                 />
               </label>
@@ -477,6 +486,11 @@ export default function SettingsPage() {
             </div>
 
             <div className="mt-3 space-y-2">
+              {providers.error && (
+                <p className="rounded-lg bg-red-50 px-3 py-2 text-xs text-red-600">
+                  凭据读取失败：{String(providers.error)}
+                </p>
+              )}
               {providers.data?.map((p) => (
                 <div key={p.id} className="rounded-xl bg-(--color-panel) px-4 py-3">
                   <div className="flex items-center gap-2">

@@ -63,7 +63,12 @@ def _english_title(text: str | None) -> str | None:
 
 def _chinese_title(text: str | None) -> str | None:
     for line in _lines(text):
-        if _META_RE.match(line) or _CHAPTER_RE.match(line) or _SCENE_HINT_RE.search(line):
+        if (
+            _META_RE.match(line)
+            or _CHAPTER_RE.match(line)
+            or _SCENE_HINT_RE.search(line)
+            or line in {"故事大纲", "人物小传", "Story Outline", "Character Bios"}
+        ):
             continue
         for match in _CJK_RUN_RE.finditer(line):
             candidate = match.group(0).strip(" ：:·…—–-")
@@ -89,8 +94,13 @@ def detect_source_title(segments: list[Any]) -> SourceTitle | None:
         # 章节开始时标题区已结束；继续扫描会把正文里的英文对白名误识别成标题。
         if any(_CHAPTER_RE.match(line) for line in lines):
             break
-        # 标题区只接受少量短行，避免把开头的英文正文整段当成标题跳过。
-        if len(lines) > 4 or any(len(line) > 160 for line in lines):
+        # 常规标题区只接受少量短行；带剧情大纲/人物小传的前置块也识别标题，
+        # 由导出层整体跳过，避免同一标题在交付版开头重复两次。
+        has_front_matter = any(
+            marker in text
+            for marker in ("故事大纲", "人物小传", "Story Outline", "Character Bios")
+        )
+        if (len(lines) > 4 or any(len(line) > 160 for line in lines)) and not has_front_matter:
             continue
         if any(_SCENE_HINT_RE.search(line) for line in lines):
             continue

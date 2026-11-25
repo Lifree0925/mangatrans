@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.core import credentials
@@ -127,13 +128,24 @@ def create_provider(payload: dict, db: Session = Depends(get_db)) -> dict:
         max_retries=payload.get("max_retries", 2),
         is_default=payload.get("is_default", False),
     )
-    db.add(cfg)
-    db.commit()
-    db.refresh(cfg)
+    api_key = payload.get("api_key")
     if payload.get("api_key"):
-        credentials.save_credential(cfg.credential_ref, payload["api_key"])
+        credentials.save_credential(cfg.credential_ref, api_key)
+    db.add(cfg)
+    try:
+        db.commit()
+    except Exception:
+        db.rollback()
+        if api_key:
+            try:
+                credentials.delete_credential(cfg.credential_ref)
+            except Exception:  # noqa: BLE001 配置创建失败时尽量清理孤立 Key
+                pass
+        raise
+    db.refresh(cfg)
+    if api_key:
         set_default_from_db(db)
-    return {"id": cfg.id, "config_version": cfg.config_version, "has_credential": bool(payload.get("api_key"))}
+    return {"id": cfg.id, "config_version": cfg.config_version, "has_credential": bool(api_key)}
 
 
 @router.put("/settings/providers/{pid}/credential")
@@ -220,9 +232,10 @@ def _reset_task_items_for_resume(
     return True
 
 
-def _reset_quality_steps_for_retry(task: Task) -> None:
+def _reset_quality_steps_for_retry(task: Task, error_code: str | None = None) -> None:
     """质量门禁失败后重试时，清掉 QA 完成标记，让自动质检真正重跑。"""
-    if task.error_code not in ("quality_gate", "qa_incomplete"):
+    error_code = error_code if error_code is not None else task.error_code
+    if error_code not in ("quality_gate", "qa_incomplete"):
         return
     try:
         progress = json.loads(task.progress_json or "{}")
@@ -234,6 +247,43 @@ def _reset_quality_steps_for_retry(task: Task) -> None:
         steps.pop("approve", None)
         progress["steps"] = steps
         task.progress_json = json.dumps(progress, ensure_ascii=False)
+
+
+def _claim_task_for_running(
+    db: Session, task: Task, *, previous_updated_at, previous_error_code,
+    reset_items: bool = False, reset_running: bool = False,
+):
+    """原子抢占任务状态：同一任务/同一项目并发重试时只有一次能成功。"""
+    result = db.execute(
+        update(Task)
+        .where(Task.id == task.id, Task.status == task.status)
+        .values(status="running", error_message=None, error_code=None)
+        .execution_options(synchronize_session=False)
+    )
+    if result.rowcount != 1:
+        db.rollback()
+        db.refresh(task)
+        return False
+    db.refresh(task)
+    if reset_items:
+        _reset_task_items_for_resume(
+            db, task.id, reset_running=reset_running
+        )
+    settle_task_timer(task, until=previous_updated_at)
+    _reset_quality_steps_for_retry(task, previous_error_code)
+    task.status = "running"
+    task.error_message = None
+    task.error_code = None
+    start_task_timer(task)
+    try:
+        db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail="该项目已有任务正在执行，请等待完成后再继续",
+        ) from exc
+    return True
 
 @router.get("/tasks/{task_id}")
 def get_task(task_id: str, db: Session = Depends(get_db)) -> dict:
@@ -264,9 +314,15 @@ def pause_task(task_id: str, db: Session = Depends(get_db)) -> dict:
     task = db.get(Task, task_id)
     if task is None:
         raise HTTPException(status_code=404, detail="任务不存在")
-    if task.status == "running":
-        task.status = "paused"
-        db.commit()
+    # 条件更新：任务若已在这期间完成/失败，不能被迟到的暂停请求覆盖。
+    db.execute(
+        update(Task)
+        .where(Task.id == task_id, Task.status == "running")
+        .values(status="paused")
+        .execution_options(synchronize_session=False)
+    )
+    db.commit()
+    db.refresh(task)
     return {"id": task.id, "status": task.status}
 
 
@@ -279,7 +335,7 @@ def resume_task(task_id: str, db: Session = Depends(get_db)) -> dict:
     other = db.scalar(
         select(Task.id).where(
             Task.project_id == task.project_id,
-            Task.status.in_(["running", "queued"]),
+            Task.status.in_(["running", "queued", "paused"]),
             Task.id != task.id,
         ).limit(1)
     )
@@ -299,18 +355,19 @@ def resume_task(task_id: str, db: Session = Depends(get_db)) -> dict:
     else:
         if task.status not in ("paused", "failed"):
             return {"id": task.id, "status": task.status}
-        # 批量任务继续：失败节点回 pending；failed 任务额外回收无主 running 节点。
-        _reset_task_items_for_resume(
-            db, task_id, reset_running=task.status == "failed"
-        )
-    # 暂停/失败期间不计时：旧运行段只结算到最后一次写库时间。
-    settle_task_timer(task, until=task.updated_at)
-    _reset_quality_steps_for_retry(task)
-    task.status = "running"
-    task.error_message = None
-    task.error_code = None
-    start_task_timer(task)
-    db.commit()
+    previous_status = task.status
+    previous_updated_at = task.updated_at
+    previous_error_code = task.error_code
+    claimed = _claim_task_for_running(
+        db,
+        task,
+        previous_updated_at=previous_updated_at,
+        previous_error_code=previous_error_code,
+        reset_items=has_items,
+        reset_running=previous_status == "failed",
+    )
+    if not claimed:
+        return {"id": task.id, "status": task.status}
     if has_items is None:
         # 仅改状态不会重新执行，必须重新调度
         launch_task(task_id)
@@ -332,7 +389,7 @@ def retry_task(task_id: str, db: Session = Depends(get_db)) -> dict:
     other = db.scalar(
         select(Task.id).where(
             Task.project_id == task.project_id,
-            Task.status.in_(["running", "queued"]),
+            Task.status.in_(["running", "queued", "paused"]),
             Task.id != task.id,
         ).limit(1)
     )
@@ -340,17 +397,22 @@ def retry_task(task_id: str, db: Session = Depends(get_db)) -> dict:
         raise HTTPException(status_code=409, detail="该项目已有任务正在执行，请等待完成后再重试")
     # 批量任务：失败节点回 pending，成功节点（Draft/Polish/QA）绝不重跑。
     # 线程型任务没有 TaskItem，才需要重新 launch。
-    has_items = _reset_task_items_for_resume(
-        db, task_id, reset_running=task.status == "failed"
+    has_items = db.scalar(
+        select(TaskItem.id).where(TaskItem.task_id == task_id).limit(1)
+    ) is not None
+    previous_status = task.status
+    previous_updated_at = task.updated_at
+    previous_error_code = task.error_code
+    claimed = _claim_task_for_running(
+        db,
+        task,
+        previous_updated_at=previous_updated_at,
+        previous_error_code=previous_error_code,
+        reset_items=has_items,
+        reset_running=previous_status == "failed",
     )
-    # 失败/中断期间不计时：旧运行段只结算到最后一次写库时间。
-    settle_task_timer(task, until=task.updated_at)
-    _reset_quality_steps_for_retry(task)
-    task.status = "running"
-    task.error_message = None
-    task.error_code = None
-    start_task_timer(task)
-    db.commit()
+    if not claimed:
+        return {"id": task.id, "status": task.status}
     if not has_items:
         # 线程型任务：重新调度执行
         launch_task(task_id)

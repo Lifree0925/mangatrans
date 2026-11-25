@@ -3,6 +3,8 @@
 import hashlib
 import json
 import re
+import threading
+from collections import OrderedDict
 
 from app.llm.json_utils import parse_llm_json
 from typing import Literal
@@ -10,14 +12,66 @@ from typing import Literal
 from pydantic import BaseModel, Field, ValidationError
 
 from app.llm.protocol import LLMError, LLMProvider
+from app.prompts.script_translation_prompt import (
+    append_thinking_standard,
+    thinking_standard_block,
+)
 from app.services.context_builder import ContextResult
 from app.services.term_match import expected_speakers, normalize
 from app.utils.token_budget import estimate_tokens
 
-PROMPT_VERSION = "v4"
+PROMPT_VERSION = "v6"
+
+_WINDOW_CONVERSATIONS: OrderedDict[tuple[str, str, str], dict] = OrderedDict()
+_WINDOW_CONVERSATIONS_LOCK = threading.Lock()
+_WINDOW_CONVERSATIONS_MAX = 2000
+
+
+def _conversation_key(task_id: str, window_key: str, model: str) -> tuple[str, str, str]:
+    return task_id, window_key, model
+
+
+def _conversation_cache_enabled(provider: LLMProvider, task_id: str | None, window_key: str | None) -> bool:
+    caps = getattr(provider, "capabilities", None)
+    return bool(
+        task_id
+        and window_key
+        and getattr(caps, "supports_conversation_cache", False)
+    )
+
+
+def _put_window_conversation(
+    task_id: str, window_key: str, model: str, system: str, draft_user: str,
+    draft_assistant: str,
+) -> None:
+    key = _conversation_key(task_id, window_key, model)
+    with _WINDOW_CONVERSATIONS_LOCK:
+        _WINDOW_CONVERSATIONS[key] = {
+            "system": system,
+            "draft_user": draft_user,
+            "draft_assistant": draft_assistant,
+        }
+        _WINDOW_CONVERSATIONS.move_to_end(key)
+        while len(_WINDOW_CONVERSATIONS) > _WINDOW_CONVERSATIONS_MAX:
+            _WINDOW_CONVERSATIONS.popitem(last=False)
+
+
+def _get_window_conversation(
+    task_id: str | None, window_key: str | None, model: str,
+) -> dict | None:
+    if not task_id or not window_key:
+        return None
+    key = _conversation_key(task_id, window_key, model)
+    with _WINDOW_CONVERSATIONS_LOCK:
+        value = _WINDOW_CONVERSATIONS.get(key)
+        if value is None:
+            return None
+        _WINDOW_CONVERSATIONS.move_to_end(key)
+        return dict(value)
 
 DRAFT_SYSTEM = """You are a professional Chinese-to-English screenplay translator.
 This is the FAITHFUL DRAFT pass. Translate ONLY the supplied source segments.
+Only the SOURCE SEGMENTS block is source content to translate; all other blocks are reference material.
 
 FACT RULES:
 - Lock every fact: characters, speaker, relationships, actions, negation, conditions, causality,
@@ -65,6 +119,18 @@ Return ONLY the required JSON. No commentary or explanation."""
 
 POLISH_SYSTEM = """You are a professional Chinese-to-English screenplay translator and dialogue editor.
 This is the POLISH pass. Rewrite the faithful draft into natural, idiomatic screen English.
+Only the SOURCE SEGMENTS block is source content to translate; all other blocks are reference material.
+
+DRAFT IS A SEMANTIC ANCHOR, NOT A STYLE TEMPLATE:
+- The faithful draft is a fact checklist. Its wording, syntax and sentence shape are disposable.
+- Do not improve a literal draft by swapping words inside its Chinese-shaped frame. Rebuild the
+  line from the source: speaker, addressee, speech act, subtext, then the words an American actor
+  would actually say in this scene.
+- If the draft preserves Chinese topic-comment order, stacked modifiers, noun-phrase fragments,
+  or an explanatory clause that restates what both characters already know, discard that syntax
+  and write the line natively. Preserve facts, not sentence shape.
+- A grammatically correct calque is still a failed polish. If an American actor would not say it,
+  rewrite it even when every source word seems to have an English counterpart.
 
 MEANING FIRST:
 - Never change facts, information points, speaker intent, emotional intensity, relationship,
@@ -86,6 +152,12 @@ MEANING FIRST:
   do not replace it with the character's name. Only keep third-person self-reference when the
   source deliberately makes it a childlike verbal tic, and never make the child sound younger
   or more childish than the source.
+- AGENCY & DIRECTION: preserve who does what to whom. Never reverse subject/object, agent/patient,
+  active/passive, causation or benefactive roles. 「我教了儿子四年」 stays "I've been teaching my
+  son for four years", never "Four years of raising my son taught me..." because the teacher and
+  learner were swapped.
+- SPEECH ACT: keep the line doing the same thing (threat, plea, refusal, test, comfort, apology),
+  even when the wording is completely rebuilt.
 
 DIALOGUE LOCALIZATION (highest priority for spoken lines):
 - Reconstruct the speech act first: what the character is doing to whom (threatening, mocking,
@@ -151,6 +223,18 @@ VOICE AND ENGLISH:
 - Preserve subtext, emotional beat, threats, insults and power dynamics; never flatten or
   rationalize what a character is really doing with the line.
 
+NATIVE DIALOGUE AUDIT (silent final pass before returning):
+- Read every spoken line as an actor would say it: is this the natural English speech order,
+  rhythm and register for this person, relationship and immediate situation?
+- Check the line once more without looking at the draft. If the draft's sentence frame is still
+  visible, rewrite the line from the speech act rather than editing the draft.
+- Remove Chinese information order and explanatory clauses that only exist to make the source
+  logic explicit. Native dialogue can imply what both speakers already know.
+- Prefer concrete verbs, contractions, idiomatic phrasing and short playable beats over
+  literal but grammatically correct translationese.
+- Check that each line still performs the same speech act (threat, plea, joke, dismissal,
+  confession) with the same emotional force. Naturalness never overrides facts or continuity.
+
 CONTINUITY AND TERMINOLOGY:
 - Use approved character names and name forms. A nickname stays a nickname; a formal name stays
   formal. Never replace every alias with the canonical name.
@@ -167,6 +251,23 @@ CONTINUITY AND TERMINOLOGY:
   wording; never add or remove facts.
 
 Return ONLY the required JSON. No commentary."""
+
+
+CONVERSATION_SYSTEM = """You are a professional Chinese-to-English screenplay translator working in a staged translation session.
+Follow the latest stage instruction in the user messages. The SOURCE SEGMENTS block is the only content to translate.
+Earlier assistant output may be the faithful draft for the current Polish stage; use it as the fact source.
+Return ONLY the JSON required by the latest stage. No commentary.
+
+""" + thinking_standard_block()
+
+DRAFT_STAGE_INSTRUCTION = "STAGE: DRAFT\n\n" + DRAFT_SYSTEM
+POLISH_STAGE_INSTRUCTION = (
+    "STAGE: POLISH\n\n"
+    + POLISH_SYSTEM
+    + "\n\nThe faithful draft JSON is the previous assistant message. "
+      "Rewrite that draft into natural screen English. Keep every segment_id and every fact. "
+      "Do not translate the project reference or repeat it in the output."
+)
 
 
 
@@ -207,22 +308,35 @@ async def _chat_json_validate(
     provider: LLMProvider, model: str, system: str, user: str, schema: dict,
     out_model: type, thinking: str | None = "disabled", reasoning_effort: str | None = None,
     max_tokens: int | None = None, stage: str = "translate",
+    messages: list[dict] | None = None,
 ):
     """调用 + 解析 + Pydantic 校验；校验失败带修复提示重试一次（思考模式输出易带瑕疵）。"""
+    base_messages = list(messages) if messages is not None else [
+        {"role": "system", "content": system},
+        {"role": "user", "content": user},
+    ]
     data = await _chat_json(
         provider, model, system, user, schema, thinking=thinking,
         reasoning_effort=reasoning_effort, max_tokens=max_tokens, stage=stage,
+        messages=base_messages,
     )
     try:
         return out_model.model_validate(data)
     except ValidationError:
-        user_fixed = user + (
-            "\n\n[FIX] Your last reply had schema errors (missing fields or wrong types). "
+        fix_text = (
+            "[FIX] Your last reply had schema errors (missing fields or wrong types). "
             "Return ONLY the complete JSON matching the required schema. No reasoning, no commentary."
         )
+        if messages is None:
+            retry_user = user + "\n\n" + fix_text
+            retry_messages = None
+        else:
+            retry_user = user
+            retry_messages = [*base_messages, {"role": "user", "content": fix_text}]
         data = await _chat_json(
-            provider, model, system, user_fixed, schema,
+            provider, model, system, retry_user, schema,
             thinking=thinking, reasoning_effort=reasoning_effort, stage=stage,
+            messages=retry_messages,
         )
         try:
             return out_model.model_validate(data)
@@ -230,7 +344,8 @@ async def _chat_json_validate(
             # 兜底：思考模式输出持续不合格时退到非思考再试一次，保证窗口完成
             if thinking == "enabled":
                 data = await _chat_json(
-                    provider, model, system, user_fixed, schema, thinking="disabled", stage=stage
+                    provider, model, system, retry_user, schema, thinking="disabled", stage=stage,
+                    messages=retry_messages,
                 )
                 return out_model.model_validate(data)
             raise
@@ -246,13 +361,25 @@ async def _chat_json(
     provider: LLMProvider, model: str, system: str, user: str, schema: dict,
     thinking: str | None = "disabled", reasoning_effort: str | None = None,
     max_tokens: int | None = None, stage: str = "translate",
+    messages: list[dict] | None = None,
 ):
     """调用并解析 JSON；输出格式瑕疵时重试一次（带修复提示）。
 
     截断（finish_reason=length）恢复：思考模式下思维链与译文共享 completion 预算，
     关思考后把预算提升给译文（历史做法把预算砍到 4096 导致反复截断）。
     """
-    messages = [{"role": "system", "content": system}, {"role": "user", "content": user}]
+    if messages is not None:
+        messages = [dict(m) for m in messages]
+        if messages and messages[0].get("role") == "system":
+            messages[0]["content"] = append_thinking_standard(
+                str(messages[0].get("content") or ""), thinking
+            )
+    else:
+        system = append_thinking_standard(system, thinking)
+        messages = [
+            {"role": "system", "content": system},
+            {"role": "user", "content": user},
+        ]
     resp = await provider.chat(
         model=model,
         messages=messages,
@@ -348,21 +475,47 @@ async def translate_window_draft(
     window_id: str,
     context: ContextResult,
     source_chars: int | None = None,
+    segments: list[dict] | None = None,
+    task_id: str | None = None,
+    window_key: str | None = None,
 ) -> list[dict]:
     """Draft 阶段：只锁事实，不依赖 carry-over，可安全并发；顺带输出 carry-over。
 
     carry-over 由 Draft 生成（而非 Polish）后，Polish 即可窗口级并发：
     各窗口 Polish 消费的是前一窗口 Draft 已锁定的事实状态，不依赖前一窗口 Polish。
     """
+    use_conversation = _conversation_cache_enabled(provider, task_id, window_key)
+    system = CONVERSATION_SYSTEM if use_conversation else DRAFT_SYSTEM
+    user = (
+        DRAFT_STAGE_INSTRUCTION + "\n\n" + context.prompt_text
+        if use_conversation else context.prompt_text
+    )
+    messages = (
+        [{"role": "system", "content": system}, {"role": "user", "content": user}]
+        if use_conversation else None
+    )
     draft = await _chat_json_validate(
-        provider, model, DRAFT_SYSTEM, context.prompt_text,
+        provider, model, system, user,
         DraftOutput.model_json_schema(), DraftOutput, thinking="disabled",
         max_tokens=min(8192, estimate_window_output_tokens(source_chars or 2048)),
         stage="draft",
+        messages=messages,
     )
-    return [t.model_dump() for t in draft.translations], (
-        draft.carry_over.model_dump() if draft.carry_over else None
-    )
+    draft_entries = [t.model_dump() for t in draft.translations]
+    if segments:
+        draft_entries = normalize_translation_entries(segments, draft_entries)
+    draft_carry = draft.carry_over.model_dump() if draft.carry_over else None
+    if use_conversation and task_id and window_key:
+        assistant_payload = {
+            "window_id": draft.window_id or window_id,
+            "translations": [t.model_dump() for t in draft.translations],
+            "carry_over": draft_carry,
+        }
+        _put_window_conversation(
+            task_id, window_key, model, system, user,
+            json.dumps(assistant_payload, ensure_ascii=False, separators=(",", ":")),
+        )
+    return draft_entries, draft_carry
 
 
 def draft_prompt_block(draft: list[dict]) -> str:
@@ -390,6 +543,8 @@ async def translate_window_polish(
     carry_over: dict | None,
     segments: list[dict] | None = None,
     force_no_thinking: bool = False,
+    task_id: str | None = None,
+    window_key: str | None = None,
 ) -> tuple[list[dict], dict]:
     """Polish 阶段：情境自然化 + carry-over 生成；单窗口内串行。"""
     draft_block = draft_prompt_block(draft)
@@ -397,8 +552,26 @@ async def translate_window_polish(
     # 超大窗口关思考翻译，译文预算 8K 兜底，先保证不截断（历史 finish_reason=length 根因）
     src_chars = sum(len(s.get("source_text", "")) for s in (segments or []))
     use_thinking = _should_think_for_window(src_chars) and not force_no_thinking
+    conversation = (
+        _get_window_conversation(task_id, window_key, model)
+        if _conversation_cache_enabled(provider, task_id, window_key)
+        else None
+    )
+    if conversation:
+        system = conversation["system"]
+        user = POLISH_STAGE_INSTRUCTION
+        messages = [
+            {"role": "system", "content": system},
+            {"role": "user", "content": conversation["draft_user"]},
+            {"role": "assistant", "content": conversation["draft_assistant"]},
+            {"role": "user", "content": user},
+        ]
+    else:
+        system = POLISH_SYSTEM
+        user = context.prompt_text + draft_block
+        messages = None
     polish = await _chat_json_validate(
-        provider, model, POLISH_SYSTEM, context.prompt_text + draft_block,
+        provider, model, system, user,
         PolishOutput.model_json_schema(), PolishOutput,
         thinking="enabled" if use_thinking else "disabled",
         reasoning_effort="low" if use_thinking else None,
@@ -406,8 +579,11 @@ async def translate_window_polish(
             None if use_thinking else min(8192, estimate_window_output_tokens(src_chars))
         ),
         stage="polish",
+        messages=messages,
     )
     polish_list = [t.model_dump() for t in polish.translations]
+    if segments:
+        polish_list = normalize_translation_entries(segments, polish_list)
     seg_by_id = {s["segment_id"]: s for s in (segments or [])}
     for entry in polish_list:
         text = localize_screenplay_marks(entry.get("target_text") or "")
@@ -450,6 +626,7 @@ async def translate_window(
     draft, _draft_carry = await translate_window_draft(
         provider=provider, model=model, window_id=window_id, context=context,
         source_chars=sum(len(s.get("source_text", "")) for s in (segments or [])),
+        segments=segments,
     )
     polish, carry = await translate_window_polish(
         provider=provider, model=model, window_id=window_id, context=context,
@@ -521,7 +698,131 @@ def localize_screenplay_marks(text: str) -> str:
 
 _SCENE_NO_RE = re.compile(r"^\s*(\d+)\s*[-–]\s*(\d+)")
 _DIALOGUE_SRC_RE = re.compile(r"^\s*([^（(：:]+?)\s*(?:[（(][^）)]*[）)])?\s*[:：]\s*(.+)$")
-_DIALOGUE_TGT_RE = re.compile(r"^\s*([A-Za-z][A-Za-z0-9 .'’&/+_-]*?)\s*(?:\([^)]*\))?\s*[:：]\s*(.+)$")
+# 英文角色标签：允许多个表演提示（如 (voice-over) (anxious)）、Markdown 加粗，
+# 以及冒号/破折号分隔。合法标签不能因为格式差异被误报为“缺少角色标签”。
+DIALOGUE_TARGET_RE = re.compile(
+    r"^\s*(?:\*\*|__)?\s*([A-Za-z][A-Za-z0-9 .'’&/+_#-]*?)\s*"
+    r"(?:\s*\([^)]*\))*\s*(?:\*\*|__)?\s*(?::|：|—|–|\s-\s)\s*(.+)$"
+)
+
+
+_FRONT_MATTER_MARKERS = ("故事大纲", "人物小传", "Story Outline", "Character Bios")
+
+
+def _lines(text: str) -> list[str]:
+    return [x.strip() for x in (text or "").strip().splitlines() if x.strip()]
+
+
+def _is_front_matter_text(text: str) -> bool:
+    """仅豁免剧本前置元数据（片名/大纲/人物小传）的行数硬校验。
+
+    正文动作与旁白仍逐行校验；前置元数据不是表演内容，模型常把段落合并，
+    不应因此让整窗反复重试。
+    """
+    lines = _lines(text)
+    return len(lines) > 8 and any(marker in text for marker in _FRONT_MATTER_MARKERS)
+
+
+def _restore_scene_number(segment: dict, target_text: str) -> str:
+    """模型把「1-2 场景标题」写成 INT. 时，确定性地补回场次号。"""
+    if segment.get("segment_type") != "heading":
+        return target_text
+    src_lines = _lines(segment.get("source_text") or "")
+    if not src_lines:
+        return target_text
+    match = _SCENE_NO_RE.match(src_lines[0])
+    if not match:
+        return target_text
+    wanted = f"{match.group(1)}-{match.group(2)}"
+    if re.match(r"^\s*\d+\s*[-–]\s*\d+", target_text or ""):
+        return target_text
+    return f"{wanted} {target_text.lstrip()}" if (target_text or "").strip() else target_text
+
+
+def _split_action_target(src_text: str, target_text: str) -> str:
+    """把模型合并的多行动作/音效译文按原文行数拆回，保留全部文字。
+
+    动作行最终用中文原文交付，但内部译文仍需满足逐行结构；这里先做确定性
+    拆分，避免因模型合并行触发整窗失败。无法可靠拆分时保持原样，交给修复层。
+    """
+    src_lines = _lines(src_text)
+    tgt_lines = _lines(target_text)
+    if len(src_lines) < 2 or len(tgt_lines) >= len(src_lines):
+        return target_text
+    if not all(line.startswith(("△", "【")) for line in src_lines):
+        return target_text
+    body = " ".join(
+        re.sub(r"^\s*[△\[]\s*", "", line).strip(" []") for line in tgt_lines
+    ).strip()
+    if not body:
+        return target_text
+    parts = [p.strip() for p in re.split(r"(?<=[.!?…])\s+", body) if p.strip()]
+    if len(parts) < len(src_lines):
+        return target_text
+    if len(parts) > len(src_lines):
+        # 多出的句子并入最后一行，保证行数与原段一致。
+        parts = parts[: len(src_lines) - 1] + [" ".join(parts[len(src_lines) - 1 :])]
+    rendered: list[str] = []
+    for source_line, part in zip(src_lines, parts):
+        if source_line.startswith("△"):
+            rendered.append(f"△ {part}")
+        else:
+            rendered.append(f"[{part.strip(' []')}]")
+    return "\n".join(rendered)
+
+
+def normalize_translation_entries(
+    segments: list[dict], entries: list[dict],
+) -> list[dict]:
+    """在进入结构校验前修正模型输出的可恢复偏差。
+
+    1. 丢弃不存在的 segment_id / 重复项；
+    2. 当条目数一致但 ID 集合错位时，按源窗口顺序重映射（模型最常见错误）；
+    3. 补回场景号；
+    4. 把多行动作段的合并译文按句拆回原行。
+    """
+    expected = [str(s.get("segment_id") or "") for s in segments]
+    expected = [sid for sid in expected if sid]
+    if not expected or not entries:
+        return entries
+    expected_set = set(expected)
+    by_id: dict[str, dict] = {}
+    unknown = 0
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        sid = str(entry.get("segment_id") or "")
+        if sid not in expected_set:
+            unknown += 1
+            continue
+        if sid not in by_id:
+            by_id[sid] = dict(entry)
+
+    canonical: dict[str, dict] = {}
+    if len(entries) == len(expected) and (len(by_id) != len(expected) or unknown):
+        # 模型通常保持顺序但会臆造一个 ID；在条数完全一致时按顺序重映射。
+        # 后续 validate_window 仍会复核每个段的说话人/场次/行结构。
+        for seg, entry in zip(segments, entries):
+            if isinstance(entry, dict):
+                canonical[str(seg["segment_id"])] = {
+                    **entry, "segment_id": str(seg["segment_id"])
+                }
+    else:
+        canonical = by_id
+
+    out: list[dict] = []
+    for seg in segments:
+        sid = str(seg.get("segment_id") or "")
+        entry = canonical.get(sid)
+        if entry is None:
+            continue
+        text = entry.get("target_text") or ""
+        if not isinstance(text, str):
+            text = str(text)
+        text = _restore_scene_number(seg, text)
+        text = _split_action_target(seg.get("source_text") or "", text)
+        out.append({**entry, "segment_id": sid, "target_text": text})
+    return out
 
 
 def _has_wrong_known_speaker(
@@ -567,7 +868,7 @@ def _anchor_errors(src: dict, tgt_lines: list[str], speaker_map: dict[str, str] 
                 continue
             if idx >= len(tgt_lines):
                 break
-            tm = _DIALOGUE_TGT_RE.match(tgt_lines[idx])
+            tm = DIALOGUE_TARGET_RE.match(tgt_lines[idx])
             if not tm:
                 errors.append(f"对白缺少角色标签: {sid} 第{idx + 1}行")
                 continue
@@ -629,7 +930,7 @@ def validate_window(
         if src is None:
             continue
         # 已有英文标题可压缩成一行；标题后续会确定性回写，不做逐行覆盖校验。
-        if src.get("line_count_optional"):
+        if src.get("line_count_optional") or _is_front_matter_text(src.get("source_text", "")):
             continue
         src_lines = [x for x in src.get("source_text", "").strip().split("\n") if x.strip()]
         tgt_lines = [x for x in t.get("target_text", "").strip().split("\n") if x.strip()]
@@ -719,6 +1020,7 @@ async def repair_segments(
     issues: list[dict],
     seg_ids: list[str],
     line_counts: dict[str, int] | None = None,
+    thinking: str | None = "enabled",
 ) -> dict[str, str]:
     """QA 定点修复：只重译问题段，窗口其余译文保持不变（避免整窗重做浪费时间）。
 
@@ -765,13 +1067,23 @@ async def repair_segments(
     )
     # 修复通常只涉及少量问题段：给够译文与思考预算，但不固定申请 32K，
     # 避免小上下文模型因 prompt + max_tokens 超过上限而永久失败。
-    repair_budget = min(
-        16384,
-        max(8192, estimate_tokens(json.dumps(sub_draft, ensure_ascii=False)) * 2 + 2000),
-    )
+    # 修复只是结构/术语兜底，不应为了几行文本固定申请 16K 思维预算。
+    # 关闭思考时按实际输入估算，既降低成本，也避免小上下文模型因预算过大而拒绝。
+    if thinking == "enabled":
+        repair_budget = min(
+            16384,
+            max(8192, estimate_tokens(json.dumps(sub_draft, ensure_ascii=False)) * 2 + 2000),
+        )
+    else:
+        repair_budget = min(
+            8192,
+            max(2048, estimate_tokens(json.dumps(sub_draft, ensure_ascii=False)) * 2 + 1000),
+        )
     out = await _chat_json_validate(
         provider, model, system, user, RepairOutput.model_json_schema(), RepairOutput,
-        thinking="enabled", reasoning_effort="low", max_tokens=repair_budget,
+        thinking=thinking,
+        reasoning_effort="low" if thinking == "enabled" else None,
+        max_tokens=repair_budget,
         stage="repair",
     )
     return {

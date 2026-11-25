@@ -3,7 +3,7 @@
 import uuid
 from datetime import datetime, timezone
 
-from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, String
+from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.core.database import Base
@@ -40,4 +40,6 @@ class LLMCall(Base):
     latency_ms: Mapped[float] = mapped_column(Float, default=0)
     finish_reason: Mapped[str | None] = mapped_column(String(32), nullable=True)
     error_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    # 请求参数降级记录（JSON）：[{step, removed, status, detail}]。
+    degradations_json: Mapped[str] = mapped_column(Text, default="[]")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)

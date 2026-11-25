@@ -22,6 +22,7 @@ from app.models.document import Chapter, Scene, SourceSegment
 from app.models.project import Project
 from app.models.qa import QAIssue
 from app.models.translation import Translation
+from app.services.translation import DIALOGUE_TARGET_RE
 from app.services.title_service import SourceTitle, detect_source_title
 
 FORMATS = {"md": ".md", "txt": ".txt", "docx": ".docx"}
@@ -29,11 +30,8 @@ FORMATS = {"md": ".md", "txt": ".txt", "docx": ".docx"}
 # 原文台词行："角色（中文语气说明）：台词"
 _DIALOGUE_SRC_RE = re.compile(r"^\s*([^（(：:]+?)\s*[（(]([^）)]*)[）)]\s*[:：]\s*(.*)$")
 # 译文台词行："Role (english direction): line"
-_DIALOGUE_EN_RE = re.compile(
-    # 角色标签允许多人同说（A/B、A+B）以及英文名中的常见连接符；
-    # 必须与 translation.py 的台词锚点校验保持一致，否则交付版会退回未格式化的译文行。
-    r"^\s*([A-Za-z][A-Za-z0-9 .'’&/+_-]*?)\s*(?:\([^)]*\))?\s*[:：]\s*(.*)$"
-)
+# 必须与 translation.py 的台词锚点校验共用同一规则，否则交付版会退回未格式化的译文行。
+_DIALOGUE_EN_RE = DIALOGUE_TARGET_RE
 _CHAPTER_HEADING_RE = re.compile(r"^第\s*[0-9一二三四五六七八九十百]+\s*[集話话回章]")
 _SCENE_HEADING_RE = re.compile(r"^\d+\s*[-–]\s*\d+\s*\S")
 _CAST_HEADING_RE = re.compile(r"^\s*(?:人物列表|人物)\s*[：:]")
@@ -103,6 +101,16 @@ def _build_role_map(segs, trans) -> dict[str, str]:
         en_role = (en_role or "").strip()
         if not src_role or not en_role or src_role == en_role:
             return
+        # 模型有时把角色名写成全大写（LEO/DAMIAN/RICHARD）。
+        # 仅对源角色本身是英文名字时恢复 Title Case，避免误伤 FBI/PR 等缩写。
+        if (
+            en_role.isupper()
+            and en_role.isalpha()
+            and len(en_role) > 2
+            and src_role.isascii()
+            and src_role.replace(" ", "").isalpha()
+        ):
+            en_role = en_role.title()
         counts.setdefault(src_role, {})
         counts[src_role][en_role] = counts[src_role].get(en_role, 0) + 1
         first_seen.setdefault((src_role, en_role), order)

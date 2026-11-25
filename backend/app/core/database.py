@@ -25,7 +25,10 @@ def make_engine(database_url: str | None = None) -> Engine:
     """创建带 SQLite 外键与 WAL 的引擎。"""
     url = database_url or settings.database_url
     _ensure_dir(url)
-    engine = create_engine(url, connect_args={"check_same_thread": False})
+    engine = create_engine(
+        url,
+        connect_args={"check_same_thread": False, "timeout": 30},
+    )
 
     @event.listens_for(engine, "connect")
     def _sqlite_pragmas(dbapi_conn, _record) -> None:
@@ -33,6 +36,8 @@ def make_engine(database_url: str | None = None) -> Engine:
         cursor.execute("PRAGMA foreign_keys=ON")
         cursor.execute("PRAGMA journal_mode=WAL")
         cursor.execute("PRAGMA synchronous=NORMAL")
+        # 并发窗口写入时等待短暂锁，而不是立刻报 database is locked。
+        cursor.execute("PRAGMA busy_timeout=10000")
         cursor.close()
 
     return engine

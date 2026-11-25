@@ -16,6 +16,7 @@ from app.models.dialogue import DialogueLine
 from app.models.task import Task, TaskItem
 from app.models.audit import AuditLog
 from app.models.storyline import ChapterStoryline
+from app.models.continuity import CharacterState, StoryFact
 from app.models.translation import StyleGuide, Translation
 from app.models.usage import LLMCall
 
@@ -57,6 +58,8 @@ def delete_project_cascade(db: Session, project_id: str) -> bool:
     db.execute(delete(StyleGuide).where(StyleGuide.project_id == project_id))
     db.execute(delete(DialogueLine).where(DialogueLine.project_id == project_id))
     db.execute(delete(AuditLog).where(AuditLog.project_id == project_id))
+    db.execute(delete(StoryFact).where(StoryFact.project_id == project_id))
+    db.execute(delete(CharacterState).where(CharacterState.project_id == project_id))
     db.execute(
         delete(ChapterStoryline).where(
             ChapterStoryline.chapter_id.in_(

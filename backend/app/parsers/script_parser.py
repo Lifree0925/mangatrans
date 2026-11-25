@@ -11,6 +11,7 @@ import re
 from dataclasses import dataclass, field
 
 _CN_NUM = "一二三四五六七八九十百千零两"
+PARSER_VERSION = "1.1.0"
 
 # 规则 ID 常量
 RULE_MD_HEADING = "md_heading"
@@ -18,6 +19,7 @@ RULE_CHAPTER = "chapter_title"
 RULE_SCENE_BRACKET = "scene_bracket"
 RULE_SCENE_LOC = "scene_location"
 RULE_SCENE_SEP = "scene_separator"
+RULE_CAST_LIST = "cast_list"
 RULE_DIALOGUE = "dialogue"
 RULE_PAREN = "parenthetical"
 RULE_NARRATIVE = "narrative"
@@ -32,6 +34,8 @@ _SCENE_HINT_RE = re.compile(r"[·・]|内景|外景|室内|室外|日内|夜内|
 _SCENE_LOC_RE = re.compile(
     r"^(内景|外景|日内|夜内|日外|夜外|场景|镜头|第\d+场|第[\u4e00-\u9fa5]+场)[：:\s]"
 )
+# 常见剧本场次标题：26-4 地点 时间 内外。必须带地点等内容，避免把日期/编号误判为场景。
+_SCENE_NUMBERED_RE = re.compile(r"^\d{1,4}\s*[-–—－]\s*\d{1,4}\s+\S.*$")
 _SCENE_SEP_RE = re.compile(r"^[-—–]{3,}\s*$")
 _DIALOGUE_RE = re.compile(
     r"^([^\s：:（）()【】\[.\]\"'’“”]{1,24})\s*(?:（[^）]{1,40}）)?[：:](\s*.*)$"
@@ -87,7 +91,7 @@ class ParseReport:
     heading_count: int = 0
     other_count: int = 0
     anomalies: list[str] = field(default_factory=list)
-    parser_version: str = "1.0.0"
+    parser_version: str = PARSER_VERSION
     coverage_ok: bool = False
 
 
@@ -122,7 +126,7 @@ def _classify_line(line: str) -> tuple[str, str, str | None]:
     if stripped.startswith("△"):
         return "narrative", RULE_NARRATIVE, None
     if _CAST_LIST_RE.match(stripped):
-        return "narrative", RULE_NARRATIVE, None
+        return "narrative", RULE_CAST_LIST, None
     if _CHAPTER_RE.match(stripped):
         return "heading", RULE_CHAPTER, None
     m_bracket = _SCENE_BRACKET_RE.match(stripped)
@@ -132,7 +136,9 @@ def _classify_line(line: str) -> tuple[str, str, str | None]:
         if "：" in stripped or ":" in stripped or not _SCENE_HINT_RE.search(inner):
             return "narrative", RULE_PAREN, None
         return "heading", RULE_SCENE_BRACKET, None
-    if _SCENE_LOC_RE.match(stripped) and len(stripped) <= 40:
+    if (
+        _SCENE_LOC_RE.match(stripped) or _SCENE_NUMBERED_RE.match(stripped)
+    ) and len(stripped) <= 80:
         return "heading", RULE_SCENE_LOC, None
     if _SCENE_SEP_RE.match(stripped):
         return "heading", RULE_SCENE_SEP, None
@@ -291,6 +297,20 @@ def parse_script(text: str) -> ParseResult:
                 SegmentBlock(
                     type="dialogue", text=raw_line, start=pos, end=pos + len(raw_line),
                     rule_id=rule, speaker=speaker, chapter_no=chapter_no, scene_no=scene_no,
+                )
+            )
+            pos += len(raw_line)
+            continue
+
+        # 人物表是制作元数据：独立成段，避免与下一行动作/叙述合并后
+        # 迫使模型在同一 segment 内同时处理元数据和表演内容。
+        if ltype == "narrative" and rule == RULE_CAST_LIST:
+            flush_narrative(pos)
+            ensure_chapter()
+            segments.append(
+                SegmentBlock(
+                    type="narrative", text=raw_line, start=pos, end=pos + len(raw_line),
+                    rule_id=rule, chapter_no=chapter_no, scene_no=scene_no,
                 )
             )
             pos += len(raw_line)

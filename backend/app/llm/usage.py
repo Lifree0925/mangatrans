@@ -5,6 +5,7 @@
 
 from contextlib import contextmanager
 from contextvars import ContextVar
+import json
 from typing import Any
 
 _TASK_ID: ContextVar[str | None] = ContextVar("llm_task_id", default=None)
@@ -88,6 +89,7 @@ def record_usage(
     finish_reason: str | None = None,
     error_code: str | None = None,
     success: bool = True,
+    degradations: list[dict] | None = None,
 ) -> None:
     """写入一条阶段级模型调用记录。失败静默，绝不干扰业务。"""
     try:
@@ -109,6 +111,7 @@ def record_usage(
                     latency_ms=float(latency_ms or 0),
                     finish_reason=(finish_reason or None),
                     error_code=(error_code or None),
+                    degradations_json=json.dumps(degradations or [], ensure_ascii=False),
                 )
             )
             db.commit()

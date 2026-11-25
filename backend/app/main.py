@@ -14,7 +14,9 @@ from app import __version__
 from app.api.v1 import dialogue, documents, knowledge, projects, qa, settings_api, translation
 from app.core import security
 from app.core.config import settings
+from app.core.credentials import CredentialStoreError
 from app.core.single_instance import acquire_single_instance
+from app.pipeline.runner import ActiveTaskConflict
 
 # 单实例锁：同一数据目录已有后端存活时本进程退出，避免孤儿进程堆积与并发写库。
 # 注意：锁获取失败不等于「已有实例」——Windows 锁机制异常时若直接退出，
@@ -79,8 +81,17 @@ def run_migrations_if_needed() -> None:
 async def lifespan(_app: FastAPI):
     """启动迁移、恢复已验证模型到 registry、启动持久 Worker；退出时取消 Worker。"""
     from app.pipeline.worker import worker_loop
+    from app.core import credentials
 
     run_migrations_if_needed()
+    # 历史明文凭据仅在系统凭据库写入并回读成功后删除；失败时保留原文件，
+    # 正式环境后续读取会返回明确错误，不会继续使用明文。
+    try:
+        migrated = credentials.migrate_file_credentials()
+        if migrated:
+            print(f"backend: migrated {migrated} credential(s) to system store", flush=True)
+    except Exception as exc:  # noqa: BLE001 启动可继续，但凭据操作会明确报错
+        print(f"backend: credential migration failed: {exc}", flush=True)
 
     # 重启后必须从数据库恢复已验证模型到内存 registry，
     # 否则翻译任务会落到开发用 FakeProvider（返回空对象导致失败）。
@@ -91,7 +102,15 @@ async def lifespan(_app: FastAPI):
     from app.services.provider_service import set_default_from_db
 
     with dbmod.SessionLocal() as db:
-        set_default_from_db(db)
+        try:
+            set_default_from_db(db)
+        except CredentialStoreError as exc:
+            # 凭据库异常不应让整个本地服务无法启动；设置页/凭据操作会返回明确错误。
+            print(f"backend: credential store unavailable: {exc}", flush=True)
+            from app.llm.fake import FakeProvider
+            from app.llm.registry import set_provider
+
+            set_provider(FakeProvider())
         # 崩溃恢复：把无执行线程的 running 线程型任务标记失败（可手动重试）
         recover_threaded_tasks(db)
         # 进程重启后无正在执行的窗口：全部 running 项回 pending，Worker 立即续跑
@@ -116,6 +135,14 @@ async def lifespan(_app: FastAPI):
 
 def create_app() -> FastAPI:
     app = FastAPI(title="Mangatrans Local API", version=__version__, lifespan=lifespan)
+
+    @app.exception_handler(ActiveTaskConflict)
+    async def _active_task_conflict(_request: Request, exc: ActiveTaskConflict):
+        return JSONResponse(status_code=409, content={"detail": str(exc)})
+
+    @app.exception_handler(CredentialStoreError)
+    async def _credential_store_error(_request: Request, exc: CredentialStoreError):
+        return JSONResponse(status_code=503, content={"detail": str(exc)})
 
     # CORS 仅允许本机前端与 Tauri 来源
     app.add_middleware(

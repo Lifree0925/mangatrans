@@ -1,8 +1,8 @@
 /** 任务中心：任务步骤明细、进度与错误（中文）。 */
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Link } from "react-router-dom";
+import { Link, useSearchParams } from "react-router-dom";
 import { Archive, Circle, CheckCircle2, History, Loader2, Pause, Play, RotateCcw, Trash2, Undo2, X, XCircle } from "lucide-react";
 import { api } from "../lib/api";
 import { toast, useConfirmStore } from "../lib/feedback";
@@ -149,16 +149,20 @@ function stepDetail(key: string, step: Record<string, unknown> | undefined): str
     case "translation": {
       const s = step as {
         done?: number; total?: number; phase?: string; draft_done?: number;
-        model_done?: number; model_total?: number; active_polish?: number;
-        failed_windows?: number;
+        active_polish?: number; failed_windows?: number;
+        finalize_done?: number; structure_fallbacks?: number;
       };
       if (s.total == null) return "";
       if (s.phase === "draft") {
         const pct = s.total ? Math.round(((s.draft_done ?? 0) / s.total) * 100) : 0;
-        const polishStarted = (s.model_done ?? 0) > 0
-          ? ` · 同步润色 ${s.model_done} / ${s.model_total ?? 0}`
-          : "";
+        const polishStarted = (s.active_polish ?? 0) > 0 ? " · 同步润色中" : "";
         return `草稿锁事实 ${s.draft_done ?? 0} / ${s.total} 个窗口（${pct}%）${polishStarted}`;
+      }
+      if (s.phase === "repair" || s.phase === "finalize") {
+        const pct = s.total ? Math.round(((s.finalize_done ?? 0) / s.total) * 100) : 0;
+        const fallback = s.structure_fallbacks ? ` · 结构兜底 ${s.structure_fallbacks} 段` : "";
+        const label = s.phase === "repair" ? "结构校验与修复" : "最终校验与落库";
+        return `${label} ${s.finalize_done ?? 0} / ${s.total} 个窗口（${pct}%）${fallback}`;
       }
       const pct = s.total ? Math.round(((s.done ?? 0) / s.total) * 100) : 0;
       const failed = s.failed_windows ? ` · ${s.failed_windows} 个窗口校验失败` : "";
@@ -334,6 +338,9 @@ function TranslateSteps({ task }: { task: TaskInfo }) {
 
 export default function TasksPage() {
   const qc = useQueryClient();
+  const [searchParams] = useSearchParams();
+  const focusedTaskId = searchParams.get("task");
+  const focusedOnceRef = useRef(false);
   const [showHistory, setShowHistory] = useState(false);
   const tasks = useQuery({
     queryKey: ["tasks"],
@@ -344,6 +351,15 @@ export default function TasksPage() {
       return rows?.some((t) => t.status === "running" || t.status === "queued") ? 1500 : 10000;
     },
   });
+
+  useEffect(() => {
+    if (!focusedTaskId || focusedOnceRef.current || !tasks.data) return;
+    const el = document.getElementById(`task-${focusedTaskId}`);
+    if (el) {
+      el.scrollIntoView({ block: "center", behavior: "smooth" });
+      focusedOnceRef.current = true;
+    }
+  }, [focusedTaskId, tasks.data]);
 
   const pauseTask = useMutation({
     mutationFn: (id: string) => api(`/tasks/${id}/pause`, { method: "POST", body: "{}" }),
@@ -426,17 +442,22 @@ export default function TasksPage() {
             const doneN = trStep?.total != null ? trStep.done ?? 0 : prog.done ?? 0;
             const totalN = trStep?.total != null ? trStep.total : prog.total ?? 0;
             const draftN = trStep?.draft_done ?? prog.draft_done ?? 0;
-            // 初翻和润色并行时，按两个阶段合计进度展示；模型已返回但尚未落库也计入。
-            const livePolish = Math.max(
-              doneN,
-              (trStep?.base_done ?? doneN) + (trStep?.model_done ?? 0),
-            );
+            // 只按已经通过结构校验并落库的窗口推进，避免模型“已返回但未落库”被误显示为完成。
+            const livePolish = doneN;
             const combinedTotal = totalN > 0 ? totalN * 2 : 0;
             const pct = combinedTotal
               ? Math.min(100, Math.round(((Math.min(totalN, draftN) + Math.min(totalN, livePolish)) / combinedTotal) * 100))
               : null;
             return (
-              <div key={t.id} className="rounded-xl border border-(--color-border) bg-(--color-panel) px-4 py-3">
+              <div
+                key={t.id}
+                id={`task-${t.id}`}
+                className={`rounded-xl border bg-(--color-panel) px-4 py-3 transition-colors ${
+                  focusedTaskId === t.id
+                    ? "border-(--color-accent) ring-2 ring-(--color-accent)"
+                    : "border-(--color-border)"
+                }`}
+              >
                 <div className="flex items-center gap-3">
                   <span className="rounded-md bg-(--color-panel2) px-2 py-0.5 text-xs font-medium">
                     {taskTypeLabel[t.task_type] ?? t.task_type}
@@ -574,30 +595,16 @@ export default function TasksPage() {
                   </p>
                 )}
                 {t.usage && (t.usage.requests ?? 0) > 0 && (() => {
-                  const cachedTokens = t.usage?.cached_tokens ?? 0;
-                  const cacheTokenRate = t.usage?.cache_token_rate ?? 0;
+                  const cachedInput = t.usage?.cached_tokens ?? 0;
+                  const totalInput = t.usage?.prompt_tokens ?? 0;
+                  const uncachedInput = Math.max(0, totalInput - cachedInput);
+                  const output = t.usage?.completion_tokens ?? 0;
                   return (
-                  <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 rounded-lg bg-(--color-panel2) px-3 py-2 text-xs text-(--color-muted)">
-                    <span>输入 {(t.usage?.prompt_tokens ?? 0).toLocaleString()} tokens</span>
-                    <span>输出 {(t.usage?.completion_tokens ?? 0).toLocaleString()} tokens</span>
-                    <span>API 总用量 {(t.usage?.api_total_tokens ?? 0).toLocaleString()} tokens</span>
-                    {cachedTokens > 0 && (
-                      <span className="text-emerald-600">
-                        缓存命中率 {cacheTokenRate}%
-                      </span>
-                    )}
-                    {(t.usage.failed_requests ?? 0) > 0 && <span className="text-red-600">失败请求 {t.usage.failed_requests}</span>}
-                    {(t.usage.latency_ms ?? 0) > 0 && <span>模型耗时 {(t.usage.latency_ms! / 1000).toFixed(0)} 秒</span>}
-                    {t.usage?.by_stage && Object.keys(t.usage.by_stage).length > 0 && (
-                      <span className="basis-full">
-                        阶段：{Object.entries(t.usage.by_stage).map(([stage, s]) => `${({
-                          knowledge: "知识", profile: "角色", storyline: "剧情", trial: "风格",
-                          draft: "初翻", polish: "润色", qa: "质检", repair: "修复", term_lock: "术语",
-                          dialogue_extract: "台词抽取", dialogue_align: "台词对齐", style_guide: "风格",
-                        } as Record<string, string>)[stage] ?? stage} ${s.requests ?? 0}`).join(" · ")}
-                      </span>
-                    )}
-                  </div>
+                    <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 rounded-lg bg-(--color-panel2) px-3 py-2 text-xs text-(--color-muted)">
+                      <span>缓存输入 {cachedInput.toLocaleString()} tokens</span>
+                      <span>未缓存输入 {uncachedInput.toLocaleString()} tokens</span>
+                      <span>输出 {output.toLocaleString()} tokens</span>
+                    </div>
                   );
                 })()}
                 {(() => {

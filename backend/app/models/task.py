@@ -3,7 +3,7 @@
 import uuid
 from datetime import datetime, timezone
 
-from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, String, Text
+from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Index, Integer, String, Text, text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.core.database import Base
@@ -19,6 +19,15 @@ def utcnow() -> datetime:
 
 class Task(Base):
     __tablename__ = "tasks"
+    __table_args__ = (
+        # 数据库层兜底：同一项目最多一个活动任务，防止并发请求各启动一个线程。
+        Index(
+            "uq_tasks_one_active_per_project",
+            "project_id",
+            unique=True,
+            sqlite_where=text("status IN ('queued', 'running', 'paused')"),
+        ),
+    )
 
     id: Mapped[str] = mapped_column(String(32), primary_key=True, default=new_id)
     project_id: Mapped[str] = mapped_column(String(32), ForeignKey("projects.id"), index=True)

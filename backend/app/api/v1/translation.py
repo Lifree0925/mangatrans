@@ -91,6 +91,8 @@ def patch_style_guide(project_id: str, payload: dict, db: Session = Depends(get_
     )
     if sg is None:
         raise HTTPException(status_code=404, detail="风格基线不存在")
+    if sg.status == "frozen":
+        raise HTTPException(status_code=409, detail="风格基线已冻结，不能修改")
     if "guide" in payload:
         sg.guide_json = json.dumps(payload["guide"], ensure_ascii=False)
     db.commit()
@@ -162,7 +164,13 @@ def list_latest_translations(project_id: str, db: Session = Depends(get_db)) -> 
 
 
 @router.get("/segments/{segment_id}/translations")
-def get_translations(segment_id: str, db: Session = Depends(get_db)) -> dict:
+def get_translations(
+    project_id: str, segment_id: str, db: Session = Depends(get_db)
+) -> dict:
+    _project(db, project_id)
+    seg = db.get(SourceSegment, segment_id)
+    if seg is None or seg.project_id != project_id:
+        raise HTTPException(status_code=404, detail="片段不存在")
     rows = list(
         db.scalars(
             select(Translation)

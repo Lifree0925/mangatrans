@@ -1,6 +1,7 @@
 """确定性 QA 与语义 QA。"""
 
 import json
+import re
 from dataclasses import dataclass, field
 
 from app.llm.json_utils import parse_llm_json
@@ -11,7 +12,12 @@ from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
 from app.llm.protocol import LLMProvider
-from app.services.term_match import select_forced_specs_for_text, target_hits_term
+from app.prompts.script_translation_prompt import thinking_standard_block
+from app.services.term_match import (
+    normalize,
+    select_forced_specs_for_text,
+    target_hits_term,
+)
 from app.models.document import SourceSegment
 from app.models.qa import QAIssue, WindowQuality
 from app.models.translation import Translation
@@ -65,8 +71,21 @@ class SemanticIssue(BaseModel):
     confidence: float = Field(default=0.5, ge=0, le=1)
 
 
+class NaturalnessEdit(BaseModel):
+    """QA 在 source-first 事实核对后给出的整段台词自然化替换。"""
+
+    segment_id: str = ""
+    target_quote: str = ""
+    suggested_text: str = ""
+    reason: str = ""
+    confidence: float = Field(default=0.0, ge=0, le=1)
+
+
 class SemanticOutput(BaseModel):
     issues: list[SemanticIssue] = Field(default_factory=list)
+    # 独立于事实 QA 的台词自然度修订。不是 QA issue，不参与质量门禁；
+    # 只有通过确定性护栏后才允许写回 polished。
+    naturalness_edits: list[NaturalnessEdit] = Field(default_factory=list)
 
 
 @dataclass
@@ -74,10 +93,22 @@ class SemanticQAResult:
     """语义 QA 必须显式表达是否真正执行成功；失败不能伪装成 0 问题。"""
     ok: bool
     issues: list[dict] = field(default_factory=list)
+    naturalness_edits: list[dict] = field(default_factory=list)
     error: str = ""
 
 
-SEMANTIC_PROMPT = """你是影视剧本翻译的终审 QA。你的职责是抓“会破坏剧情理解或连续性的大问题”，不是做润色。
+SEMANTIC_PROMPT = """你是影视剧本翻译的终审 QA，独立于润色环节。你的职责是抓“会破坏剧情理解或连续性的大问题”，不是做润色。
+
+工作方式（source-first 两遍法）：
+1. 先只读 SOURCE，在内部建立可验证单元：谁做了什么、对谁做、时间/地点、否定、条件、因果、数量、身份/关系/称呼、关键专名与物品归属。
+2. 再逐项核对 TARGET 是否覆盖或等价表达这些单元；不要从译文反推原文，也不要因为句子通顺就假定事实正确。
+3. 机器覆盖率信号只用于提示核查位置，仍须回到 SOURCE/TARGET 原文确认；误报不要输出。
+
+事实核对必须单独确认：
+- 施事/受事/使役/受益：谁对谁做了什么，动作方向、主动/被动、谁教谁、谁养谁，不能反转；
+  例如「我教了儿子四年」不能变成「养儿子的四年教会了我」；
+- 行为功能：台词是在威胁、请求、拒绝、试探、安抚还是认错，不能换成另一种行为；
+- 指代与范围：代词指向谁，时间/频率/数量/条件覆盖到哪一段。
 
 只检查以下问题：
 - omission：原文关键事实、动作、台词、音效/场景信息在译文中完全缺失；
@@ -92,7 +123,8 @@ SEMANTIC_PROMPT = """你是影视剧本翻译的终审 QA。你的职责是抓�
 
 硬性规则：
 1. 只能报告有明确原文与译文证据的问题；译文是合理意译且事实一致时，不要报告。
-2. 不报告风格、语气、用词偏好、语法小瑕疵、标点、大小写、单复数、是否口语化。
+2. 不把风格、语气、用词偏好、语法小瑕疵、标点、大小写、单复数、是否口语化作为 issue；
+   台词自然度只在 naturalness_edits 中按下一节规则处理。
 3. 不确定、需要猜测、或 confidence 低于 0.8 的问题，不要输出。
 4. 每段最多报告 3 条最高影响的问题；不要换不同说法重复同一问题。
 5. PROJECT REFERENCE 是项目事实基准。不得用它强行要求逐字措辞，只用它判断人物、地点、
@@ -102,6 +134,22 @@ SEMANTIC_PROMPT = """你是影视剧本翻译的终审 QA。你的职责是抓�
 7. 每条问题必须填写 segment_id：使用 SOURCE/TARGET 中 [方括号] 内的精确 ID。无法定位到某个 ID 的问题不要报告。
 8. 时间范围和数量范围也要检查：把“五年没去”译成“从未去过”是范围扩大；
    把“这次/这个人”译成“总是/所有人”也是范围扩大。
+9. 如果译文改变了施事/受事、动作方向或台词的行为功能，即使句子通顺也必须报告。
+
+[NATURALNESS TABLE READ — 只处理台词，不写入 issues]
+完成事实核对后，再像美国演员做 table read 一样逐条读 TARGET 中的台词。
+只有当当前台词存在明确的翻译腔、非母语搭配或中文句式残留时，才给出一条 naturalness_edit：
+- 中文话题—评论语序、堆叠定语、名词短语碎片、为解释共享信息而加的说明从句；
+- 直译中文比喻/俗语，英语观众不会在这个场景里这样说；
+- 语法上成立，但母语演员在这个人物、关系和情绪下不会这样开口。
+
+不要因为“可以更好”、个人口味、缺少俚语、语法小瑕疵、标点或语气强弱而修改。
+每条编辑必须：
+- 保留全部事实、说话人/受话人、行为功能、情绪力度、人物关系、数字、否定、条件、术语和行结构；
+- 输出该 segment 的完整替换文本，不是片段，不是解释；
+- target_quote 必须逐字复制当前 TARGET 中该段的一个连续片段；segment_id 必须是方括号内的精确 ID；
+- confidence >= 0.9；每窗最多 6 条；没有明确问题就返回空数组。
+naturalness_edits 不是 QA issue，不要放进 issues；不得修改叙述段（△、场景标题、人物表、元数据）。
 
 severity 判定：
 - critical：核心情节或人物关系被译错，读者会误解剧情；
@@ -109,7 +157,7 @@ severity 判定：
 - medium：影响理解的局部事实错误；
 - low：仅观感问题（不要报告）。
 
-只返回 JSON。
+只返回 JSON，包含 issues 与 naturalness_edits 两个字段。
 
 [PROJECT REFERENCE]
 {reference}
@@ -118,7 +166,171 @@ severity 判定：
 {source}
 
 [TARGET]
-{target}"""
+{target}
+
+[DETERMINISTIC COVERAGE SIGNALS]
+{coverage}"""
+
+
+_ZH_NEGATION_RE = re.compile(r"并非|不是|没有|从未|绝不|不能|不会|不要")
+_EN_NEGATION_RE = re.compile(
+    r"\b(?:not|no|never|none|nobody|nothing|neither|nor|without|unable|impossible|"
+    r"refuse[ds]?|denied|lack(?:s|ed)?|stop|cannot|can't|don't|doesn't|didn't|"
+    r"isn't|aren't|wasn't|weren't|won't|wouldn't|shouldn't|couldn't|mustn't|"
+    r"haven't|hasn't|hadn't)\b",
+    re.IGNORECASE,
+)
+_ZH_CONDITION_RE = re.compile(r"如果|假如|要是|只要|除非|否则|不然|一旦")
+_EN_CONDITION_RE = re.compile(
+    r"\b(?:if|unless|otherwise|as long as|only if|once|whether|or else)\b",
+    re.IGNORECASE,
+)
+_NUMBER_RE = re.compile(r"\d+(?:[.,]\d+)*")
+
+
+def build_coverage_signals(segments: list[dict], targets: dict[str, str]) -> tuple[str, dict]:
+    """机器覆盖率信号：只报告需要 QA 复核的位置，不直接判错。"""
+    rows: list[str] = []
+    stats = {"checked": 0, "negation": 0, "condition": 0, "number": 0}
+    for seg in segments:
+        sid = str(seg.get("segment_id") or "")
+        src = str(seg.get("source_text") or "")
+        tgt = str(targets.get(sid) or "")
+        if not sid or not src or not tgt:
+            continue
+        stats["checked"] += 1
+        notes: list[str] = []
+        if _ZH_NEGATION_RE.search(src) and not _EN_NEGATION_RE.search(tgt):
+            stats["negation"] += 1
+            notes.append("原文含否定/反义限定，译文中未检出否定表达")
+        if _ZH_CONDITION_RE.search(src) and not _EN_CONDITION_RE.search(tgt):
+            stats["condition"] += 1
+            notes.append("原文含条件/转折连接，译文中未检出对应连接")
+        src_nums = {x.replace(",", "") for x in _NUMBER_RE.findall(src)}
+        tgt_nums = {x.replace(",", "") for x in _NUMBER_RE.findall(tgt)}
+        missing_nums = sorted(src_nums - tgt_nums)
+        if missing_nums:
+            stats["number"] += 1
+            notes.append(f"原文数字未在译文中以数字形式出现：{', '.join(missing_nums[:6])}")
+        if notes:
+            rows.append(f"- [{sid}] " + "；".join(notes))
+    hint = "\n".join(rows[:12]) if rows else "无；仍需按 SOURCE 逐项核对。"
+    return hint, stats
+
+
+_EN_NUMBER_WORD_RE = re.compile(
+    r"\b(?:zero|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|"
+    r"thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|thirty|"
+    r"forty|fifty|sixty|seventy|eighty|ninety|hundred|thousand|million|billion|"
+    r"dozen|once|twice)\b",
+    re.IGNORECASE,
+)
+
+
+def _quote_norm(text: str) -> str:
+    return re.sub(r"\s+", " ", normalize(text)).strip()
+
+
+def _number_tokens(text: str) -> set[str]:
+    tokens = {x.replace(",", "") for x in _NUMBER_RE.findall(text or "")}
+    tokens |= {x.casefold() for x in _EN_NUMBER_WORD_RE.findall(text or "")}
+    return tokens
+
+
+def naturalness_edit_guard(
+    *, source_text: str, old_text: str, new_text: str,
+    forced_terms: dict[str, dict],
+) -> tuple[bool, str]:
+    """自然化编辑的确定性护栏：宁可少改，也不让台词编辑改坏事实。
+
+    QA 的自然度编辑必须保持否定、条件、数字和强制术语；结构、台词类型和
+    目标引用由 select_naturalness_edits 再检查。
+    """
+    old = (old_text or "").strip()
+    new = (new_text or "").strip()
+    if not old or not new:
+        return False, "empty"
+    if len(new) < max(8, int(len(old) * 0.35)) or len(new) > max(80, int(len(old) * 2.5)):
+        return False, "length"
+    if bool(_EN_NEGATION_RE.search(old)) != bool(_EN_NEGATION_RE.search(new)):
+        return False, "negation"
+    if bool(_EN_CONDITION_RE.search(old)) != bool(_EN_CONDITION_RE.search(new)):
+        return False, "condition"
+    if _number_tokens(old) != _number_tokens(new):
+        return False, "number"
+    for zh, spec in select_forced_specs_for_text(forced_terms, source_text).items():
+        en = str((spec or {}).get("en") or "")
+        if not en:
+            continue
+        variants = (spec or {}).get("variants", []) or []
+        if not target_hits_term(new, en, variants):
+            return False, f"forced_term:{zh}"
+    return True, ""
+
+
+def select_naturalness_edits(
+    *,
+    segments: list[dict],
+    targets: dict[str, str],
+    edits: list[dict],
+    forced_terms: dict[str, dict],
+    speaker_map: dict[str, str] | None = None,
+    exclude_sids: set[str] | None = None,
+    max_edits: int = 6,
+) -> dict[str, str]:
+    """筛选 QA 自然度编辑；只返回可安全写回的 segment -> 完整新文本。"""
+    # 延迟导入，避免 qa_service 与 translation 在模块加载期形成环。
+    from app.services.translation import validate_window
+
+    seg_by_id = {str(s.get("segment_id") or ""): s for s in segments}
+    target_by_id = {str(k): str(v or "") for k, v in (targets or {}).items()}
+    excluded = exclude_sids or set()
+    ranked = sorted(
+        edits or [],
+        key=lambda e: float(e.get("confidence") or 0),
+        reverse=True,
+    )
+    accepted: dict[str, str] = {}
+    for edit in ranked:
+        if len(accepted) >= max_edits:
+            break
+        sid = str(edit.get("segment_id") or "")
+        seg = seg_by_id.get(sid)
+        if not sid or seg is None or sid in excluded or sid in accepted:
+            continue
+        if str(seg.get("segment_type") or "") != "dialogue":
+            continue
+        old = target_by_id.get(sid, "")
+        quote = _quote_norm(str(edit.get("target_quote") or ""))
+        new = str(edit.get("suggested_text") or "").strip()
+        if not quote or not new or quote not in _quote_norm(old):
+            continue
+        if float(edit.get("confidence") or 0) < 0.9:
+            continue
+        ok, _reason = naturalness_edit_guard(
+            source_text=str(seg.get("source_text") or ""),
+            old_text=old,
+            new_text=new,
+            forced_terms=forced_terms,
+        )
+        if not ok:
+            continue
+        seg_dict = {
+            "segment_id": sid,
+            "segment_type": seg.get("segment_type", ""),
+            "speaker_name": seg.get("speaker_name"),
+            "source_text": seg.get("source_text", ""),
+            "line_count_optional": bool(seg.get("line_count_optional", False)),
+        }
+        errors = validate_window(
+            [seg_dict],
+            [{"segment_id": sid, "target_text": new}],
+            speaker_map=speaker_map,
+        )
+        if errors:
+            continue
+        accepted[sid] = new
+    return accepted
 
 
 def deterministic_qa(db: Session, seg: SourceSegment, tr: Translation, forced_terms: dict[str, dict]) -> list[dict]:
@@ -173,7 +385,7 @@ def _issue(
 
 async def semantic_qa(
     provider: LLMProvider, model: str, source_text: str, target_text: str,
-    reference: str = "",
+    reference: str = "", coverage: str = "",
 ) -> SemanticQAResult:
     """语义 QA：成功返回 issues；任何未完成检查都返回 ok=False。
 
@@ -183,14 +395,22 @@ async def semantic_qa(
     prompt = SEMANTIC_PROMPT.format(
         source=source_text, target=target_text,
         reference=reference or "（无额外项目事实；仅按本段原文判断）",
+        coverage=coverage or "无",
     )
     last_error = ""
     for attempt in range(2):
         use_thinking = attempt == 0
+        attempt_prompt = prompt
+        if use_thinking:
+            attempt_prompt = prompt.replace(
+                "[PROJECT REFERENCE]",
+                thinking_standard_block() + "\n\n[PROJECT REFERENCE]",
+                1,
+            )
         try:
             resp = await provider.chat(
                 model=model,
-                messages=[{"role": "user", "content": prompt}],
+                messages=[{"role": "user", "content": attempt_prompt}],
                 response_schema=SemanticOutput.model_json_schema(),
                 temperature=0.2,
                 timeout=90,
@@ -206,6 +426,7 @@ async def semantic_qa(
             return SemanticQAResult(
                 ok=True,
                 issues=[i.model_dump() for i in parsed.issues],
+                naturalness_edits=[i.model_dump() for i in parsed.naturalness_edits],
             )
         except Exception as exc:  # noqa: BLE001 记录后降级重试
             last_error = f"{type(exc).__name__}: {str(exc)[:300]}"

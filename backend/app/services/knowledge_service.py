@@ -26,7 +26,9 @@ from app.llm.protocol import LLMProvider
 from app.models.document import SourceSegment
 from app.models.knowledge import KnowledgeAlias, KnowledgeEvidence, KnowledgeItem
 from app.schemas.knowledge import ExtractionOutput
-from app.services.term_match import classify_term, enforcement_for, is_generic_source, normalize
+from app.services.term_match import (
+    classify_term, enforcement_for, is_address_form, is_generic_source, normalize,
+)
 
 EXTRACT_PROMPT = """你是剧本分析助手。任务：提取人物、术语与显式人物关系候选，并治理具名实体与跨章节设定术语。
 阅读给定的中文剧本片段，提取真正需要全文一致或影响人物理解的知识。
@@ -186,8 +188,10 @@ def merge_candidates(
         canonical = cand.canonical_key.strip()
         if not canonical:
             continue
-        if cand.item_type == "term" and is_generic_source(canonical):
-            # 泛词不进入知识库；它不需要“全文强制统一”。
+        if cand.item_type == "term" and (
+            is_generic_source(canonical) or is_address_form(canonical)
+        ):
+            # 泛词和人物称谓不进入精确术语库；称谓必须按当前语境生成。
             continue
         data = _candidate_data(cand)
         key = (cand.item_type, normalize_key(canonical))

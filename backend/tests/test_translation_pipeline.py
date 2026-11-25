@@ -12,8 +12,17 @@ from app.models.project import Project
 from app.models.task import Task, TaskItem
 from app.models.translation import ProviderConfig
 from app.pipeline.worker import claim_polish_batch
+from app.services.express import _window_concurrency_for
 from app.services.term_lock import has_pending_untranslated_terms
 from conftest import fake_translation_entries
+
+
+def test_flash_uses_higher_default_concurrency(monkeypatch) -> None:
+    monkeypatch.delenv("MT_WINDOW_CONCURRENCY", raising=False)
+    assert _window_concurrency_for("deepseek-flash") == 5
+    assert _window_concurrency_for("deepseek-v4-pro") == 3
+    monkeypatch.setenv("MT_WINDOW_CONCURRENCY", "2")
+    assert _window_concurrency_for("deepseek-flash") == 2
 
 
 def _fake() -> FakeProvider:

@@ -43,3 +43,22 @@ def test_only_opening_short_segment_preserves_title():
     assert preserved_title_for_segment(_seg(2, "The Alpha's Rejected Mate")) == "The Alpha's Rejected Mate"
     assert preserved_title_for_segment(_seg(4, "The Alpha's Rejected Mate")) is None
     assert preserved_title_for_segment(_seg(1, "Elara: Hello", "dialogue")) is None
+
+
+def test_front_matter_block_still_exposes_title_and_skips_duplicate_body():
+    from app.services.title_service import detect_source_title
+
+    segs = [
+        _seg(1, "My Little Hacker Picked Three Billionaire Dads\n"
+                 "《天才萌宝选了三个亿万富豪爹地》\n"
+                 "故事大纲\n"
+                 "纽约布鲁克林，单亲妈妈Chloe在破旧洗车行谋生。\n"
+                 "人物小传\n"
+                 "Chloe Vance\n"
+                 "隐姓埋名的传奇黑客Ghost。\n"),
+    ]
+    info = detect_source_title(segs)
+    assert info is not None
+    assert info.english_title == "My Little Hacker Picked Three Billionaire Dads"
+    assert info.chinese_title == "天才萌宝选了三个亿万富豪爹地"
+    assert info.segment_ids == ("seg-1",)

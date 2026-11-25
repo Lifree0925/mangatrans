@@ -111,3 +111,32 @@ def test_stage_direction_and_cast_list_with_colon_are_narrative() -> None:
     assert r.segments[0].speaker is None
     assert r.segments[1].speaker is None
     assert r.segments[2].speaker == "Chloe"
+
+
+def test_numbered_scene_and_cast_list_never_merge_into_action() -> None:
+    """26-4 这类场景标题必须独立成段；人物表也不能与后续动作合并。"""
+    text = (
+        "第26集\n"
+        "26-4 Klein集团顶层实验室 黑夜 内\n"
+        "人物：Richard，黑客头目\n"
+        "△进度条跳到99%。\n"
+        "Richard：二十亿是我的了！\n"
+        "26-5 地下机房 黑夜 内\n"
+        "△屏幕黑屏。\n"
+    )
+    r = parse_script(text)
+    assert r.report.coverage_ok
+    assert r.report.scene_count == 2
+    assert [s.text.strip() for s in r.segments if s.type == "heading"] == [
+        "第26集", "26-4 Klein集团顶层实验室 黑夜 内", "26-5 地下机房 黑夜 内",
+    ]
+    assert [s.text.strip() for s in r.segments if s.rule_id == "cast_list"] == [
+        "人物：Richard，黑客头目",
+    ]
+    # 场景标题与人物表都不能再混进动作/叙述段。
+    narrative = [s.text for s in r.segments if s.type == "narrative"]
+    assert narrative == [
+        "人物：Richard，黑客头目\n",
+        "△进度条跳到99%。\n",
+        "△屏幕黑屏。\n",
+    ]

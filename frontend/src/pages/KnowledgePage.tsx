@@ -15,6 +15,55 @@ type StoryCard = {
   foreshadowing: string[];
   prior_deps: string[];
   character_states: Record<string, string>;
+  character_state_details?: Array<{
+    name: string;
+    identity?: string;
+    relationship_to_protagonist?: string;
+    faction?: string;
+    emotion?: string;
+    form_of_address?: string;
+    known_secrets?: string[];
+  }>;
+  critical_facts?: Array<Record<string, unknown>>;
+};
+
+type CharacterStateRow = {
+  id: string;
+  character: string;
+  chapter_no: number;
+  version: number;
+  state: {
+    identity?: string;
+    relationship_to_protagonist?: string;
+    faction?: string;
+    emotion?: string;
+    form_of_address?: string;
+    known_secrets?: string[];
+    summary?: string;
+  };
+};
+
+type StoryFactRow = {
+  id: string;
+  chapter_no: number;
+  fact_type: string;
+  subject?: string;
+  text: string;
+};
+
+const FACT_LABELS: Record<string, string> = {
+  event: "事件",
+  prior_dependency: "前情",
+  foreshadowing: "伏笔",
+  secret: "秘密",
+  relationship: "关系",
+  identity: "身份",
+  time: "时间",
+  location: "地点",
+  possession: "归属",
+  negation_condition: "否定/条件",
+  faction: "阵营",
+  address: "称呼",
 };
 
 const STORY_FIELDS = [
@@ -28,7 +77,7 @@ export default function KnowledgePage() {
   const qc = useQueryClient();
   // 项目由路由显式指定（/knowledge/:projectId），不再使用下拉切换
   const { projectId } = useParams<{ projectId: string }>();
-  const [tab, setTab] = useState<"profiles" | "storylines" | "dialogue">("profiles");
+  const [tab, setTab] = useState<"profiles" | "storylines" | "states" | "dialogue">("profiles");
   const [adding, setAdding] = useState(false);
   const [addForm, setAddForm] = useState({ canonical_key: "", translation: "" });
 
@@ -76,6 +125,18 @@ export default function KnowledgePage() {
     queryKey: ["storylines", active],
     queryFn: () => api<ChapterStoryline[]>(`/projects/${active}/storylines`),
     enabled: !!active && tab === "storylines",
+    refetchInterval: 8000,
+  });
+  const characterStates = useQuery({
+    queryKey: ["character-states", active],
+    queryFn: () => api<CharacterStateRow[]>(`/projects/${active}/character-states`),
+    enabled: !!active && tab === "states",
+    refetchInterval: 8000,
+  });
+  const storyFacts = useQuery({
+    queryKey: ["story-facts", active],
+    queryFn: () => api<StoryFactRow[]>(`/projects/${active}/story-facts`),
+    enabled: !!active && tab === "states",
     refetchInterval: 8000,
   });
 
@@ -128,6 +189,8 @@ export default function KnowledgePage() {
       api(`/projects/${active}/storylines/${id}`, { method: "PATCH", body: JSON.stringify({ card }) }),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["storylines", active] });
+      qc.invalidateQueries({ queryKey: ["character-states", active] });
+      qc.invalidateQueries({ queryKey: ["story-facts", active] });
       setEditingStory(null);
       toast.success("剧情卡已保存");
     },
@@ -285,6 +348,12 @@ export default function KnowledgePage() {
             className={`rounded-lg px-3 py-1 text-sm ${tab === "storylines" ? "bg-(--color-panel2) font-medium" : "text-(--color-muted) hover:bg-(--color-panel)"}`}
           >
             章节剧情
+          </button>
+          <button
+            onClick={() => setTab("states")}
+            className={`rounded-lg px-3 py-1 text-sm ${tab === "states" ? "bg-(--color-panel2) font-medium" : "text-(--color-muted) hover:bg-(--color-panel)"}`}
+          >
+            人物状态
           </button>
           <button
             onClick={() => setTab("dialogue")}
@@ -576,6 +645,80 @@ export default function KnowledgePage() {
               </div>
             )}
           </div>
+          )}
+
+          {tab === "states" && (
+            <div className="mx-auto max-w-5xl space-y-6">
+              <section>
+                <h2 className="mb-2 text-sm font-semibold">状态时间线</h2>
+                <div className="space-y-2">
+                  {(characterStates.data ?? []).map((row) => {
+                    const s = row.state || {};
+                    const fields = [
+                      ["身份", s.identity],
+                      ["与主角关系", s.relationship_to_protagonist],
+                      ["阵营", s.faction],
+                      ["情绪", s.emotion],
+                      ["称呼", s.form_of_address],
+                    ].filter(([, value]) => String(value || "").trim());
+                    return (
+                      <div key={row.id} className="rounded-xl border border-(--color-border) bg-(--color-panel) px-4 py-3">
+                        <div className="flex items-center gap-2">
+                          <span className="font-medium">{row.character}</span>
+                          <span className="text-xs text-(--color-muted)">{chapterLabel(row.chapter_no, null)}</span>
+                          <span className="ml-auto text-[11px] text-(--color-muted)">v{row.version}</span>
+                        </div>
+                        {fields.length > 0 && (
+                          <div className="mt-2 flex flex-wrap gap-x-5 gap-y-1 text-xs">
+                            {fields.map(([label, value]) => (
+                              <span key={label}>
+                                <span className="text-(--color-muted)">{label}：</span>{String(value)}
+                              </span>
+                            ))}
+                          </div>
+                        )}
+                        {Array.isArray(s.known_secrets) && s.known_secrets.length > 0 && (
+                          <div className="mt-2 flex flex-wrap items-center gap-1.5 text-xs">
+                            <span className="text-(--color-muted)">已知秘密：</span>
+                            {s.known_secrets.map((secret) => (
+                              <span key={secret} className="rounded-md bg-(--color-panel2) px-1.5 py-0.5">{secret}</span>
+                            ))}
+                          </div>
+                        )}
+                        {s.summary && <p className="mt-2 text-xs text-(--color-muted)">{s.summary}</p>}
+                      </div>
+                    );
+                  })}
+                  {characterStates.isFetchedAfterMount && !characterStates.isError && (characterStates.data ?? []).length === 0 && (
+                    <p className="py-6 text-center text-sm text-(--color-muted)">一键直出后生成章节状态</p>
+                  )}
+                </div>
+              </section>
+
+              <section>
+                <h2 className="mb-2 text-sm font-semibold">关键事实</h2>
+                <div className="space-y-1.5">
+                  {(storyFacts.data ?? []).map((fact) => (
+                    <div key={fact.id} className="flex gap-3 rounded-lg px-3 py-2 text-sm hover:bg-(--color-panel)">
+                      <span className="w-16 shrink-0 text-xs text-(--color-muted)">{chapterLabel(fact.chapter_no, null)}</span>
+                      <span className="shrink-0 rounded-md bg-(--color-panel2) px-1.5 py-0.5 text-[11px] text-(--color-muted)">
+                        {FACT_LABELS[fact.fact_type] ?? fact.fact_type}
+                      </span>
+                      <span className="min-w-0">{fact.subject ? `${fact.subject}：` : ""}{fact.text}</span>
+                    </div>
+                  ))}
+                  {storyFacts.isFetchedAfterMount && !storyFacts.isError && (storyFacts.data ?? []).length === 0 && (
+                    <p className="py-4 text-center text-sm text-(--color-muted)">暂无关键事实</p>
+                  )}
+                </div>
+              </section>
+
+              {!characterStates.isFetchedAfterMount && (
+                <div className="flex justify-center py-4 text-(--color-muted)">
+                  <Loader2 size={20} className="animate-spin" />
+                </div>
+              )}
+            </div>
           )}
 
           {tab === "dialogue" && (

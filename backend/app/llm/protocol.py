@@ -14,6 +14,8 @@ class LLMResponse:
     finish_reason: str | None = None
     latency_ms: float = 0.0
     cache_hit: bool = False
+    # 本次请求实际发生的参数降级（服务商兼容性回退），供用量账本追溯。
+    degradations: list[dict] = field(default_factory=list)
 
 
 @dataclass
@@ -28,6 +30,7 @@ class ProviderCapabilities:
     supports_json_schema: bool = False
     supports_json_object: bool = False
     supports_streaming: bool = False
+    supports_conversation_cache: bool = False
     context_window: int = 8192
     max_output_tokens: int = 8192
     supports_idempotency_key: bool = False

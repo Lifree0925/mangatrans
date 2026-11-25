@@ -43,6 +43,8 @@ GENERIC_SOURCE_TERMS = {
     "后山树林", "山间密林", "废弃地牢", "庄园大门", "家族墓园外小路",
     "客房外走廊", "二楼露天阳台", "庄园走廊", "城堡走廊", "地下走廊", "石头走廊",
     "主楼", "庄园主楼", "楼内", "屋内", "门外", "身后", "身旁",
+    # 通用经营场所/视觉描述：模型常把普通场景词升级成具名地点或道具。
+    "洗车行", "老旧洗车行", "破洗车行", "蓝色药丸", "药丸", "药瓶",
 }
 
 # 反复出现、需要固定英文表达的头衔/世界设定词。
@@ -78,6 +80,17 @@ def _has_cjk(text: str) -> bool:
 
 
 _GENERIC_NORMALIZED = {normalize(x) for x in GENERIC_SOURCE_TERMS}
+
+
+_ADDRESS_SUFFIXES = ("先生", "夫人", "小姐", "女士", "太太", "少爷", "老板")
+
+
+def is_address_form(term: str) -> bool:
+    """人物称谓（Richard先生/ Helen夫人）只能按语境翻译，不能作为精确术语。"""
+    t = (term or "").strip()
+    if not t or len(t) > 24:
+        return False
+    return any(t.endswith(suffix) and len(t) > len(suffix) for suffix in _ADDRESS_SUFFIXES)
 
 
 def is_generic_source(term: str) -> bool:
@@ -238,7 +251,7 @@ def _clean_aliases(canonical: str, aliases: list[str] | None) -> list[str]:
         alias = str(raw or "").strip()
         if not alias or normalize(alias) == normalize(canonical):
             continue
-        if is_generic_source(alias):
+        if is_generic_source(alias) or is_address_form(alias):
             continue
         if not _place_alias_compatible(canonical, alias):
             continue
@@ -278,7 +291,7 @@ def build_term_records(entries: list[dict]) -> list[TermRecord]:
         canonical = str(item.get("canonical_key") or "").strip()
         data = item.get("data") if isinstance(item.get("data"), dict) else {}
         en = str(data.get("translation") or "").strip()
-        if not canonical:
+        if not canonical or is_address_form(canonical):
             continue
         kind = classify_term(canonical, data)
         policy = enforcement_for(canonical, data)

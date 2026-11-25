@@ -215,13 +215,17 @@ def _setup_multiline_structure(client, wait_task):
 class _CorruptPolishProvider:
     """按需删掉多行译文的最后一行，模拟真实模型的“合并动作行”。"""
 
-    def __init__(self, inner, *, always: bool = False):
+    def __init__(
+        self, inner, *, always: bool = False,
+        stages: tuple[str, ...] = ("polish", "repair"),
+    ):
         self.inner = inner
         self.always = always
+        self.stages = stages
 
     async def chat(self, **kwargs):
         resp = await self.inner.chat(**kwargs)
-        if kwargs.get("stage") not in ("polish", "repair"):
+        if kwargs.get("stage") not in self.stages:
             return resp
         messages = kwargs.get("messages") or []
         user = messages[-1].get("content", "") if messages else ""
@@ -246,6 +250,15 @@ class _CorruptPolishProvider:
 
     async def test_connection(self):
         return await self.inner.test_connection()
+
+
+class _HangingRepairProvider(_CorruptPolishProvider):
+    """模拟修复请求已发出但长时间不返回；验证外层硬超时能兜住。"""
+
+    async def chat(self, **kwargs):
+        if kwargs.get("stage") == "repair":
+            await asyncio.sleep(10)
+        return await super().chat(**kwargs)
 
 
 def _structured_fake() -> FakeProvider:
@@ -342,10 +355,42 @@ def test_polish_structure_failure_recovers_without_unpack_error(client, wait_tas
         assert len([x for x in (tr.target_text or "").splitlines() if x.strip()]) == 2
 
 
-def test_polish_structure_failure_has_actionable_error(client, wait_task) -> None:
-    """持续结构失败时必须报窗口错误，不能把内部二元解包异常泄漏给用户。"""
+def test_polish_structure_failure_recovers_from_draft_without_repair_storm(
+    client, wait_task
+) -> None:
+    """Polish 持续丢行时直接用结构合法的 Draft 兜底，不触发反复修复。"""
     _pid, tid, _target_id = _prepare_structure_retry(client, wait_task)
-    set_provider(_CorruptPolishProvider(_structured_fake(), always=True))
+    provider = _CorruptPolishProvider(_structured_fake(), always=True)
+    set_provider(provider)
+    assert client.post(f"/api/v1/tasks/{tid}/retry").status_code == 200
+    result = wait_task(client, tid, timeout=90)
+    assert result["status"] == "completed", result.get("error_message")
+    translation = result["progress"]["steps"]["translation"]
+    assert translation["structure_fallbacks"] >= 1
+    # Draft 兜底在模型修复之前完成，说明异常窗口不再产生额外修复请求。
+    assert translation["structure_repairs"] == 0
+    assert not [c for c in provider.inner.calls if c.get("stage") == "repair"]
+
+
+def test_polish_structure_failure_has_actionable_error_when_draft_also_invalid(
+    client, wait_task
+) -> None:
+    """连 Draft 也结构损坏时，只做一次限时修复后报可读错误，不能泄漏解包异常。"""
+    _pid, tid, target_id = _prepare_structure_retry(client, wait_task)
+    # 让 Draft 也重新生成，模拟模型在初翻和润色阶段同时丢行。
+    with dbmod.SessionLocal() as db:
+        draft = db.scalar(
+            select(Translation)
+            .where(Translation.segment_id == target_id, Translation.stage == "draft")
+            .order_by(Translation.version.desc())
+            .limit(1)
+        )
+        assert draft is not None
+        draft.freshness_status = "stale"
+        db.commit()
+    set_provider(_CorruptPolishProvider(
+        _structured_fake(), always=True, stages=("draft", "polish", "repair")
+    ))
     assert client.post(f"/api/v1/tasks/{tid}/retry").status_code == 200
     result = wait_task(client, tid, timeout=90)
     assert result["status"] == "failed"
@@ -353,25 +398,45 @@ def test_polish_structure_failure_has_actionable_error(client, wait_task) -> Non
     assert "个翻译窗口失败" in message
     assert "结构校验失败" in message
     assert "not enough values" not in message
+    assert result["progress"]["steps"]["translation"]["structure_repairs"] <= 1
 
 
-def test_repeated_retries_after_structure_failure_eventually_complete(client, wait_task) -> None:
-    """连续多次重试不能卡死；服务恢复后下一次重试应继续并完成。"""
+def test_structure_repair_timeout_does_not_hang_after_polish_finishes(
+    client, wait_task, monkeypatch
+) -> None:
+    """修复调用无响应时必须在硬超时后结束，不能停在 99/99 永久等待。"""
+    from app.services import express as express_mod
+
+    _pid, tid, target_id = _prepare_structure_retry(client, wait_task)
+    with dbmod.SessionLocal() as db:
+        draft = db.scalar(
+            select(Translation)
+            .where(Translation.segment_id == target_id, Translation.stage == "draft")
+            .order_by(Translation.version.desc())
+            .limit(1)
+        )
+        assert draft is not None
+        draft.freshness_status = "stale"
+        db.commit()
+    monkeypatch.setattr(express_mod, "STRUCTURE_REPAIR_TIMEOUT", 0.1)
+    set_provider(_HangingRepairProvider(
+        _structured_fake(), always=True, stages=("draft", "polish", "repair")
+    ))
+    assert client.post(f"/api/v1/tasks/{tid}/retry").status_code == 200
+    t0 = time.time()
+    result = wait_task(client, tid, timeout=20)
+    elapsed = time.time() - t0
+    assert result["status"] == "failed"
+    assert elapsed < 10, f"结构修复超时未生效，耗时 {elapsed:.1f}s"
+    assert "个翻译窗口失败" in (result.get("error_message") or "")
+
+
+def test_structure_failure_completes_on_first_retry_without_waiting_for_service_recovery(
+    client, wait_task
+) -> None:
+    """可恢复的结构错误必须在第一次重试内完成，不应逼用户反复重试。"""
     _pid, tid, _target_id = _prepare_structure_retry(client, wait_task)
     set_provider(_CorruptPolishProvider(_structured_fake(), always=True))
-
-    for _ in range(2):
-        assert client.post(f"/api/v1/tasks/{tid}/retry").status_code == 200
-        failed = wait_task(client, tid, timeout=90)
-        assert failed["status"] == "failed"
-        message = failed.get("error_message") or ""
-        assert "个翻译窗口失败" in message
-        assert "not enough values" not in message
-        with dbmod.SessionLocal() as db:
-            assert db.get(Task, tid).status == "failed"
-
-    # 模拟模型服务恢复后再次点击重试：不能因为前两次失败而保留死锁。
-    set_provider(_CorruptPolishProvider(_structured_fake()))
     assert client.post(f"/api/v1/tasks/{tid}/retry").status_code == 200
     completed = wait_task(client, tid, timeout=90)
     assert completed["status"] == "completed", completed.get("error_message")
@@ -390,12 +455,12 @@ def _drive_worker_until_done(task_id: str, max_rounds: int = 80) -> str:
 
 
 def test_full_retranslate_after_structure_failure_completes(client, wait_task) -> None:
-    """Express 结构失败后，“全部重新翻译”应创建新任务并完整完成。"""
+    """Express 自动兜底完成后，仍可“全部重新翻译”并完整完成。"""
     pid, tid, target_id = _prepare_structure_retry(client, wait_task)
     set_provider(_CorruptPolishProvider(_structured_fake(), always=True))
     assert client.post(f"/api/v1/tasks/{tid}/retry").status_code == 200
-    failed = wait_task(client, tid, timeout=90)
-    assert failed["status"] == "failed"
+    recovered = wait_task(client, tid, timeout=90)
+    assert recovered["status"] == "completed", recovered.get("error_message")
 
     # 用户不再重试旧任务，直接点“全部重新翻译”。
     set_provider(_structured_fake())

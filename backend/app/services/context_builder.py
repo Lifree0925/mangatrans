@@ -18,6 +18,7 @@ from app.services.term_match import (
 from app.utils.token_budget import estimate_tokens
 
 DEFAULT_BUDGET = 6000
+_PROJECT_BIBLE_DYNAMIC_RESERVE = 1200
 _PROFILE_FIELDS = (
     "translation",
     "personality",
@@ -40,8 +41,108 @@ class ContextResult:
 
 
 def _json_block(title: str, payload: dict | str | list) -> str:
-    body = json.dumps(payload, ensure_ascii=False, indent=2) if isinstance(payload, (dict, list)) else str(payload)
+    # 紧凑 JSON 不改变信息量，但能显著减少每窗重复发送的 token；
+    # 同时固定分隔符，保证稳定前缀可被 Provider 前缀缓存复用。
+    body = _stable_json(payload) if isinstance(payload, (dict, list)) else str(payload)
     return f"\n\n[{title}]\n{body}\n"
+
+
+def _stable_json(payload: dict | list) -> str:
+    """确定性序列化：同一项目每次生成的稳定前缀必须逐字节一致。"""
+    return json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+
+def _dedupe_sorted(values: list[object]) -> list[str]:
+    out: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        text = str(value or "").strip()
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        out.append(text)
+    return sorted(out, key=lambda x: (x.casefold(), x))
+
+
+def build_project_bible(
+    knowledge: list[dict], style_guide: dict | None, *, lean: bool = False
+) -> str:
+    """构建逐窗稳定的项目前缀：人物固定名、精确术语与风格基线。
+
+    只放不随窗口变化的项目事实；剧情卡、人物关系、状态、carry-over 和原文
+    仍留在动态部分。这样 Provider 的前缀缓存可以跨窗口复用，同时不会提前
+    泄露后续剧情或秘密。
+    """
+    lines = [
+        "[PROJECT BIBLE — STABLE CANONICAL REFERENCE]",
+        "Use these forms only when the source refers to the same entity. "
+        "Do not inject an unrelated name or term into a line where it does not appear.",
+    ]
+
+    characters: list[str] = []
+    for item in sorted(
+        (x for x in knowledge if x.get("item_type") == "character"),
+        key=lambda x: (str(x.get("canonical_key") or "").casefold(), str(x.get("id") or "")),
+    ):
+        canonical = str(item.get("canonical_key") or "").strip()
+        if not canonical:
+            continue
+        data = item.get("data") if isinstance(item.get("data"), dict) else {}
+        english = str(data.get("translation") or "").strip()
+        aliases = _dedupe_sorted(item.get("aliases") or [])
+        forms = _dedupe_sorted(data.get("forms_of_address") or [])
+        if not english and not aliases and not forms:
+            continue
+        line = f"- {canonical} => {english or canonical}"
+        if aliases:
+            line += " | aliases: " + ", ".join(aliases)
+        if forms:
+            line += " | address: " + ", ".join(forms)
+        characters.append(line)
+    if characters:
+        lines.extend(["[CHARACTER NAMES]", *characters])
+
+    # build_term_records 会应用泛词、称谓和地点合并规则；稳定前缀只收录
+    # 真正需要逐字统一的 exact 术语，contextual 词仍由窗口相关性决定。
+    records = build_term_records(sorted(
+        knowledge,
+        key=lambda x: (str(x.get("canonical_key") or "").casefold(), str(x.get("id") or "")),
+    ))
+    glossary: list[str] = []
+    for record in sorted(
+        (r for r in records if r.policy == "exact" and r.en and not r.merged_into),
+        key=lambda r: (r.canonical.casefold(), r.canonical),
+    ):
+        line = f"- {record.canonical} => {record.en}"
+        if record.kind:
+            line += f" | kind: {record.kind}"
+        glossary.append(line)
+    if glossary:
+        lines.extend(["[EXACT GLOSSARY]", *glossary])
+
+    if style_guide:
+        if lean:
+            style_payload = {
+                key: style_guide.get(key)
+                for key in (
+                    "dialogue_register",
+                    "action_description_style",
+                    "capitalization_rules",
+                    "cultural_strategy",
+                )
+                if style_guide.get(key)
+            }
+        else:
+            style_payload = style_guide
+        if style_payload:
+            lines.extend(["[STYLE GUIDE]", _stable_json(style_payload)])
+
+    return "\n".join(lines)
 
 
 def _item_names(item: dict) -> list[str]:
@@ -75,11 +176,15 @@ def build_context(
     style_guide: dict | None,
     carry_over: dict | None,
     storyline: dict | None = None,
+    character_states: list[dict] | None = None,
+    story_facts: list[dict] | None = None,
+    project_bible: str = "",
     adjacent_prev: str = "",
     adjacent_next: str = "",
     budget: int = DEFAULT_BUDGET,
     reserved_tokens: int = 0,
     lean: bool = False,
+    draft_only: bool = False,
 ) -> ContextResult:
     """组装窗口上下文。
 
@@ -95,20 +200,37 @@ def build_context(
         "unmatched_characters": [],
         "filtered_future_knowledge": [],
         "filtered_storyline_items": [],
+        "character_states": 0,
+        "story_facts": 0,
         "trimmed": [],
         "quality": "complete",
         "reserved_tokens": max(0, int(reserved_tokens)),
         "lean": lean,
+        "draft_only": draft_only,
+        "project_bible_tokens": 0,
     }
     snapshot: dict = {
         "knowledge_ids": [],
         "scene_card_id": None,
         "carry_over_hash": None,
         "context_mode": "lean" if lean else "full",
+        "draft_only": draft_only,
+        "character_state_ids": [],
+        "story_fact_ids": [],
+        "project_bible_hash": None,
     }
 
     source_text = "".join(f"[{s['segment_id']}] {s['source_text']}" for s in segments)
-    blocks.append("SOURCE SEGMENTS (translate only these, one translation per segment_id):\n" + source_text.rstrip("\n"))
+    source_block = (
+        "SOURCE SEGMENTS (translate only these, one translation per segment_id):\n"
+        + source_text.rstrip("\n")
+    )
+    if project_bible:
+        blocks.append(project_bible)
+        report["project_bible_tokens"] = estimate_tokens(project_bible)
+        snapshot["project_bible_hash"] = hashlib.sha256(
+            project_bible.encode("utf-8")
+        ).hexdigest()[:16]
 
     # 窗口相关性：原句 + 说话人。后续所有知识块都以此为筛选依据。
     window_speakers = {seg.get("speaker_name") for seg in segments if seg.get("speaker_name")}
@@ -154,6 +276,8 @@ def build_context(
     ]
 
     if style_guide:
+        snapshot["style_guide"] = style_guide.get("_version", 1)
+    if style_guide and not project_bible and not draft_only:
         style_payload = style_guide
         if lean:
             style_payload = {
@@ -171,7 +295,6 @@ def build_context(
                 "STYLE GUIDE (frozen, lean)" if lean else "STYLE GUIDE (frozen)",
                 style_payload,
             ))
-            snapshot["style_guide"] = style_guide.get("_version", 1)
 
     if scene_card:
         card_body = {k: v for k, v in scene_card.items() if k != "id"}
@@ -199,13 +322,13 @@ def build_context(
         prior_deps = list(storyline.get("prior_deps", []) or [])
         foreshadowing = [] if lean else list(storyline.get("foreshadowing", []) or [])
         states = storyline.get("character_states", {}) or {}
-        character_states = {
+        visible_storyline_states = {
             name: state for name, state in states.items()
             if any(focus and focus in str(name) for focus in focus_names)
         }
         skipped = (
             len(storyline.get("key_events", []) or []) - len(key_events)
-            + len(states) - len(character_states)
+            + len(states) - len(visible_storyline_states)
         )
         if skipped:
             report["filtered_storyline_items"].append(skipped)
@@ -213,9 +336,9 @@ def build_context(
             "summary": summary,
             "key_events": key_events,
             "prior_deps": prior_deps,
-            "character_states": character_states,
+            "character_states": visible_storyline_states,
         }
-        if summary or key_events or prior_deps or character_states or foreshadowing:
+        if summary or key_events or prior_deps or visible_storyline_states or foreshadowing:
             blocks.append(_json_block("CHAPTER STORYLINE (current chapter)", story_body))
             if foreshadowing:
                 blocks.append(
@@ -223,6 +346,87 @@ def build_context(
                     + json.dumps(foreshadowing, ensure_ascii=False)
                 )
             snapshot["storyline_id"] = storyline.get("id")
+
+    if character_states:
+        state_rows: list[dict] = []
+        for state in character_states:
+            name = str(state.get("name") or "").strip()
+            if not name:
+                continue
+            related = any(
+                focus and (focus == name or focus in name or name in focus)
+                for focus in focus_names
+            )
+            if not related:
+                continue
+            row = {
+                "name": name,
+                "last_chapter": state.get("last_chapter"),
+                "identity": state.get("identity", ""),
+                "relationship_to_protagonist": state.get("relationship_to_protagonist", ""),
+                "faction": state.get("faction", ""),
+                "emotion": state.get("emotion", ""),
+                "form_of_address": state.get("form_of_address", ""),
+                "known_secrets": state.get("known_secrets", []),
+            }
+            name_norm = normalize(name)
+            speaker_forms = {normalize(x) for x in window_speakers if x}
+            is_speaker = any(
+                form and (name_norm in form or form in name_norm)
+                for form in speaker_forms
+            )
+            if not is_speaker:
+                # 非说话人只需身份/关系，避免把旁人的秘密带进台词生成提示。
+                row.pop("known_secrets", None)
+            row = {k: v for k, v in row.items() if v not in ("", [], None)}
+            if len(row) > 2:
+                state_rows.append(row)
+                report["character_states"] += 1
+                snapshot["character_state_ids"] += [
+                    x for x in (state.get("ids") or []) if x not in snapshot["character_state_ids"]
+                ]
+        if state_rows:
+            blocks.append(_json_block(
+                "CHARACTER STATE @ CURRENT CHAPTER (use only this chapter's visible knowledge)",
+                state_rows,
+            ))
+
+    if story_facts:
+        fact_rows: list[dict] = []
+        for fact in story_facts:
+            if fact.get("type") == "foreshadowing":
+                continue  # 不让翻译模型提前看到后文伏笔
+            text = str(fact.get("text") or "").strip()
+            subject = str(fact.get("subject") or "").strip()
+            if not text:
+                continue
+            if fact.get("type") == "secret":
+                subject_norm = normalize(subject)
+                speaker_forms = {normalize(x) for x in window_speakers if x}
+                if not any(
+                    form and (subject_norm in form or form in subject_norm)
+                    for form in speaker_forms
+                ):
+                    continue
+            related = any(name and (name in text or name == subject) for name in focus_names)
+            if not related:
+                continue
+            fact_rows.append({
+                "chapter": fact.get("chapter"),
+                "type": fact.get("type"),
+                "subject": subject,
+                "text": text,
+            })
+            report["story_facts"] += 1
+            if fact.get("id") and fact["id"] not in snapshot["story_fact_ids"]:
+                snapshot["story_fact_ids"].append(fact["id"])
+            if len(fact_rows) >= 18:
+                break
+        if fact_rows:
+            blocks.append(_json_block(
+                "ACTIVE STORY FACTS (already established by this chapter; stay consistent)",
+                fact_rows,
+            ))
 
     if chars:
         char_rows = []
@@ -238,7 +442,8 @@ def build_context(
                 ),
                 "relationships": data.get("relationships", []),
             })
-        blocks.append(_json_block("APPROVED CHARACTERS", char_rows))
+        if not project_bible:
+            blocks.append(_json_block("APPROVED CHARACTERS", char_rows))
         alias_map = [
             {
                 "character": c["canonical_key"],
@@ -251,7 +456,7 @@ def build_context(
             for c in chars
             if (c.get("aliases") or []) or (c.get("data", {}) or {}).get("translation")
         ]
-        if alias_map and not lean:
+        if alias_map and not lean and not project_bible:
             blocks.append(_json_block(
                 "NAME-FORM MAP (translate each form as used; keep the same person referentially consistent)",
                 alias_map,
@@ -260,12 +465,13 @@ def build_context(
             _profile_view(c) for c in chars
             if any((c.get("data", {}) or {}).get(k) for k in _PROFILE_FIELDS[1:])
         ]
-        if profiles and not lean:
+        if profiles and not lean and not draft_only:
             blocks.append(_json_block("CHARACTER PROFILES (personality & speech style)", profiles))
 
         # 说话人声音卡：只放窗口内真实说话的人，避免模型拿到无关角色档案后乱套。
+        # Draft 只锁事实，不需要表演/声音提示；Polish 才需要完整声音卡。
         speaker_candidates: dict[str, list[dict]] = {}
-        for c in chars:
+        for c in (() if draft_only else chars):
             for form in [c.get("canonical_key", ""), *(c.get("aliases") or [])]:
                 form = str(form or "").strip()
                 if form:
@@ -276,7 +482,7 @@ def build_context(
             if len(unique) == 1:
                 speaker_index[form] = next(iter(unique.values()))
         speaker_rows: list[dict] = []
-        for speaker in sorted(window_speakers):
+        for speaker in (() if draft_only else sorted(window_speakers)):
             parts = [p.strip() for p in str(speaker).replace("/", "、").split("、") if p.strip()]
             matched_chars: list[dict] = []
             for part in parts or [str(speaker)]:
@@ -317,7 +523,7 @@ def build_context(
                     }
                 if any(row.get(k) for k in ("personality", "speech_style", "emotional_range", "local_emotional_cues")):
                     speaker_rows.append(row)
-        if speaker_rows:
+        if speaker_rows and not draft_only:
             blocks.append(_json_block(
                 "SPEAKER VOICE & LOCAL PERFORMANCE (highest priority for dialogue)",
                 speaker_rows,
@@ -350,7 +556,7 @@ def build_context(
                     "in the source naturally, do not force the canonical wording"
                 )
                 contextual_terms.append(row)
-        if forced_terms:
+        if forced_terms and not project_bible:
             blocks.append(_json_block("FORCED TERMS (proper names / titles only)", forced_terms))
         if contextual_terms and not lean:
             blocks.append(_json_block(
@@ -380,10 +586,19 @@ def build_context(
     if adjacent_prev and not lean:
         optional.append(("adjacent_prev", "[PREV SOURCE (context only, do not translate)]\n" + adjacent_prev))
 
-    total = sum(estimate_tokens(b) for b in blocks)
-    # 原文是不可裁剪的硬成本；即使预留 Draft 后预算不足，也只裁知识块。
-    source_tokens = estimate_tokens(blocks[0])
-    effective_budget = max(source_tokens, budget - max(0, int(reserved_tokens)))
+    # 原文和稳定项目前缀是不可裁剪的硬成本。动态知识按预算裁剪，但这两块
+    # 永远保留；稳定前缀放在最前面，才能让 Provider 跨窗口命中前缀缓存。
+    source_tokens = estimate_tokens(source_block)
+    protected_tokens = source_tokens + int(report["project_bible_tokens"] or 0)
+    total = sum(estimate_tokens(b) for b in blocks) + source_tokens
+    # 稳定前缀本身也是 Prompt 的一部分，但它是可缓存的高复用层；
+    # 这里保持原动态上下文预算不变，避免为了缓存而把 token 总量无上限放大。
+    effective_budget = max(
+        protected_tokens,
+        budget
+        + min(int(report["project_bible_tokens"] or 0), _PROJECT_BIBLE_DYNAMIC_RESERVE)
+        - max(0, int(reserved_tokens)),
+    )
     report["effective_budget"] = effective_budget
     for name, text in optional:
         t = estimate_tokens(text)
@@ -393,9 +608,13 @@ def build_context(
         else:
             report["trimmed"].append(name)
 
+    # 原文最后放入：动态内容越靠后，前面可复用的项目/章节前缀就越长。
+    blocks.append(source_block)
+
     # 真正执行上下文总预算。当前原文永远保留；超预算时按低优先级逐块裁剪，
     # 而不是把整库知识、规则或相邻原文无限塞给模型。
     trim_order = [
+        ("ACTIVE STORY FACTS", "story_facts"),
         ("RELEVANT RULES", "rules"),
         ("CONTEXTUAL TERMS", "contextual_terms"),
         ("CHARACTER PROFILES", "character_profiles"),
@@ -405,6 +624,7 @@ def build_context(
         ("CHAPTER STORYLINE", "storyline"),
         ("FORESHADOWING", "foreshadowing"),
         ("SPEAKER VOICE", "speaker_voice"),
+        ("CHARACTER STATE", "character_states"),
         ("CARRY-OVER STATE", "carry_over"),
     ]
     while total > effective_budget:
@@ -412,7 +632,7 @@ def build_context(
         for prefix, label in trim_order:
             for idx in range(len(blocks) - 1, -1, -1):
                 block = blocks[idx]
-                if block.startswith("SOURCE SEGMENTS"):
+                if block.startswith(("SOURCE SEGMENTS", "[PROJECT BIBLE")):
                     continue
                 if "[" + prefix in block:
                     total -= estimate_tokens(block)
@@ -425,7 +645,7 @@ def build_context(
         if not removed:
             break
 
-    prompt_text = "\n".join(blocks)
+    prompt_text = "\n\n".join(block.strip("\n") for block in blocks if block.strip())
     return ContextResult(
         prompt_text=prompt_text,
         report=report,
@@ -439,6 +659,8 @@ def build_qa_reference(
     segments: list[dict],
     knowledge: list[dict],
     storyline: dict | None = None,
+    character_states: list[dict] | None = None,
+    story_facts: list[dict] | None = None,
     max_chars: int = 2600,
 ) -> str:
     """构建语义 QA 的紧凑事实基准。
@@ -470,6 +692,8 @@ def build_qa_reference(
                 data.get("role_translation") or data.get("role")
                 or data.get("identity") or data.get("occupation") or ""
             ),
+            # 自然度 QA 需要角色的说话方式；只加短字段，完整档案仍留在翻译上下文。
+            "speech_style": data.get("speech_style") or "",
             "relationships": data.get("relationships") or [],
         })
 
@@ -535,8 +759,43 @@ def build_qa_reference(
             "character_states": storyline.get("character_states", {}),
             "foreshadowing": storyline.get("foreshadowing", [])[:6],
         }
+    state_payload = []
+    for state in (character_states or []):
+        name = str(state.get("name") or "").strip()
+        if not name:
+            continue
+        if not any(focus and (focus == name or focus in name or name in focus) for focus in focus_names):
+            continue
+        state_payload.append({
+            "name": name,
+            "last_chapter": state.get("last_chapter"),
+            "identity": state.get("identity", ""),
+            "relationship_to_protagonist": state.get("relationship_to_protagonist", ""),
+            "faction": state.get("faction", ""),
+            "emotion": state.get("emotion", ""),
+            "form_of_address": state.get("form_of_address", ""),
+            "known_secrets": state.get("known_secrets", []),
+        })
+    fact_payload = []
+    for fact in (story_facts or []):
+        text = str(fact.get("text") or "").strip()
+        if not text:
+            continue
+        subject = str(fact.get("subject") or "").strip()
+        related = any(name and (name in text or name == subject) for name in focus_names)
+        if related:
+            fact_payload.append({
+                "chapter": fact.get("chapter"),
+                "type": fact.get("type"),
+                "subject": subject,
+                "text": text,
+            })
+        if len(fact_payload) >= 24:
+            break
     payload = {
         "characters": characters[:16],
+        "character_states": state_payload[:12],
+        "active_story_facts": fact_payload,
         "terms": dedup_terms[:30],
         "relationships": relations,
         "translation_rules": rules,

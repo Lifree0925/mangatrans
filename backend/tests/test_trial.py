@@ -147,3 +147,19 @@ def test_trial_creates_translations_and_style_guide(client: TestClient, wait_tas
     t = client.get(f"/api/v1/projects/{pid}/segments/{dialogue_ids[0]}/translations").json()
     stages = {x["stage"] for x in t["translations"]}
     assert {"draft", "polished"} <= stages
+
+
+def test_frozen_style_guide_cannot_be_modified(client: TestClient, wait_task) -> None:
+    set_provider(_fake())
+    pid = _setup(client, wait_task)
+    _collect_seg_ids(client, pid)
+
+    r = client.post(f"/api/v1/projects/{pid}/translation/trial", json={})
+    assert r.status_code == 200
+    assert _wait_task(r.json()["task_id"])["status"] == "completed"
+
+    r = client.patch(
+        f"/api/v1/projects/{pid}/style-guide",
+        json={"guide": {"dialogue_register": "changed"}},
+    )
+    assert r.status_code == 409

@@ -350,4 +350,76 @@ def patch_storyline(project_id: str, storyline_id: str, payload: dict, db: Sessi
         row.status = "edited"
         row.version += 1
     db.commit()
+    try:
+        from app.services import continuity_service
+
+        chapter = db.get(Chapter, row.chapter_id)
+        if chapter is not None:
+            continuity_service.sync_storyline(
+                db, project_id, chapter, row, _json.loads(row.card_json or "{}")
+            )
+            db.commit()
+    except Exception as exc:  # noqa: BLE001 剧情卡已保存，派生状态失败不应回滚人工编辑
+        db.rollback()
+        print(f"backend: continuity sync failed after storyline edit: {exc}", flush=True)
     return {"id": row.id, "status": row.status, "version": row.version}
+
+
+@router.get("/character-states")
+def list_character_states(project_id: str, db: Session = Depends(get_db)) -> list[dict]:
+    """章节级人物状态时间线（仅 current 版本）。"""
+    import json as _json
+
+    from app.models.continuity import CharacterState
+
+    _project(db, project_id)
+    rows = list(db.scalars(
+        select(CharacterState)
+        .where(
+            CharacterState.project_id == project_id,
+            CharacterState.status == "current",
+        )
+        .order_by(CharacterState.chapter_no, CharacterState.character_key)
+    ))
+    return [
+        {
+            "id": row.id,
+            "character": row.character_key,
+            "chapter_no": row.chapter_no,
+            "version": row.version,
+            "state": _json.loads(row.state_json or "{}"),
+            "evidence": _json.loads(row.evidence_json or "{}"),
+        }
+        for row in rows
+    ]
+
+
+@router.get("/story-facts")
+def list_story_facts(project_id: str, db: Session = Depends(get_db)) -> list[dict]:
+    """关键事实表：按生效章节排序，供知识库审计。"""
+    import json as _json
+
+    from app.models.continuity import StoryFact
+
+    _project(db, project_id)
+    rows = list(db.scalars(
+        select(StoryFact)
+        .where(StoryFact.project_id == project_id, StoryFact.status == "current")
+        .order_by(StoryFact.chapter_no, StoryFact.fact_type)
+    ))
+    return [
+        {
+            "id": row.id,
+            "chapter_no": row.chapter_no,
+            "fact_type": row.fact_type,
+            "subject": row.subject,
+            "predicate": row.predicate,
+            "object": row.object_text,
+            "text": row.fact_text,
+            "valid_from_chapter_no": row.valid_from_chapter_no,
+            "valid_to_chapter_no": row.valid_to_chapter_no,
+            "reveal_chapter_no": row.reveal_chapter_no,
+            "evidence": _json.loads(row.evidence_json or "{}"),
+        }
+        for row in rows
+    ]

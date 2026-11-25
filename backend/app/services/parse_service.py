@@ -15,8 +15,10 @@ def parse_and_persist(db: Session, doc: SourceDocument, text: str) -> ParseResul
     QA 问题 → 译文 → 片段；场景卡 → 场景 → 章节。
     """
     from app.models.dialogue import DialogueLine
+    from app.models.continuity import CharacterState, StoryFact
     from app.models.knowledge import SceneContextCard
     from app.models.qa import QAIssue
+    from app.models.storyline import ChapterStoryline
     from app.models.translation import Translation
 
     # 台词本是派生数据：重解析后片段/章节重建，旧行必须清理（否则指向已删除章节）
@@ -34,6 +36,13 @@ def parse_and_persist(db: Session, doc: SourceDocument, text: str) -> ParseResul
     ).all()
     if scene_ids:
         db.execute(delete(SceneContextCard).where(SceneContextCard.scene_id.in_(scene_ids)))
+    chapter_ids = db.scalars(
+        select(Chapter.id).where(Chapter.source_document_id == doc.id)
+    ).all()
+    if chapter_ids:
+        db.execute(delete(StoryFact).where(StoryFact.chapter_id.in_(chapter_ids)))
+        db.execute(delete(CharacterState).where(CharacterState.chapter_id.in_(chapter_ids)))
+        db.execute(delete(ChapterStoryline).where(ChapterStoryline.chapter_id.in_(chapter_ids)))
     db.execute(delete(SourceSegment).where(SourceSegment.source_document_id == doc.id))
     db.execute(delete(Scene).where(Scene.source_document_id == doc.id))
     db.execute(delete(Chapter).where(Chapter.source_document_id == doc.id))
@@ -58,7 +67,9 @@ def parse_and_persist(db: Session, doc: SourceDocument, text: str) -> ParseResul
     db.flush()
     chapter_map: dict[int, str] = {no: ch.id for no, ch in chapter_objs}
 
-    scene_objs: list[tuple[int, Scene]] = []
+    # 场景序号在每个章节内重新从 1 开始，映射键必须包含章节号；
+    # 只用 scene_no 会让所有章节的第 N 场都指向最后一章的第 N 场。
+    scene_objs: list[tuple[tuple[int, int], Scene]] = []
     for sb in result.scenes:
         sc = Scene(
             project_id=project_id,
@@ -70,9 +81,11 @@ def parse_and_persist(db: Session, doc: SourceDocument, text: str) -> ParseResul
             source_end=sb.end,
         )
         db.add(sc)
-        scene_objs.append((sb.no, sc))
+        scene_objs.append(((sb.chapter_no, sb.no), sc))
     db.flush()
-    scene_map: dict[int, str] = {no: sc.id for no, sc in scene_objs}
+    scene_map: dict[tuple[int, int], str] = {
+        (chapter_no, scene_no): sc.id for (chapter_no, scene_no), sc in scene_objs
+    }
 
     for no, seg in enumerate(result.segments, start=1):
         db.add(
@@ -80,7 +93,7 @@ def parse_and_persist(db: Session, doc: SourceDocument, text: str) -> ParseResul
                 project_id=project_id,
                 source_document_id=doc.id,
                 chapter_id=chapter_map.get(seg.chapter_no),
-                scene_id=scene_map.get(seg.scene_no),
+                scene_id=scene_map.get((seg.chapter_no, seg.scene_no)),
                 segment_no=no,
                 segment_type=seg.type,
                 speaker_name=seg.speaker,

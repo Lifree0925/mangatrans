@@ -3,7 +3,7 @@
 import { startTransition, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ArrowLeft, BookOpen, Check, ChevronLeft, ChevronRight, Download, FileUp, Loader2, Pencil, X, Zap } from "lucide-react";
-import { Link, useParams } from "react-router-dom";
+import { Link, useNavigate, useParams } from "react-router-dom";
 import { api } from "../lib/api";
 import { chapterLabel } from "../lib/format";
 import { toast } from "../lib/feedback";
@@ -12,6 +12,7 @@ import type { Chapter, ExportResult, LatestTranslation, Project, ProviderInfo, S
 
 export default function ProjectPage() {
   const { id = "" } = useParams();
+  const navigate = useNavigate();
   const qc = useQueryClient();
   const fileRef = useRef<HTMLInputElement>(null);
   const [chaptersCollapsed, setChaptersCollapsed] = useState(false);
@@ -180,7 +181,12 @@ export default function ProjectPage() {
   });
   const express = useMutation({
     mutationFn: () => api<{ task_id: string }>(`/projects/${id}/translation/express`, { method: "POST", body: "{}" }),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["project-tasks", id] }),
+    onSuccess: (r) => {
+      qc.invalidateQueries({ queryKey: ["project-tasks", id] });
+      qc.invalidateQueries({ queryKey: ["tasks"] });
+      toast.success("一键直出已开始");
+      navigate(`/tasks?task=${encodeURIComponent(r.task_id)}`);
+    },
     onError: (err) => toast.error(`启动一键直出失败：${String(err)}`),
   });
 

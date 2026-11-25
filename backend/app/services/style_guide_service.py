@@ -12,7 +12,7 @@ from app.llm.protocol import LLMProvider
 from app.models.document import Scene, SourceSegment
 from app.models.knowledge import KnowledgeItem
 from app.models.translation import StyleGuide, Translation
-from app.services.context_builder import build_context
+from app.services.context_builder import build_context, build_project_bible
 from app.services.importer import sha256
 from app.services.translation import PROMPT_VERSION, request_hash_of, translate_window
 
@@ -165,6 +165,7 @@ async def run_trial(
             knowledge=items,
             style_guide=None,
             carry_over=carry,
+            project_bible=build_project_bible(items, None),
         )
         draft, polished, carry = await translate_window(
             provider=provider,

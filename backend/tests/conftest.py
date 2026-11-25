@@ -74,12 +74,7 @@ def fake_translation_entries(content: str, tag: str, *, stage: str = "") -> list
     for sid, source in pattern.findall(content):
         target_lines: list[str] = []
         for line in [x.strip() for x in source.splitlines() if x.strip()]:
-            m = dialogue.match(line)
-            if m:
-                cue = m.group(2) or ""
-                cue_part = f" ({cue})" if cue else ""
-                target_lines.append(f"Speaker{cue_part}: {tag} {sid[:8]} {stage}".strip())
-                continue
+            # 先识别舞台/制作元数据再判断对白：△字幕：xx 不是角色台词。
             scene = _re.match(r"^(\d+)\s*[-–]\s*(\d+)", line)
             if scene:
                 target_lines.append(f"{scene.group(1)}-{scene.group(2)} {tag} {sid[:8]} {stage}".strip())
@@ -89,6 +84,15 @@ def fake_translation_entries(content: str, tag: str, *, stage: str = "") -> list
                 continue
             if line.startswith("【"):
                 target_lines.append(f"[Sound effect: {tag} {sid[:8]} {stage}]".strip())
+                continue
+            if _re.match(r"^(?:人物|角色|出场人物|登场人物|主要人物)\s*[：:]", line):
+                target_lines.append(f"{tag} {sid[:8]} {stage}".strip())
+                continue
+            m = dialogue.match(line)
+            if m:
+                cue = m.group(2) or ""
+                cue_part = f" ({cue})" if cue else ""
+                target_lines.append(f"Speaker{cue_part}: {tag} {sid[:8]} {stage}".strip())
                 continue
             target_lines.append(f"{tag} {sid[:8]} {stage}".strip())
         entries.append({

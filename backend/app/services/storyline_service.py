@@ -9,6 +9,7 @@ from app.llm.json_utils import parse_llm_json
 from app.llm.protocol import LLMProvider
 from app.models.document import Chapter, SourceSegment
 from app.models.storyline import ChapterStoryline
+from app.services import continuity_service
 
 PROMPT = """你是剧本剧情分析专家。阅读下面这一章的原文，生成剧情卡，用于英文翻译时保持前后连续一致。
 直接输出 JSON（不要任何解释、不要推理过程）。
@@ -18,10 +19,36 @@ PROMPT = """你是剧本剧情分析专家。阅读下面这一章的原文，�
 3. foreshadowing：本章埋下的伏笔/悬念（后文才揭晓的事实；翻译本章时不得提前剧透）。
 4. prior_deps：本章依赖的前文事实（前情，翻译本章必须与之一致）。
 5. character_states：本章结束时主要人物的状态/立场变化（人物名：状态）。
+6. character_state_details：本章结束时主要人物的结构化状态。只写本章原文有依据的变化；
+   known_secrets 只列“本章明确揭示且该人物已经知道”的秘密，不要把后文才揭晓的信息提前写入。
+7. critical_facts：本章确认的跨章节硬事实，至少覆盖出现的人物关系、身份、时间、地点、
+   物品归属、秘密、否定/条件。fact_type 使用 relationship/identity/time/location/possession/
+   secret/negation_condition/event；每项写 subject、predicate、object_text、fact。
+   只写本章原文有明确依据的事实，不推测后文。
 
 只依据原文；不确定的留空。
 本章原文：
 {text}"""
+
+
+class CharacterStateDetail(BaseModel):
+    name: str = ""
+    identity: str = ""
+    relationship_to_protagonist: str = ""
+    faction: str = ""
+    emotion: str = ""
+    form_of_address: str = ""
+    known_secrets: list[str] = Field(default_factory=list)
+    evidence: str = ""
+
+
+class CriticalFactCandidate(BaseModel):
+    fact_type: str = "event"
+    subject: str = ""
+    predicate: str = ""
+    object_text: str = ""
+    fact: str = ""
+    reveal_chapter_no: int | None = None
 
 
 class StorylineModel(BaseModel):
@@ -30,6 +57,8 @@ class StorylineModel(BaseModel):
     foreshadowing: list[str] = Field(default_factory=list)
     prior_deps: list[str] = Field(default_factory=list)
     character_states: dict[str, str] = Field(default_factory=dict)
+    character_state_details: list[CharacterStateDetail] = Field(default_factory=list)
+    critical_facts: list[CriticalFactCandidate] = Field(default_factory=list)
 
 
 async def generate_storyline(
@@ -95,16 +124,29 @@ async def generate_for_document(
                     )
                     or 0
                 )
-                db.add(
-                    ChapterStoryline(
-                        project_id=project_id,
-                        chapter_id=ch.id,
-                        version=base + 1,
-                        card_json=json.dumps(card.model_dump(), ensure_ascii=False),
-                        status="generated",
-                    )
+                storyline = ChapterStoryline(
+                    project_id=project_id,
+                    chapter_id=ch.id,
+                    version=base + 1,
+                    card_json=json.dumps(card.model_dump(), ensure_ascii=False),
+                    status="generated",
                 )
+                db.add(storyline)
+                db.flush()
+                storyline_id = storyline.id
                 db.commit()
+            # 状态/事实是派生数据：单独事务同步，失败不能拖垮剧情卡和翻译主流程。
+            try:
+                with db_factory() as cdb:
+                    chapter = cdb.get(Chapter, ch.id)
+                    row = cdb.get(ChapterStoryline, storyline_id)
+                    if chapter is not None and row is not None:
+                        continuity_service.sync_storyline(
+                            cdb, project_id, chapter, row, card.model_dump()
+                        )
+                        cdb.commit()
+            except Exception as exc:  # noqa: BLE001
+                print(f"backend: continuity sync failed for chapter {ch.chapter_no}: {exc}", flush=True)
             return True, False
         finally:
             # 无论成功/失败/章节过短都释放该章节等待，避免窗口级流水线死等。

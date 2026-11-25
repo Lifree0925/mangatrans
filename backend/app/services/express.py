@@ -13,6 +13,7 @@ from app.models.knowledge import KnowledgeItem
 from app.models.qa import WindowQuality
 from app.models.translation import Translation
 from app.services import (
+    continuity_service,
     knowledge_service,
     profile_service,
     qa_service,
@@ -29,13 +30,32 @@ from app.services.translation import (
 from app.services.title_service import preserved_title_for_segment
 WINDOW_CONCURRENCY = max(1, int(os.environ.get("MT_WINDOW_CONCURRENCY", "3")))
 
+
+def _window_concurrency_for(model: str) -> int:
+    """Flash 的上下文缓存和吞吐更稳定，默认并发 5；其他模型保持 3。
+
+    显式设置 MT_WINDOW_CONCURRENCY 时始终以用户配置为准。
+    """
+    configured = os.environ.get("MT_WINDOW_CONCURRENCY")
+    if configured:
+        return max(1, int(configured))
+    return 5 if "flash" in (model or "").lower() else WINDOW_CONCURRENCY
+# 结构修复只做一次、且必须有限时。历史上“整窗拆半重润色 + 逐段修复”会在
+# 99/99 后继续串行发请求，用户看到长时间无进度；这里把最坏成本封死。
+STRUCTURE_REPAIR_TIMEOUT = max(15, int(os.environ.get("MT_STRUCTURE_REPAIR_TIMEOUT", "60")))
+STRUCTURE_REPAIR_MAX_SEGMENTS = max(1, int(os.environ.get("MT_STRUCTURE_REPAIR_MAX_SEGMENTS", "8")))
+STRUCTURE_REPAIR_MAX_TOTAL = max(1, int(os.environ.get("MT_STRUCTURE_REPAIR_MAX_TOTAL", "20")))
+QA_REPAIR_TIMEOUT = max(15, int(os.environ.get("MT_QA_REPAIR_TIMEOUT", "90")))
+
 from app.services.translation_batch import (
+    _canonicalize_polished_terms,
     _forced_terms_for_text,
     _load_window_context,
     _persist_window_translations,
     _window_material,
     _speaker_map_for_project,
     insert_translation_row,
+    persist_naturalness_edits,
     translate_window_draft_direct,
     translate_window_polish_direct,
 )
@@ -70,6 +90,8 @@ async def _repair_express_qa(
     每轮修复段写库新版本；重检（确定性 QA）仍有问题的段转 needs_review，不再自动重译。
     返回 (修复段数, 未修复段 id 列表)。
     """
+    import asyncio as _aio
+
     from app.services.translation_batch import insert_translation_row
 
     target_ids = sorted({
@@ -108,12 +130,25 @@ async def _repair_express_qa(
     for _ in range(3):
         if not remaining:
             break
+        issue_payload = [
+            i for i in win_issues if i.get("segment_id") in remaining
+        ]
         try:
-            fixed_map = await repair_segments(
-                provider=provider, model=model, window_id="QA-FIX-EXPRESS",
-                context=ctx, draft=draft,
-                issues=[i for i in win_issues if i.get("segment_id") in remaining],
-                seg_ids=remaining,
+            # high/critical 可能涉及代词/否定等语义改写，关闭思考时模型容易
+            # 原样返回；这类修复启用思考，medium 仍走低成本路径。
+            has_high = any(
+                i.get("severity") in ("high", "critical")
+                for i in issue_payload
+            )
+            fixed_map = await _aio.wait_for(
+                repair_segments(
+                    provider=provider, model=model, window_id="QA-FIX-EXPRESS",
+                    context=ctx, draft=draft,
+                    issues=issue_payload,
+                    seg_ids=remaining,
+                    thinking="enabled" if has_high else "disabled",
+                ),
+                timeout=QA_REPAIR_TIMEOUT,
             )
         except Exception:  # noqa: BLE001 修复异常：保留原译文转人工
             fixed_map = {}
@@ -181,6 +216,7 @@ async def run_express(db_factory, project_id: str, source_document_id: str, mode
     import asyncio as _aio
 
     provider = get_provider()
+    window_concurrency = _window_concurrency_for(model)
 
     def _paused() -> bool:
         with db_factory() as pdb:
@@ -287,6 +323,15 @@ async def run_express(db_factory, project_id: str, source_document_id: str, mode
     for t in latest_rows:
         latest_by_key.setdefault((t.segment_id, t.stage), t)
 
+    # 老项目在升级前可能已有剧情卡但没有结构化状态：任务开始时确定性回填。
+    try:
+        with db_factory() as db:
+            report["steps"]["continuity"] = continuity_service.sync_project_continuity(
+                db, project_id
+            )
+    except Exception as exc:  # noqa: BLE001 派生状态失败不阻断翻译，沿用剧情卡提示
+        report["steps"]["continuity"] = {"error": str(exc)[:300]}
+
     def _window_stage_complete(win, stage: str) -> bool:
         for seg in win:
             t = latest_by_key.get((seg.id, stage))
@@ -328,7 +373,7 @@ async def run_express(db_factory, project_id: str, source_document_id: str, mode
     _sync_progress(db_factory, task_id, report["steps"], "translation")
 
     # 阶段 1：未完成窗口的 Draft 并发（Draft 不依赖 carry-over）
-    _sem = _aio.Semaphore(WINDOW_CONCURRENCY)
+    _sem = _aio.Semaphore(window_concurrency)
 
     def _draft_from_db(db, win) -> list[dict]:
         out = []
@@ -367,7 +412,10 @@ async def run_express(db_factory, project_id: str, source_document_id: str, mode
                 return None
             try:
                 result = await _aio.wait_for(
-                    translate_window_draft_direct(db_factory, project_id, win, model),
+                    translate_window_draft_direct(
+                        db_factory, project_id, win, model,
+                        task_id=task_id, window_key=f"WIN_{win_idx:04d}",
+                    ),
                     timeout=240,
                 )
             except Exception:  # noqa: BLE001 超时/异常：该窗口标记失败跳过，不卡住整本
@@ -505,7 +553,7 @@ async def run_express(db_factory, project_id: str, source_document_id: str, mode
         "base_done": polish_base_done,
     })
     _sync_progress(db_factory, task_id, report["steps"], "translation")
-    _sem2 = _aio.Semaphore(WINDOW_CONCURRENCY)
+    _sem2 = _aio.Semaphore(window_concurrency)
 
     def _prev_carry(win_idx: int) -> dict | None:
         if win_idx <= 0:
@@ -600,7 +648,8 @@ async def run_express(db_factory, project_id: str, source_document_id: str, mode
                 try:
                     return await _aio.wait_for(
                         translate_window_polish_direct(
-                            db_factory, project_id, window, draft, _prev_carry(win_idx), model
+                            db_factory, project_id, window, draft, _prev_carry(win_idx), model,
+                            task_id=task_id, window_key=f"WIN_{win_idx:04d}",
                         ),
                         timeout=240,
                     )
@@ -618,37 +667,6 @@ async def run_express(db_factory, project_id: str, source_document_id: str, mode
             if attempt < retries:
                 await _aio.sleep(3 * (attempt + 1))
         return "failed"
-
-    async def _split_repolish(win_idx, window, draft):
-        """结构校验失败时把窗口拆半重润色，避免个别窗口永久卡死。"""
-        if len(window) <= 1:
-            return None
-        mid = len(window) // 2
-        left_window, right_window = window[:mid], window[mid:]
-        left_ids = {s.id for s in left_window}
-        left_draft = [e for e in draft if e.get("segment_id") in left_ids]
-        right_draft = [e for e in draft if e.get("segment_id") not in left_ids]
-        try:
-            async with _sem2:
-                left, middle_carry = await _aio.wait_for(
-                    translate_window_polish_direct(
-                        db_factory, project_id, left_window, left_draft,
-                        _prev_carry(win_idx), model,
-                    ),
-                    timeout=240,
-                )
-            async with _sem2:
-                right, _carry = await _aio.wait_for(
-                    translate_window_polish_direct(
-                        db_factory, project_id, right_window, right_draft,
-                        middle_carry, model,
-                    ),
-                    timeout=240,
-                )
-            return [*left, *right]
-        except Exception as exc:  # noqa: BLE001 拆窗失败保留原错误
-            polish_errors[win_idx] = f"拆窗重试失败：{type(exc).__name__}: {str(exc)[:240]}"
-            return None
 
     def _seg_dicts(window) -> list[dict]:
         return [
@@ -691,72 +709,53 @@ async def run_express(db_factory, project_id: str, source_document_id: str, mode
                 })
         return out
 
-    async def _strict_repair_segments(
-        win_idx: int,
-        window,
-        draft: list[dict],
-        polished: list[dict],
-        errors: list[str],
-        carry_over: dict | None,
-    ) -> tuple[list[dict], list[str]]:
-        """逐段严格重译仍不合格的段，显式约束行数与结构锚点。
+    def _draft_structural_fallback(
+        window, polished: list[dict], draft: list[dict]
+    ) -> tuple[list[dict], list[str], list[str]]:
+        """结构异常段的零调用兜底：Draft 已锁事实且结构合法时直接采用。
 
-        整窗 repair 偶尔会继续合并动作行；逐段输入能显著降低模型把多行
-        动作块压成一行的概率。只对已经失败的问题段调用，不增加正常路径成本。
+        结构校验失败通常只是 Polish 合并了行、丢了角色标签或错误挪段。
+        重新让模型润色整窗既慢又可能继续犯错；Draft 已逐段保留原文结构，
+        因此先用它兜底，只有 Draft 也无效时才允许一次限时修复。
         """
+        seg_dicts = _seg_dicts(window)
+        errors = validate_window(seg_dicts, polished, speaker_map=speaker_map)
         if not errors:
-            return polished, errors
-        bad_ids = sorted(locate_problem_segments(
-            _seg_dicts(window), polished, speaker_map=speaker_map
-        ))
+            return polished, [], []
+        bad_ids = locate_problem_segments(seg_dicts, polished, speaker_map=speaker_map)
         if not bad_ids:
-            return polished, errors
-        by_id = {s.id: s for s in window}
-        draft_by_id = {e.get("segment_id"): e for e in draft}
-        for sid in bad_ids[:12]:
-            seg = by_id.get(sid)
-            one_draft = draft_by_id.get(sid)
-            if seg is None or one_draft is None:
+            return polished, errors, []
+        seg_by_id = {s.id: s for s in window}
+        draft_by_id = {e.get("segment_id"): e for e in draft if e.get("target_text")}
+        replacements: dict[str, str] = {}
+        for sid in bad_ids:
+            seg = seg_by_id.get(sid)
+            candidate = draft_by_id.get(sid)
+            text = (candidate or {}).get("target_text") or ""
+            if seg is None or not str(text).strip():
                 continue
-            one_window = [seg]
-            one_dicts = _seg_dicts(one_window)
-            counts = _line_counts(one_window)
-            try:
-                _sd, one_ctx, _sg, _card = await _window_material(
-                    db_factory, project_id, one_window, carry_over, lean=True
-                )
-                fixed = await repair_segments(
-                    provider=provider, model=model,
-                    window_id=f"FIX-STRICT-{seg.segment_no}",
-                    context=one_ctx, draft=[one_draft],
-                    issues=[
-                        {
-                            "issue_type": "line_shift",
-                            "explanation": e,
-                            "suggested_fix": "逐行对应原文，不得合并或丢失任何一行",
-                        }
-                        for e in errors
-                    ],
-                    seg_ids=[sid], line_counts=counts,
-                )
-            except Exception:  # noqa: BLE001 单段修复失败继续尝试其余问题段
-                continue
-            text = (fixed.get(sid) or "").strip()
-            if not text:
-                continue
-            candidate = [{
-                "segment_id": sid, "target_text": text,
-                "notes": [], "ambiguity": [],
-            }]
-            if validate_window(one_dicts, candidate, speaker_map=speaker_map):
-                continue
-            polished = _apply_fixed_map(polished, {sid: text})
-            errors = validate_window(
-                _seg_dicts(window), polished, speaker_map=speaker_map
+            one_errors = validate_window(
+                _seg_dicts([seg]),
+                [{"segment_id": sid, "target_text": text}],
+                speaker_map=speaker_map,
             )
-            if not errors:
-                break
-        return polished, errors
+            if not one_errors:
+                replacements[sid] = str(text)
+        if not replacements:
+            return polished, errors, []
+        out = _apply_fixed_map(polished, replacements)
+        for entry in out:
+            sid = entry.get("segment_id")
+            if sid in replacements:
+                notes = list(entry.get("notes") or [])
+                if "structure-fallback:draft" not in notes:
+                    notes.append("structure-fallback:draft")
+                entry["notes"] = notes
+        return (
+            out,
+            validate_window(seg_dicts, out, speaker_map=speaker_map),
+            sorted(replacements),
+        )
 
     polish_jobs = list(zip(todo_indices, todo))
     polish_tasks = [
@@ -802,9 +801,27 @@ async def run_express(db_factory, project_id: str, source_document_id: str, mode
             wi, w = polish_jobs[pos]
             polished_results[pos] = await _polish_one(wi, w, retries=1)
 
-    # 顺序持久化与进度上报（单协程写，无竞争）
+    # 顺序持久化与进度上报（单协程写，无竞争）。
+    # 结构校验/兜底也在这里逐窗推进并写进度：用户不会在出现 99/99 后
+    # 盯着一个没有变化的数字等待一串不可见的修复请求。
     failed_windows = 0
-    for wi, window, dr, pr in zip(todo_indices, todo, draft_results, polished_results):
+    structural_fallback_ids: list[str] = []
+    structure_repair_attempts = 0
+    tr_state = report["steps"]["translation"]
+    tr_state.update({
+        "phase": "finalize",
+        "finalize_done": 0,
+        "structure_fallbacks": 0,
+        "structure_repairs": 0,
+    })
+    _sync_progress(db_factory, task_id, report["steps"], "translation")
+
+    for pos, (wi, window, dr, pr) in enumerate(
+        zip(todo_indices, todo, draft_results, polished_results)
+    ):
+        tr_state["finalize_done"] = pos
+        tr_state["repairing_window"] = None
+        _sync_progress(db_factory, task_id, report["steps"], "translation")
         if pr is None:
             if _paused():
                 break  # 暂停：保留进度，resume 续跑
@@ -824,13 +841,14 @@ async def run_express(db_factory, project_id: str, source_document_id: str, mode
         if pr[1] is None:
             # 已完成窗口复用：仅推进进度，不重复落库
             done += 1
-            report["steps"]["translation"] = {
+            tr_state.update({
                 "done": done,
                 "total": total,
-                "phase": "polish",
+                "phase": "finalize",
                 "draft_done": draft_done_count,
                 "draft_carry": draft_carry_map,
-            }
+                "finalize_done": pos + 1,
+            })
             _sync_polish_live()
             continue
         # 段完整性校验：缺行/错位是历史漏译与标签错位的根因，拒绝静默落库
@@ -838,37 +856,62 @@ async def run_express(db_factory, project_id: str, source_document_id: str, mode
         line_counts = _line_counts(window)
         errors = validate_window(seg_dicts, polished, speaker_map=speaker_map)
         if errors:
-            # 定点修复：定位问题段，AI 只重译这些段（窗口其余段不动）
-            bad_ids = locate_problem_segments(seg_dicts, polished, speaker_map=speaker_map)
-            if bad_ids:
-                try:
-                    fix_issues = [
-                        {"issue_type": "line_shift", "explanation": e,
-                         "suggested_fix": "补齐缺失行，逐行对应原文"}
-                        for e in errors
-                    ]
-                    fixed_map = await repair_segments(
-                        provider=provider, model=model, window_id=f"FIX-{window[0].segment_no}",
-                        context=context, draft=draft, issues=fix_issues,
-                        seg_ids=sorted(bad_ids), line_counts=line_counts,
-                    )
-                    polished = _apply_fixed_map(polished, fixed_map)
-                    errors = validate_window(seg_dicts, polished, speaker_map=speaker_map)
-                except Exception:  # noqa: BLE001 修复失败保持原错误，走失败计数
-                    pass
-        if errors:
-            polished, errors = await _strict_repair_segments(
-                wi, window, draft, polished, errors, _prev_carry(wi)
+            tr_state["phase"] = "repair"
+            tr_state["repairing_window"] = wi + 1
+            _sync_progress(db_factory, task_id, report["steps"], "translation")
+            # 第一层：零模型调用。Draft 已锁事实，结构合法时直接采用。
+            polished, errors, fallback_ids = _draft_structural_fallback(
+                window, polished, draft
             )
-        if errors and len(window) > 1:
-            recovered = await _split_repolish(wi, window, draft)
-            if recovered is not None:
-                polished = recovered
-                errors = validate_window(seg_dicts, polished, speaker_map=speaker_map)
-                if errors:
-                    polished, errors = await _strict_repair_segments(
-                        wi, window, draft, polished, errors, _prev_carry(wi)
-                    )
+            if fallback_ids:
+                structural_fallback_ids.extend(fallback_ids)
+                tr_state["structure_fallbacks"] = len(structural_fallback_ids)
+                _sync_progress(db_factory, task_id, report["steps"], "translation")
+            if errors:
+                # 第二层：只对 Draft 也无效的段做一次限时定点修复，且关闭思考。
+                bad_ids = sorted(locate_problem_segments(
+                    seg_dicts, polished, speaker_map=speaker_map
+                ))
+                repair_ids = bad_ids[:STRUCTURE_REPAIR_MAX_SEGMENTS]
+                if (
+                    repair_ids
+                    and structure_repair_attempts < min(total, STRUCTURE_REPAIR_MAX_TOTAL)
+                ):
+                    structure_repair_attempts += 1
+                    tr_state["structure_repairs"] = structure_repair_attempts
+                    try:
+                        fix_issues = [
+                            {"issue_type": "line_shift", "explanation": e,
+                             "suggested_fix": "补齐缺失行，逐行对应原文"}
+                            for e in errors
+                        ]
+                        fixed_map = await _aio.wait_for(
+                            repair_segments(
+                                provider=provider, model=model,
+                                window_id=f"FIX-{window[0].segment_no}",
+                                context=context, draft=draft, issues=fix_issues,
+                                seg_ids=repair_ids, line_counts=line_counts,
+                                thinking="disabled",
+                            ),
+                            timeout=STRUCTURE_REPAIR_TIMEOUT,
+                        )
+                        polished = _apply_fixed_map(polished, fixed_map)
+                        errors = validate_window(
+                            seg_dicts, polished, speaker_map=speaker_map
+                        )
+                    except Exception:  # noqa: BLE001 修复失败立即走 Draft 兜底
+                        pass
+            if errors:
+                # 修复结果仍不完整时再做一次确定性兜底，避免把可恢复窗口判失败。
+                polished, errors, more_fallback = _draft_structural_fallback(
+                    window, polished, draft
+                )
+                if more_fallback:
+                    structural_fallback_ids.extend(more_fallback)
+                    tr_state["structure_fallbacks"] = len(structural_fallback_ids)
+            tr_state["repairing_window"] = None
+            tr_state["phase"] = "finalize"
+            _sync_progress(db_factory, task_id, report["steps"], "translation")
         if errors:
             polish_errors[wi] = "结构校验失败：" + "; ".join(errors[:3])
             failed_windows += 1
@@ -876,18 +919,28 @@ async def run_express(db_factory, project_id: str, source_document_id: str, mode
             _sync_progress(db_factory, task_id, report["steps"], "translation")
             continue  # 不落库错误窗口；任务完成前可重试或按章节重译
         polish_errors.pop(wi, None)
+        # 修复/拆窗后的文本也要再过一次确定性称谓归一，避免 repair 路径绕过。
+        polished = await _canonicalize_polished_terms(
+            db_factory, project_id, window, polished
+        )
         with db_factory() as db:
             _persist_window_translations(db, window, draft, polished, context, model)
             db.commit()
         done += 1
-        report["steps"]["translation"] = {
+        tr_state.update({
             "done": done,
             "total": total,
-            "phase": "polish",
+            "phase": "finalize",
             "draft_done": draft_done_count,
             "draft_carry": draft_carry_map,
-        }
+            "finalize_done": pos + 1,
+        })
         _sync_polish_live()
+
+    if not failed_windows and not _paused():
+        tr_state["phase"] = "done"
+        tr_state["finalize_done"] = total
+        _sync_progress(db_factory, task_id, report["steps"], "translation")
 
     if failed_windows and not _paused():
         errors = {
@@ -969,7 +1022,9 @@ async def run_express(db_factory, project_id: str, source_document_id: str, mode
                         continue
                     latest.setdefault(t.segment_id, t)
                 seg_map = {s.id: s for s in window}
-                _card, knowledge, storyline = _load_window_context(db, project_id, window)
+                _card, knowledge, storyline, states, facts = _load_window_context(
+                    db, project_id, window
+                )
                 qa_reference = build_qa_reference(
                     segments=[
                         {
@@ -982,6 +1037,8 @@ async def run_express(db_factory, project_id: str, source_document_id: str, mode
                     ],
                     knowledge=knowledge,
                     storyline=storyline,
+                    character_states=states,
+                    story_facts=facts,
                 )
                 det_by_win[wi] = {}
                 tr_id_by_win[wi] = {}
@@ -1033,8 +1090,9 @@ async def run_express(db_factory, project_id: str, source_document_id: str, mode
 
         # 第二遍：每窗口一次语义 QA（并发，只读模型，不写库）。
         sem_by: dict[tuple[int, str], list[dict]] = {}
+        nat_by_wi: dict[int, list[tuple[str, dict]]] = {}
         if qa_jobs:
-            _sem_qa = _aio.Semaphore(WINDOW_CONCURRENCY)
+            _sem_qa = _aio.Semaphore(window_concurrency)
             qa_step = report["steps"]["qa"]
             qa_step["semantic_done"] = int(qa_step.get("semantic_done") or 0)
             qa_step["semantic_total"] = len(qa_jobs)
@@ -1048,7 +1106,7 @@ async def run_express(db_factory, project_id: str, source_document_id: str, mode
                             reference=job["reference"],
                         )
                     if not result.ok:
-                        return job["wi"], [], result.error or "语义质检未完成"
+                        return job["wi"], [], [], result.error or "语义质检未完成"
                     resolved: list[tuple[str, dict]] = []
                     for issue in result.issues:
                         sid = _resolve_issue_segment(issue, job["segments"])
@@ -1056,29 +1114,69 @@ async def run_express(db_factory, project_id: str, source_document_id: str, mode
                         if tr_id:
                             issue["segment_id"] = sid
                             resolved.append((tr_id, issue))
-                    return job["wi"], resolved, ""
+                    natural_edits: list[tuple[str, dict]] = []
+                    for edit in result.naturalness_edits:
+                        sid = _resolve_issue_segment(edit, job["segments"])
+                        if sid:
+                            edit["segment_id"] = sid
+                            natural_edits.append((sid, edit))
+                    return job["wi"], resolved, natural_edits, ""
                 except Exception as exc:  # noqa: BLE001 单窗口失败不阻塞其它窗口记录
-                    return job["wi"], [], f"{type(exc).__name__}: {str(exc)[:300]}"
+                    return job["wi"], [], [], f"{type(exc).__name__}: {str(exc)[:300]}"
 
             sem_tasks = [_aio.create_task(_sem_one(j)) for j in qa_jobs]
             for fut in _aio.as_completed(sem_tasks):
-                wi, resolved, error = await fut
+                wi, resolved, natural_edits, error = await fut
                 if error:
                     semantic_failed_windows.add(wi)
                     qa_failed += 1
                     qa_errors.append(f"WIN_{wi:04d}: {error}")
                 for tr_id, issue in resolved:
                     sem_by.setdefault((wi, tr_id), []).append(issue)
+                if natural_edits:
+                    nat_by_wi.setdefault(wi, []).extend(natural_edits)
                 qa_step["semantic_done"] = int(qa_step.get("semantic_done") or 0) + 1
                 _sync_progress(db_factory, task_id, report["steps"], "qa")
 
         # 第三遍：顺序回填持久化 + gate 评估（单协程写，无竞争）
         severity_counts: dict[str, int] = dict(prev_qa.get("severity_counts") or {})
+        naturalness_total = int(prev_qa.get("naturalness_edits") or 0)
         for wi, window in enumerate(windows):
             if wi not in det_by_win:
                 continue  # 已检查过或暂停中断
             win_issues: list[dict] = []
+            naturalness_count = 0
+            current_job = next((j for j in qa_jobs if j["wi"] == wi), None)
             with db_factory() as db:
+                if current_job is not None and nat_by_wi.get(wi):
+                    exclude_sids = {
+                        sid for sid, tr_id in tr_id_by_win[wi].items()
+                        if (wi, tr_id) in sem_by
+                    }
+                    accepted = qa_service.select_naturalness_edits(
+                        segments=_seg_dicts(window),
+                        targets={
+                            p["segment_id"]: p["target_text"]
+                            for p in current_job["segments"]
+                        },
+                        edits=[
+                            edit for _sid, edit in nat_by_wi.get(wi, [])
+                        ],
+                        forced_terms=forced,
+                        speaker_map=speaker_map,
+                        exclude_sids=exclude_sids,
+                    )
+                    new_rows = persist_naturalness_edits(
+                        db, window=window, accepted=accepted, model=model
+                    )
+                    for sid, row in new_rows.items():
+                        tr_id_by_win[wi][sid] = row.id
+                        seg = next(s for s in window if s.id == sid)
+                        det_by_win[wi][sid] = qa_service.deterministic_qa(
+                            db, seg, row, forced
+                        )
+                    naturalness_count = len(new_rows)
+                    naturalness_total += naturalness_count
                 qa_service.clear_issues_for_segments(
                     db, project_id, [s.id for s in window]
                 )
@@ -1095,6 +1193,7 @@ async def run_express(db_factory, project_id: str, source_document_id: str, mode
             report["steps"]["qa"] = {
                 "done": wi + 1, "total": len(windows), "issues": issues_total,
                 "severity_counts": severity_counts,
+                "naturalness_edits": naturalness_total,
             }
             _sync_progress(db_factory, task_id, report["steps"], "qa")
             # 质检打回定点修复：AI 只修问题段（最多 3 轮），修复段写库新版本；
@@ -1186,6 +1285,7 @@ async def run_express(db_factory, project_id: str, source_document_id: str, mode
                         "unresolved": len(unresolved),
                         "semantic_ok": semantic_ok,
                         "translation_ids": latest_ids,
+                        "naturalness_edits": naturalness_count,
                     },
                 )
                 db.commit()
@@ -1196,6 +1296,7 @@ async def run_express(db_factory, project_id: str, source_document_id: str, mode
             "failed": qa_failed,
             "errors": qa_errors[:5],
             "gate_passed": qa_failed == 0,
+            "naturalness_edits": naturalness_total,
         }
         report["steps"]["qa"] = {
             "done": len(windows), "total": len(windows),
@@ -1264,7 +1365,7 @@ async def run_express(db_factory, project_id: str, source_document_id: str, mode
             return
 
         # 并发生成修复（只读）；每段硬超时，失败只跳过该段
-        _sem_fix = _aio.Semaphore(WINDOW_CONCURRENCY)
+        _sem_fix = _aio.Semaphore(window_concurrency)
 
         async def _fix_one(sid: str):
             seg = seg_by_id[sid]
@@ -1296,6 +1397,7 @@ async def run_express(db_factory, project_id: str, source_document_id: str, mode
                     repair_segments(
                         provider=provider, model=model, window_id=f"TERM-{seg.segment_no}",
                         context=ctx, draft=draft_list, issues=issues, seg_ids=[sid],
+                        thinking="disabled",
                     ),
                     timeout=180,
                 )

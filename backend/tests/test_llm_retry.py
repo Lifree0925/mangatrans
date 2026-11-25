@@ -16,6 +16,7 @@ class _State:
     def __init__(self, responses: list):
         self.responses = responses
         self.calls = 0
+        self.bodies: list[dict] = []
 
 
 def _serve(state: _State):
@@ -27,7 +28,11 @@ def _serve(state: _State):
 
         def do_POST(self):
             n = int(self.headers.get("content-length", 0))
-            self.rfile.read(n)
+            raw = self.rfile.read(n)
+            try:
+                state.bodies.append(json.loads(raw.decode()))
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                state.bodies.append({})
             state.calls += 1
             idx = min(state.calls - 1, len(state.responses) - 1)
             code, content = state.responses[idx]
@@ -41,7 +46,7 @@ def _serve(state: _State):
     return H
 
 
-def _run(state, max_retries=2, timeout=10.0):
+def _run(state, max_retries=2, timeout=10.0, **chat_kwargs):
     import tempfile
 
     from app.core.config import settings
@@ -58,9 +63,11 @@ def _run(state, max_retries=2, timeout=10.0):
         max_retries=max_retries,
     )
     try:
-        return asyncio.run(
-            provider.chat(messages=[{"role": "user", "content": "hi"}], timeout=timeout)
-        )
+        return asyncio.run(provider.chat(
+            messages=[{"role": "user", "content": "hi"}],
+            timeout=timeout,
+            **chat_kwargs,
+        ))
     finally:
         srv.shutdown()
 
@@ -97,6 +104,59 @@ def test_retries_exhausted_raises_retryable_error():
     except LLMError as exc:
         assert exc.retryable
         assert state.calls == 3  # 1 次首调 + 2 次重试
+
+
+def test_400_degrades_thinking_then_response_format():
+    """兼容性 400 必须逐级移除参数，而不是只降级一次。"""
+    state = _State([
+        (400, {"error": {"message": "thinking is not supported"}}),
+        (400, {"error": {"message": "response_format is not supported"}}),
+        (200, _ok()),
+    ])
+    resp = _run(
+        state,
+        max_retries=0,
+        response_schema={"type": "object"},
+        thinking="enabled",
+        reasoning_effort="low",
+        temperature=0.2,
+    )
+    assert state.calls == 3
+    assert resp.content == "pong"
+    assert [d["step"] for d in resp.degradations] == ["thinking", "response_format"]
+    assert "thinking" not in state.bodies[-1]
+    assert "reasoning_effort" not in state.bodies[-1]
+    assert "response_format" not in state.bodies[-1]
+
+
+def test_cache_key_includes_actual_temperature():
+    """temperature=0.1 与 0.3 是不同生成配置，缓存不能互相命中。"""
+    import tempfile
+
+    from app.core.config import settings
+
+    settings.data_dir = Path(tempfile.mkdtemp(prefix="mt_cache_temp_test_"))
+    state = _State([(200, _ok())])
+    srv = HTTPServer(("127.0.0.1", 0), _serve(state))
+    port = srv.server_address[1]
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    provider = OpenAICompatProvider(
+        base_url=f"http://127.0.0.1:{port}",
+        api_key="sk-test",
+        model="mock",
+        max_retries=0,
+    )
+    try:
+        for temperature in (0.1, 0.3, 0.1):
+            resp = asyncio.run(provider.chat(
+                messages=[{"role": "user", "content": "hi"}],
+                temperature=temperature,
+                timeout=10,
+            ))
+            assert resp.content == "pong"
+        assert state.calls == 2  # 前两次配置不同；第三次同温度才命中缓存
+    finally:
+        srv.shutdown()
 
 
 def test_auth_error_never_retries():
@@ -187,6 +247,83 @@ def test_cache_hit_skips_http_call():
         r2 = asyncio.run(provider.chat(messages=[{"role": "user", "content": "hi"}]))
         assert state.calls == 1  # 缓存命中，无新请求
         assert r1.content == r2.content == "pong"
+    finally:
+        srv.shutdown()
+
+
+def test_cache_reuses_complete_response_across_output_budget_changes():
+    """同一 Prompt 只调整 max_tokens 时，完整结果应继续复用，避免重复付费。"""
+    import tempfile
+
+    from app.core.config import settings
+
+    settings.data_dir = Path(tempfile.mkdtemp(prefix="mt_cache_budget_"))
+    state = _State([(
+        200,
+        {
+            "choices": [{
+                "message": {"role": "assistant", "content": "pong"},
+                "finish_reason": "stop",
+            }],
+            "usage": {"prompt_tokens": 5, "completion_tokens": 8},
+        },
+    )])
+    srv = HTTPServer(("127.0.0.1", 0), _serve(state))
+    port = srv.server_address[1]
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    provider = OpenAICompatProvider(
+        base_url=f"http://127.0.0.1:{port}", api_key="sk-test", model="mock", max_retries=0
+    )
+    try:
+        asyncio.run(provider.chat(
+            messages=[{"role": "user", "content": "hi"}], max_tokens=4096,
+        ))
+        response = asyncio.run(provider.chat(
+            messages=[{"role": "user", "content": "hi"}], max_tokens=8192,
+        ))
+        assert response.content == "pong"
+        assert state.calls == 1
+    finally:
+        srv.shutdown()
+
+
+def test_cache_does_not_reuse_output_longer_than_requested_budget():
+    """缓存结果实际更长时，不能为了命中而突破本次 max_tokens。"""
+    import tempfile
+
+    from app.core.config import settings
+
+    settings.data_dir = Path(tempfile.mkdtemp(prefix="mt_cache_budget_guard_"))
+    long_response = {
+        "choices": [{
+            "message": {"role": "assistant", "content": "long"},
+            "finish_reason": "stop",
+        }],
+        "usage": {"prompt_tokens": 5, "completion_tokens": 6000},
+    }
+    short_response = {
+        "choices": [{
+            "message": {"role": "assistant", "content": "short"},
+            "finish_reason": "stop",
+        }],
+        "usage": {"prompt_tokens": 5, "completion_tokens": 8},
+    }
+    state = _State([(200, long_response), (200, short_response)])
+    srv = HTTPServer(("127.0.0.1", 0), _serve(state))
+    port = srv.server_address[1]
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    provider = OpenAICompatProvider(
+        base_url=f"http://127.0.0.1:{port}", api_key="sk-test", model="mock", max_retries=0
+    )
+    try:
+        asyncio.run(provider.chat(
+            messages=[{"role": "user", "content": "hi"}], max_tokens=8192,
+        ))
+        response = asyncio.run(provider.chat(
+            messages=[{"role": "user", "content": "hi"}], max_tokens=4096,
+        ))
+        assert response.content == "short"
+        assert state.calls == 2
     finally:
         srv.shutdown()
 

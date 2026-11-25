@@ -3,9 +3,11 @@
 import asyncio
 import hashlib
 import json
+import os
 import threading
 import time
 import uuid
+from collections import OrderedDict
 
 import httpx
 
@@ -53,44 +55,94 @@ def _is_context_length_error(status_code: int, detail: str) -> bool:
     return any(marker in lowered for marker in _CONTEXT_LENGTH_MARKERS)
 
 
+def _degrade_next_parameter(body: dict) -> tuple[str, list[str]] | None:
+    """按兼容性风险从低到高移除一个可选参数；返回步骤名与被移除字段。"""
+    removed: list[str] = []
+    if "thinking" in body or "reasoning_effort" in body:
+        for key in ("thinking", "reasoning_effort"):
+            if key in body:
+                body.pop(key, None)
+                removed.append(key)
+        return "thinking", removed
+    if "response_format" in body:
+        body.pop("response_format", None)
+        return "response_format", ["response_format"]
+    return None
+
+
+def _local_cache_key(base_url: str, body: dict) -> str:
+    """本地精确缓存 Key：忽略 max_tokens，命中时再校验输出是否装得下。"""
+    cache_body = dict(body)
+    cache_body.pop("max_tokens", None)
+    return hashlib.sha256(
+        json.dumps(
+            {"cache_schema": 3, "base_url": base_url, "body": cache_body},
+            ensure_ascii=False,
+            sort_keys=True,
+        ).encode()
+    ).hexdigest()
+
+
+def _cache_entry_usable(cached: dict | None, requested_max_tokens: int) -> bool:
+    """缓存结果完整且不超过本次输出预算时才复用。"""
+    if not cached or cached.get("finish_reason") == "length":
+        return False
+    requested = max(1, int(requested_max_tokens or 0))
+    cached_max = int(cached.get("max_tokens") or 0)
+    usage = cached.get("usage") or {}
+    completion = int(usage.get("completion_tokens") or usage.get("output_tokens") or 0)
+    if completion:
+        # 低预算下 finish_reason=stop 说明响应已自然结束；实际 completion
+        # 没有超过本次预算才可安全复用。
+        return completion <= requested
+    # 没有 usage 细节时只能保守判断：缓存输出不会超过它当时的 max_tokens。
+    return cached_max <= requested
+
+
 class _LLMCache:
     """进程级 + 文件持久化的 LLM 响应缓存（重复/重试调用零成本复用）。
 
     仅缓存确定输出（temperature<=0.3 的翻译调用）；容量上限防膨胀。
     """
 
-    MAX_ENTRIES = 800
+    # 长剧本一次任务可能超过 1000 个请求；过小会导致重跑时刚缓存的响应被淘汰。
+    MAX_ENTRIES = 5000
 
     def __init__(self, path: str):
         self._path = path
         self._lock = threading.Lock()
-        self._data: dict[str, dict] = {}
+        self._data: OrderedDict[str, dict] = OrderedDict()
         try:
             import os
 
             if path and os.path.exists(path):
                 with open(path, encoding="utf-8") as f:
-                    self._data = json.load(f)
+                    loaded = json.load(f)
+                    if isinstance(loaded, dict):
+                        self._data = OrderedDict(loaded.items())
         except Exception:  # noqa: BLE001 缓存损坏不影响功能
-            self._data = {}
+            self._data = OrderedDict()
 
     def get(self, key: str) -> dict | None:
         with self._lock:
-            return self._data.get(key)
+            value = self._data.get(key)
+            if value is not None:
+                self._data.move_to_end(key)
+            return value
 
     def put(self, key: str, value: dict) -> None:
         with self._lock:
-            if len(self._data) >= self.MAX_ENTRIES:
-                for k in list(self._data)[: self.MAX_ENTRIES // 2]:
-                    self._data.pop(k, None)
+            while len(self._data) >= self.MAX_ENTRIES:
+                self._data.popitem(last=False)
             self._data[key] = value
+            self._data.move_to_end(key)
             if self._path:
                 try:
-                    import os
-
                     os.makedirs(os.path.dirname(self._path), exist_ok=True)
-                    with open(self._path, "w", encoding="utf-8") as f:
+                    tmp_path = self._path + ".tmp"
+                    with open(tmp_path, "w", encoding="utf-8") as f:
                         json.dump(self._data, f, ensure_ascii=False)
+                    os.replace(tmp_path, self._path)
                 except Exception:  # noqa: BLE001 写失败忽略
                     pass
 
@@ -108,7 +160,14 @@ class OpenAICompatProvider:
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key
         self.model = model
-        self.capabilities = capabilities or ProviderCapabilities()
+        # 实测 DeepSeek 的跨 assistant 消息缓存不稳定；默认保留稳定的
+        # project prefix + thinking standard，append-only 会话作为可选实验开关。
+        self.capabilities = capabilities or ProviderCapabilities(
+            supports_conversation_cache=(
+                os.environ.get("MT_ENABLE_WINDOW_CONVERSATION", "0").strip().lower()
+                in {"1", "true", "yes"}
+            ),
+        )
         from app.core.config import settings
 
         cache_path = str(settings.data_dir / "cache" / "llm_cache.json")
@@ -153,6 +212,7 @@ class OpenAICompatProvider:
                 provider_id="openai_compat",
                 success=False,
                 error_code=str(code)[:64],
+                degradations=getattr(exc, "degradations", []),
             )
             raise
         record_usage(
@@ -164,6 +224,7 @@ class OpenAICompatProvider:
             latency_ms=resp.latency_ms,
             finish_reason=resp.finish_reason,
             success=True,
+            degradations=resp.degradations,
         )
         return resp
 
@@ -222,20 +283,15 @@ class OpenAICompatProvider:
         if self.api_key:
             headers["Authorization"] = f"Bearer {self.api_key}"
 
-        # 确定性调用缓存：temperature<=0.3 时命中直接返回（重试/重跑零成本）
+        # 确定性调用缓存：temperature<=0.3 时命中直接返回（重试/重跑零成本）。
+        # Key 使用实际发出的 body，确保 temperature / 默认 max_tokens 等不会互相污染。
         _truncation_retried = False
         cache_key = ""
+        requested_max_tokens = int(body.get("max_tokens") or 0)
         if temperature is None or temperature <= 0.3:
-            cache_key = hashlib.sha256(
-                json.dumps(
-                    [self.base_url, model, messages, body.get("response_format"),
-                     thinking, reasoning_effort, body.get("max_tokens")],
-                    ensure_ascii=False,
-                    sort_keys=True,
-                ).encode()
-            ).hexdigest()
+            cache_key = _local_cache_key(self.base_url, body)
             cached = self._cache.get(cache_key)
-            if cached is not None and cached.get("finish_reason") != "length":
+            if _cache_entry_usable(cached, requested_max_tokens):
                 return LLMResponse(
                     content=cached.get("content", ""),
                     provider_id="openai_compat",
@@ -247,6 +303,7 @@ class OpenAICompatProvider:
                     cache_hit=True,
                 )
 
+        degradations: list[dict] = []
         # 自动重试：网络抖动/超时/限流/5xx 按 max_retries 指数退避。
         # 长剧本约 60 个窗口，任一窗口一次瞬时故障都不应中断整本翻译。
         t0 = time.perf_counter()
@@ -258,29 +315,33 @@ class OpenAICompatProvider:
                     r = await client.post(
                         f"{self.base_url}/chat/completions", json=body, headers=headers
                     )
-                    # 本地模型（Ollama/vLLM 等）可能不支持 thinking / response_format：
-                    # 逐级降级后在同一连接内重试一次（不能移出 with 块，client 已关闭）
-                    if r.status_code == 400:
+                    # 本地模型/网关可能不支持 thinking、reasoning_effort 或
+                    # response_format。400 时逐级移除并记录，每一步都使用同一连接。
+                    while r.status_code == 400:
                         detail = _response_detail(r)
-                        # 上下文/输出预算超限不是参数兼容问题，降级 thinking 也不会恢复；
+                        # 上下文/输出预算超限不是参数兼容问题，降级也不会恢复；
                         # 直接抛出专用错误，让窗口层拆窗或压缩上下文。
                         if _is_context_length_error(r.status_code, detail):
-                            raise LLMError(
+                            exc = LLMError(
                                 f"模型上下文或输出预算超限: {detail[:240]}",
                                 retryable=False,
                                 code="context_length",
                             )
-                        if "thinking" in body:
-                            body.pop("thinking", None)
-                            body.pop("reasoning_effort", None)
-                            r = await client.post(
-                                f"{self.base_url}/chat/completions", json=body, headers=headers
-                            )
-                        elif "response_format" in body:
-                            body.pop("response_format", None)
-                            r = await client.post(
-                                f"{self.base_url}/chat/completions", json=body, headers=headers
-                            )
+                            exc.degradations = list(degradations)
+                            raise exc
+                        step = _degrade_next_parameter(body)
+                        if step is None:
+                            break
+                        name, removed = step
+                        degradations.append({
+                            "step": name,
+                            "removed": removed,
+                            "status": 400,
+                            "detail": detail[:300],
+                        })
+                        r = await client.post(
+                            f"{self.base_url}/chat/completions", json=body, headers=headers
+                        )
             except httpx.TimeoutException as exc:
                 last_err = LLMError("请求超时", retryable=True, code="timeout")
             except httpx.HTTPError as exc:
@@ -308,11 +369,13 @@ class OpenAICompatProvider:
                 )
             if r.status_code == 400:
                 # 请求本身有误（含降级后仍被拒）：重试无意义
-                raise LLMError(
+                exc = LLMError(
                     f"请求被拒绝 {r.status_code}: {detail[:240]}",
                     retryable=False,
                     code="bad_request",
                 )
+                exc.degradations = list(degradations)
+                raise exc
             if r.status_code == 429:
                 last_err = LLMError("限流", retryable=True, code="rate_limit")
             elif r.status_code >= 500:
@@ -380,6 +443,7 @@ class OpenAICompatProvider:
                     "request_id": data.get("id") or request_id or uuid.uuid4().hex,
                     "usage": data.get("usage") or {},
                     "finish_reason": choice.get("finish_reason"),
+                    "max_tokens": requested_max_tokens,
                 },
             )
         return LLMResponse(
@@ -390,6 +454,7 @@ class OpenAICompatProvider:
             usage=data.get("usage") or {},
             finish_reason=choice.get("finish_reason"),
             latency_ms=latency,
+            degradations=degradations,
         )
 
     async def test_connection(self) -> ProviderTestResult:

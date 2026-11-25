@@ -15,7 +15,9 @@ AI 漫剧剧本翻译系统（Windows 桌面版）：本地优先工作台，将
 - `frontend/`：React + TypeScript + Vite + Tailwind v4 + React Router + TanStack Query。视觉基调为 ChatGPT 风格浅色界面（白色主题、简洁分区、编辑区等宽字体）。
 - `backend/`：Python 3.12 + FastAPI sidecar + SQLite + SQLAlchemy + Alembic。业务唯一可信状态在 SQLite；长任务走 SQLite 任务表 + 单 Worker 串行执行。
 
-安全基线：后端只监听 `127.0.0.1`、动态端口、随机会话令牌（`x-auth-token`）；API Key 不进 SQLite/日志/快照/导出；开发凭据走可移植 keyring 后端。
+安全基线：后端只监听 `127.0.0.1`、动态端口、随机会话令牌（`x-auth-token`）；API Key 不进 SQLite/日志/快照/导出。
+正式构建强制使用系统凭据库（Windows Credential Manager），凭据库不可用时明确报错，禁止明文回退；仅开发环境可显式启用文件回退，
+启动时把历史明文凭据迁移到系统凭据库并回读确认后删除。Tauri 必须配置严格 CSP 和最小权限 capabilities。
 
 ## 常用命令
 
@@ -54,6 +56,14 @@ AI 漫剧剧本翻译系统（Windows 桌面版）：本地优先工作台，将
 23. 性能：默认窗口上限 1800 字符（环境变量可调）；上下文超预算按低优先级裁剪，源文永不裁剪；知识/别名按项目签名缓存。
 24. 重试：只有 timeout/network/429/5xx/明确 retryable 才重排；质量门禁、结构校验、认证、参数错误、截断最终失败不得无限重试。
 25. 台词本：从解析器 dialogue 片段与 speaker_name 确定性生成；只有多行对白无法按行数对齐时才允许模型介入。
+26. 任务并发：数据库必须保证同一项目最多一个 `queued/running/paused` 任务；重试、暂停、恢复和窗口领取使用条件更新/原子领取，
+    不能只依赖应用层“先查再写”。
+27. LLM 兼容降级：400 时按 `thinking/reasoning_effort` → `response_format` 逐级移除并记录原因；缓存 Key 必须包含实际请求体
+    （含实际 temperature、默认 max_tokens），禁止不同生成配置互相复用。
+28. 独立 QA：语义 QA 使用 source-first 独立复核策略，并附带确定性覆盖率信号（否定、条件、数字、术语）；信号用于复核定位，
+    不单独制造整窗失败。人物状态为章节级状态 + 段落级秘密揭示，暂不做场景级细粒度追踪；
+    `character_states` / `story_facts` 由剧情卡确定性派生，不额外增加 LLM 调用，翻译上下文与 QA 只能读取
+    当前章节及以前生效的信息，未来章节事实不得提前进入。
 
 ## 开发内循环
 
@@ -96,7 +106,7 @@ AI 漫剧剧本翻译系统（Windows 桌面版）：本地优先工作台，将
 
 ## 数据模型速查
 
-`projects` / `source_documents` / `chapters` / `scenes` / `source_segments` / `knowledge_items` / `knowledge_aliases` / `knowledge_evidence` / `scene_context_cards` / `translations` / `qa_issues` / `window_quality` / `tasks` / `task_items` / `llm_calls` / `dialogue_lines` / `chapter_storylines` / `audit_logs` / `provider_configs` / `style_guides`。
+`projects` / `source_documents` / `chapters` / `scenes` / `source_segments` / `knowledge_items` / `knowledge_aliases` / `knowledge_evidence` / `scene_context_cards` / `translations` / `qa_issues` / `window_quality` / `tasks` / `task_items` / `llm_calls` / `dialogue_lines` / `chapter_storylines` / `character_states` / `story_facts` / `audit_logs` / `provider_configs` / `style_guides`。
 
 ## 当前进度
 

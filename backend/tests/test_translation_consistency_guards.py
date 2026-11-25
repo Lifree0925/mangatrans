@@ -17,7 +17,8 @@ from app.services.term_match import (
     select_forced_specs_for_text,
     select_source_matches,
 )
-from app.services.translation import validate_window
+from app.services.translation import normalize_translation_entries, validate_window
+from app.services.translation_batch import apply_known_honorifics, apply_source_honorifics
 
 
 def _term(key: str, en: str, aliases: list[str] | None = None, **data) -> dict:
@@ -221,8 +222,9 @@ def test_semantic_qa_prompt_contains_reference_without_style_noise():
     prompt = seen["prompt"]
     assert "PROJECT REFERENCE" in prompt
     assert "Wasteland Edge Bar" in prompt
-    assert "不报告风格" in prompt
+    assert "不把风格" in prompt
     assert "大小写" in prompt
+    assert "naturalness_edits" in prompt
 
 
 def test_polish_split_errors_retry_and_preserve_all_segments(client):
@@ -430,3 +432,121 @@ def test_validate_window_accepts_multi_speaker_labels() -> None:
         "target_text": "Damian/Ethan: No!\n",
     }])
     assert ok == []
+
+
+def test_validate_window_accepts_multiple_speaker_cues_and_markdown_labels() -> None:
+    """画外音+情绪等多个提示、Markdown 标签和破折号分隔都是合法角色标签。"""
+    src = {
+        "segment_id": "s-cues",
+        "segment_type": "dialogue",
+        "speaker_name": "Damian画外音",
+        "source_text": "Damian画外音（焦急且带着命令口吻）：立刻带Leo回来！\n",
+    }
+    variants = [
+        "Damian (voice-over) (anxious, commanding): Bring Leo back now!",
+        "**Damian (voice-over) (anxious, commanding)**: Bring Leo back now!",
+        "Damian (voice-over) — Bring Leo back now!",
+    ]
+    for target in variants:
+        assert validate_window([src], [{
+            "segment_id": "s-cues",
+            "target_text": target,
+        }]) == [], target
+
+
+def test_normalize_translation_entries_repairs_hallucinated_ids_and_action_lines():
+    segments = [
+        {
+            "segment_id": "scene-1", "segment_type": "heading", "speaker_name": None,
+            "source_text": "1-2 帝国酒店走廊 黑夜 内\n",
+        },
+        {
+            "segment_id": "narr-1", "segment_type": "narrative", "speaker_name": None,
+            "source_text": "△她推开门。\n△警报灯闪烁。\n△她躲进房间。\n",
+        },
+        {
+            "segment_id": "line-1", "segment_type": "dialogue", "speaker_name": "Chloe",
+            "source_text": "Chloe：谁在那里？\n",
+        },
+    ]
+    # 模型臆造了第二个 segment_id，但条目顺序与原文一致。
+    entries = [
+        {"segment_id": "scene-1", "target_text": "INT. EMPIRE HOTEL CORRIDOR - NIGHT"},
+        {"segment_id": "hallucinated", "target_text": "△ She pushes the door open. △ Alarms flash. △ She hides in the room."},
+        {"segment_id": "line-1", "target_text": "Chloe: Who's there?"},
+    ]
+    out = normalize_translation_entries(segments, entries)
+    assert [x["segment_id"] for x in out] == ["scene-1", "narr-1", "line-1"]
+    assert out[0]["target_text"].startswith("1-2 ")
+    assert len([x for x in out[1]["target_text"].splitlines() if x.strip()]) == 3
+    assert all(x.startswith("△") for x in out[1]["target_text"].splitlines())
+    assert validate_window(segments, out) == []
+
+
+def test_validate_window_allows_front_matter_line_merge_but_not_body_merge():
+    front = {
+        "segment_id": "front", "segment_type": "narrative", "speaker_name": None,
+        "source_text": (
+            "My Title\n故事大纲\n第一段。\n第二段。\n第三段。\n"
+            "人物小传\nChloe\n角色一。\nLeo\n角色二。\n"
+        ),
+    }
+    assert validate_window([front], [{
+        "segment_id": "front",
+        "target_text": "My Title\nStory Outline\nChloe and Leo.\nCharacter Bios",
+    }]) == []
+
+    body = {
+        "segment_id": "body", "segment_type": "narrative", "speaker_name": None,
+        "source_text": "△第一段动作。\n△第二段动作。\n",
+    }
+    errs = validate_window([body], [{
+        "segment_id": "body", "target_text": "△ The first and second actions are merged.",
+    }])
+    assert any("段内缺行" in e for e in errs)
+
+
+def test_address_forms_are_not_exact_terms_and_honorifics_use_family_names():
+    from app.services.term_match import is_address_form
+
+    assert is_address_form("Helen夫人") is True
+    assert is_address_form("Richard先生") is True
+    assert is_address_form("Sterling家族") is False
+    fixed = apply_known_honorifics(
+        "Mrs. Helen said Mr. Richard would see Mr. Cross.",
+        {"helen": "Sterling", "richard": "Klein", "chloe": "Vance"},
+    )
+    assert fixed == "Mrs. Sterling said Mr. Klein would see Mr. Cross."
+    assert apply_known_honorifics("Miss Chloe", {"chloe": "Vance"}) == "Miss Vance"
+
+
+def test_generic_carwash_and_blue_pill_are_not_exact_terms():
+    from app.services.term_match import is_generic_source
+
+    assert is_generic_source("洗车行") is True
+    assert is_generic_source("蓝色药丸") is True
+    assert is_generic_source("Old Brooklyn Car Wash") is False
+
+
+def test_source_honorifics_fix_wrong_family_names():
+    family = {"helen": "Sterling", "chloe": "Vance", "richard": "Klein"}
+    assert apply_source_honorifics("Mrs. Vance will see you.", "Helen夫人看到你。", family) == "Mrs. Sterling will see you."
+    assert apply_source_honorifics("Miss. Chloe is here.", "Chloe小姐来了。", family) == "Miss Vance is here."
+    assert apply_source_honorifics("Mr. Richard gave the order.", "Richard先生下令。", family) == "Mr. Klein gave the order."
+    assert apply_source_honorifics("Miss. Chloe's file is here.", "Chloe小姐的档案。", family) == "Miss Vance's file is here."
+    assert apply_source_honorifics(
+        "Mr. Cross, Mr. Damian, the results are ready.",
+        "Cross先生，Damian先生，报告出来了。",
+        {**family, "damian": "Sterling"},
+    ) == "Mr. Cross, Mr. Sterling, the results are ready."
+    assert apply_source_honorifics(
+        "Mrs. Sterling is asking for you.",
+        "Helen夫人找你。",
+        family,
+        {"helen夫人": "Madam Helen"},
+    ) == "Madam Helen is asking for you."
+    assert apply_source_honorifics(
+        "Five years ago... Mr. Sterling died.",
+        "五年前……Sterling老先生去世了。",
+        family,
+    ) == "Five years ago... the elder Mr. Sterling died."

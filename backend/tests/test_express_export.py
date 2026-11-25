@@ -55,7 +55,9 @@ def _setup(client: TestClient, wait_task) -> str:
     return pid
 
 
-def _universal_fake(client: TestClient, pid: str) -> FakeProvider:
+def _universal_fake(
+    client: TestClient, pid: str, *, qa_override=None,
+) -> FakeProvider:
     """覆盖全部 LLM 环节的脚本化 Fake。"""
     seg_ids = [s["id"] for s in client.get(f"/api/v1/projects/{pid}/segments").json()]
 
@@ -126,6 +128,8 @@ def _universal_fake(client: TestClient, pid: str) -> FakeProvider:
 
     def qa_h(messages):
         if "终审 QA" in messages[-1]["content"]:
+            if qa_override is not None:
+                return qa_override(messages)
             return {"issues": []}
         return None
 
@@ -187,6 +191,52 @@ def test_express_end_to_end(client: TestClient, wait_task) -> None:
     # QA 记录存在（空问题列表也算跑过；导出报告包含统计）
     issues = client.get(f"/api/v1/projects/{pid}/qa-issues").json()
     assert isinstance(issues, list)
+
+
+def test_express_applies_qa_naturalness_edit(client: TestClient, wait_task) -> None:
+    """QA 的 table-read 修订必须真正落成新 polished，而不是只返回不写库。"""
+    pid = _setup(client, wait_task)
+
+    def qa_override(messages):
+        content = messages[-1]["content"]
+        target_part = content.split("[TARGET]", 1)[1].split("[DETERMINISTIC", 1)[0]
+        m = re.search(r"^\[([0-9a-f]{32})\]\s+(Speaker.*polished)$", target_part, re.MULTILINE)
+        assert m, target_part
+        sid, old = m.group(1), m.group(2)
+        return {
+            "issues": [],
+            "naturalness_edits": [{
+                "segment_id": sid,
+                "target_quote": old,
+                "suggested_text": old.replace("Hello", "Hi"),
+                "reason": "table-read naturalness",
+                "confidence": 0.95,
+            }],
+        }
+
+    set_provider(_universal_fake(client, pid, qa_override=qa_override))
+    r = client.post(f"/api/v1/projects/{pid}/translation/express", json={})
+    assert r.status_code == 200
+    status, error, _progress = _wait(r.json()["task_id"])
+    assert status == "completed", f"{status}: {error}"
+
+    from sqlalchemy import select
+
+    from app.models.document import SourceSegment
+    from app.models.translation import Translation
+
+    with dbmod.SessionLocal() as db:
+        rows = list(db.scalars(
+            select(Translation)
+            .join(SourceSegment, Translation.segment_id == SourceSegment.id)
+            .where(
+                SourceSegment.project_id == pid,
+                Translation.stage == "polished",
+                Translation.notes_json.like("%qa-naturalness-edit%"),
+            )
+        ))
+    assert rows
+    assert any("Hi" in (t.target_text or "") for t in rows)
 
 
 def test_export_bilingual_contains_original(client: TestClient, wait_task) -> None:
@@ -425,3 +475,16 @@ def test_delivery_narration_uses_translation_but_action_stays_chinese() -> None:
         "Narration: The story begins that night.",
         "（剧终）",
     ]
+
+def test_delivery_role_map_normalizes_all_caps_names():
+    from types import SimpleNamespace
+    from app.services.exporter import _build_role_map
+
+    seg = SimpleNamespace(
+        id="s1",
+        segment_type="dialogue",
+        source_text="Leo（笑）：Done.\n",
+    )
+    trans = SimpleNamespace(target_text="LEO (laughs): Done.\n")
+    role_map = _build_role_map([seg], {"s1": trans})
+    assert role_map["Leo"] == "Leo"

@@ -70,3 +70,11 @@ def test_edit_empty_source_rejected(client, wait_task) -> None:
     pid, sid = _setup(client, wait_task)
     r = client.patch(f"/api/v1/projects/{pid}/segments/{sid}", json={"source_text": "   "})
     assert r.status_code == 400
+
+
+def test_segment_translation_query_rejects_other_project(client, wait_task) -> None:
+    pid, sid = _setup(client, wait_task)
+    other = client.post("/api/v1/projects", json={"name": "另一个项目"}).json()["id"]
+
+    r = client.get(f"/api/v1/projects/{other}/segments/{sid}/translations")
+    assert r.status_code == 404

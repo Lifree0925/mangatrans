@@ -19,6 +19,7 @@ from app.schemas.document import (
 )
 from app.services import importer
 from app.services.parse_service import parse_and_persist
+from app.parsers.script_parser import PARSER_VERSION
 
 router = APIRouter(prefix="/projects/{project_id}", tags=["documents"])
 
@@ -141,7 +142,7 @@ def parse_report(project_id: str, db: Session = Depends(get_db)) -> dict:
         "heading_count": sum(1 for s in segs if s.segment_type == "heading"),
         "other_count": sum(1 for s in segs if s.segment_type == "other"),
         "anomalies": anomalies,
-        "parser_version": "1.0.0",
+        "parser_version": PARSER_VERSION,
         "coverage_ok": prev == len(text) and not anomalies,
     }
     return report

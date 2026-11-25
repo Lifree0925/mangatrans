@@ -2,7 +2,11 @@
 
 import json
 
-from app.services.context_builder import build_context, build_qa_reference
+from app.services.context_builder import (
+    build_context,
+    build_project_bible,
+    build_qa_reference,
+)
 
 
 def test_assembly_order_and_snapshot() -> None:
@@ -22,15 +26,96 @@ def test_assembly_order_and_snapshot() -> None:
         budget=4000,
     )
     text = result.prompt_text
-    # 组装顺序：原文 → 风格基线 → 场景卡 → spoiler guard → 人物 → 术语 → carry-over
-    assert text.index("SOURCE SEGMENTS") < text.index("STYLE GUIDE")
+    # 组装顺序：稳定/章节信息 → carry-over → 原文（原文最后，最大化前缀复用）
     assert text.index("STYLE GUIDE") < text.index("SCENE CONTEXT CARD")
-    assert text.index("SCENE CONTEXT CARD") < text.index("SPOILER GUARD")
+    assert text.index("SCENE CONTEXT CARD") < text.index("CARRY-OVER STATE")
+    assert text.index("CARRY-OVER STATE") < text.index("SOURCE SEGMENTS")
     assert text.index("APPROVED CHARACTERS") < text.index("FORCED TERMS")
     assert "CARRY-OVER STATE" in text
     assert "MUST NOT use" in text
     assert result.snapshot["knowledge_ids"] == ["K1", "K2"]
     assert result.snapshot["scene_card_id"] == "C1"
+
+
+def test_project_bible_is_stable_prefix_and_removes_dynamic_duplicates() -> None:
+    knowledge = [
+        {
+            "id": "K1", "item_type": "character", "canonical_key": "林晓",
+            "aliases": ["小林"], "data": {
+                "translation": "Lin Xiao",
+                "forms_of_address": ["Miss Lin"],
+                "personality": "沉稳",
+            },
+        },
+        {
+            "id": "K2", "item_type": "term", "canonical_key": "天机阁",
+            "aliases": [], "data": {
+                "translation": "Tianji Pavilion", "term_kind": "place",
+                "enforcement": "exact",
+            },
+        },
+    ]
+    style = {"dialogue_register": "natural", "character_voices": [{"name": "林晓"}]}
+    bible = build_project_bible(knowledge, style)
+    assert bible.startswith("[PROJECT BIBLE")
+    assert "Lin Xiao" in bible and "Tianji Pavilion" in bible
+
+    def ctx(source: str):
+        return build_context(
+            segments=[{
+                "segment_id": "S1", "segment_no": 1, "segment_type": "dialogue",
+                "speaker_name": "林晓", "source_text": source,
+            }],
+            scene_card=None, knowledge=knowledge, style_guide=style,
+            carry_over=None, project_bible=bible,
+        )
+
+    first = ctx("你终于来了。\n").prompt_text
+    second = ctx("天机阁在哪里？\n").prompt_text
+    assert first.startswith(bible)
+    assert second.startswith(bible)
+    assert first.index("SOURCE SEGMENTS") > first.index("STYLE GUIDE")
+    assert "APPROVED CHARACTERS" not in first
+    assert "FORCED TERMS" not in first
+    assert "NAME-FORM MAP" not in first
+    assert first.count("[STYLE GUIDE]") == 1
+    # 只有原文不同；相同稳定前缀直接成为 Provider 可复用的最长公共前缀。
+    assert first.split("SOURCE SEGMENTS", 1)[0] == second.split("SOURCE SEGMENTS", 1)[0]
+
+
+def test_draft_context_keeps_facts_but_skips_performance_material() -> None:
+    """Draft 只锁事实：人物名/术语/剧情必须在，表演声音和风格留给 Polish。"""
+    knowledge = [{
+        "id": "K1", "item_type": "character", "canonical_key": "林晓",
+        "aliases": [], "data": {
+            "translation": "Lin Xiao", "personality": "沉稳",
+            "speech_style": "短句", "emotional_range": "压抑",
+        },
+    }]
+    bible = build_project_bible(knowledge, None)
+    result = build_context(
+        segments=[{
+            "segment_id": "S1", "segment_no": 1, "segment_type": "dialogue",
+            "speaker_name": "林晓", "source_text": "林晓：别出声。\n",
+        }],
+        scene_card=None, knowledge=knowledge,
+        style_guide={"dialogue_register": "natural"},
+        carry_over={"ongoing_state": "危险"},
+        storyline={"summary": "走廊对峙", "prior_deps": ["上一场发现追踪器"]},
+        story_facts=[{"chapter": 1, "type": "event", "subject": "林晓", "text": "林晓发现追踪器"}],
+        project_bible=bible, draft_only=True,
+    )
+    text = result.prompt_text
+    assert "PROJECT BIBLE" in text
+    assert "林晓 => Lin Xiao" in text
+    assert "SOURCE SEGMENTS" in text
+    assert "CHAPTER STORYLINE" in text
+    assert "ACTIVE STORY FACTS" in text
+    assert "CARRY-OVER STATE" in text
+    assert "SPEAKER VOICE" not in text
+    assert "CHARACTER PROFILES" not in text
+    assert "STYLE GUIDE" not in text
+    assert result.snapshot["draft_only"] is True
 
 
 def test_unrelated_knowledge_excluded() -> None:
@@ -155,6 +240,33 @@ def test_polish_reserved_tokens_trim_more_context() -> None:
     assert "STYLE GUIDE" not in result.prompt_text
     assert result.report["effective_budget"] <= 200
     assert result.total_tokens <= result.report["effective_budget"]
+
+
+def test_character_state_and_facts_respect_context_budget() -> None:
+    result = build_context(
+        segments=[{
+            "segment_id": "S1", "segment_no": 1, "segment_type": "dialogue",
+            "speaker_name": "林晓", "source_text": "你终于来了。\n",
+        }],
+        scene_card=None,
+        knowledge=[{
+            "id": "C1", "item_type": "character", "canonical_key": "林晓",
+            "aliases": [], "data": {"translation": "Lin Xiao"},
+        }],
+        style_guide=None,
+        carry_over=None,
+        character_states=[{
+            "name": "林晓", "last_chapter": 12, "identity": "身份" * 800,
+            "known_secrets": ["秘密" * 800],
+        }],
+        story_facts=[{
+            "id": "F1", "chapter": 12, "type": "event", "subject": "林晓",
+            "text": "事件" * 800,
+        }],
+        budget=900,
+    )
+    assert result.total_tokens <= result.report["effective_budget"]
+    assert result.report["trimmed"]
 
 
 def test_lean_context_drops_unused_knowledge_but_keeps_required_facts() -> None:

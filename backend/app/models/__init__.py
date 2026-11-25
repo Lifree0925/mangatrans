@@ -6,6 +6,7 @@ from app.models.qa import QAIssue, WindowQuality
 from app.models.knowledge import KnowledgeAlias, KnowledgeEvidence, KnowledgeItem, SceneContextCard
 from app.models.project import Project
 from app.models.storyline import ChapterStoryline
+from app.models.continuity import CharacterState, StoryFact
 from app.models.task import Task, TaskItem
 from app.models.dialogue import DialogueLine
 from app.models.translation import ProviderConfig, StyleGuide, Translation
@@ -25,6 +26,8 @@ __all__ = [
     "Task",
     "TaskItem",
     "ChapterStoryline",
+    "CharacterState",
+    "StoryFact",
     "QAIssue",
     "WindowQuality",
     "Translation",

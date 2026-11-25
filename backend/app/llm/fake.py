@@ -43,7 +43,12 @@ class FakeProvider:
         max_tokens: int | None = None,
         stage: str = "llm",
     ) -> LLMResponse:
-        self.calls.append({"messages": messages, "schema": response_schema, "thinking": thinking})
+        self.calls.append({
+            "messages": messages,
+            "schema": response_schema,
+            "thinking": thinking,
+            "stage": stage,
+        })
         result = None
         for h in self.handlers:
             r = h(messages)

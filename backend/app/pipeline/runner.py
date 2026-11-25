@@ -8,6 +8,7 @@ import json
 import traceback
 
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 
 import app.core.database as dbmod
 from app.llm.registry import get_provider
@@ -18,6 +19,10 @@ from app.pipeline.task_timer import (
     start_task_timer,
 )
 from app.services import express, knowledge_service, style_guide_service
+
+
+class ActiveTaskConflict(RuntimeError):
+    """同一项目已存在活动任务；由 API 层转换为 409。"""
 
 
 def _sess_factory():
@@ -32,7 +37,11 @@ def create_task(db, project_id: str, task_type: str, payload: dict) -> Task:
         config_snapshot_json=json.dumps(payload, ensure_ascii=False),
     )
     db.add(task)
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        raise ActiveTaskConflict("该项目已有活动任务，请等待完成或先处理现有任务") from exc
     db.refresh(task)
     return task
 

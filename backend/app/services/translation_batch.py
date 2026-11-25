@@ -1,6 +1,7 @@
 """批量翻译：窗口规划、任务展开、窗口执行、carry-over 串行传递、stale 管理。"""
 
 import json
+import re
 
 from sqlalchemy import func, select, text
 from sqlalchemy.exc import IntegrityError, OperationalError
@@ -8,10 +9,16 @@ from sqlalchemy.orm import Session
 
 from app.llm.protocol import LLMError
 from app.llm.registry import get_provider
-from app.models.document import SourceDocument, SourceSegment
+from app.models.document import Chapter, SourceDocument, SourceSegment
 from app.models.task import Task, TaskItem
 from app.models.translation import StyleGuide, Translation
-from app.services.context_builder import ContextResult, build_context, build_qa_reference
+from app.services.context_builder import (
+    ContextResult,
+    build_context,
+    build_project_bible,
+    build_qa_reference,
+)
+from app.services import continuity_service
 from app.services.context_cache import get_project_knowledge
 from app.services.importer import sha256
 from app.services.term_match import (
@@ -19,6 +26,8 @@ from app.services.term_match import (
     build_term_records,
     canonicalize_exact_terms,
     forced_term_specs,
+    is_address_form,
+    normalize,
 )
 from app.services.title_service import preserved_title_for_segment
 from app.services.translation import (
@@ -79,8 +88,18 @@ def _load_window_context(db: Session, project_id: str, window: list[SourceSegmen
     if storyline is not None:
         storyline["id"] = story_row.id
 
+    chapter = db.get(Chapter, first.chapter_id) if first.chapter_id else None
+    chapter_no = chapter.chapter_no if chapter is not None else 0
+    states = (
+        continuity_service.visible_character_states(db, project_id, chapter_no)
+        if chapter_no > 0 else []
+    )
+    facts = (
+        continuity_service.active_story_facts(db, project_id, chapter_no)
+        if chapter_no > 0 else []
+    )
     items = get_project_knowledge(db, project_id)
-    return card, items, storyline
+    return card, items, storyline, states, facts
 
 
 def _approved_knowledge_entries(
@@ -159,7 +178,9 @@ async def process_window_qa_item(db_factory, task_id: str, item_id: str, model: 
             draft_latest.setdefault(t.segment_id, t)
         forced = _window_forced_terms(db, project_id, window)
         speaker_map = _speaker_map_for_project(db, project_id)
-        _card, knowledge, storyline = _load_window_context(db, project_id, window)
+        _card, knowledge, storyline, states, facts = _load_window_context(
+            db, project_id, window
+        )
         qa_reference = build_qa_reference(
             segments=[{
                 "segment_id": s.id,
@@ -169,6 +190,8 @@ async def process_window_qa_item(db_factory, task_id: str, item_id: str, model: 
             } for s in window],
             knowledge=knowledge,
             storyline=storyline,
+            character_states=states,
+            story_facts=facts,
         )
 
     if len(polished) != len(window):
@@ -181,8 +204,16 @@ async def process_window_qa_item(db_factory, task_id: str, item_id: str, model: 
     seg_by_id = {s.id: s for s in window}
     source_block = "\n".join(f"[{s.id}] {s.source_text}" for s in window)
     target_block = "\n".join(f"[{s.id}] {polished[s.id].target_text}" for s in window)
+    coverage_segments = [
+        {"segment_id": s.id, "source_text": s.source_text} for s in window
+    ]
+    coverage_hint, coverage_stats = qa_service.build_coverage_signals(
+        coverage_segments,
+        {sid: tr.target_text for sid, tr in polished.items()},
+    )
     semantic = await qa_service.semantic_qa(
-        get_provider(), model, source_block, target_block, reference=qa_reference
+        get_provider(), model, source_block, target_block,
+        reference=qa_reference, coverage=coverage_hint,
     )
     if not semantic.ok:
         with db_factory() as db:
@@ -193,6 +224,7 @@ async def process_window_qa_item(db_factory, task_id: str, item_id: str, model: 
                     "semantic_error": semantic.error[:500],
                     "issues": 0,
                     "unresolved": 0,
+                    "coverage": coverage_stats,
                 },
             )
             db.commit()
@@ -228,9 +260,35 @@ async def process_window_qa_item(db_factory, task_id: str, item_id: str, model: 
             unlocated_severe += 1
 
     det_total = 0
+    naturalness_count = 0
     with db_factory() as db:
-        qa_service.clear_issues_for_segments(db, project_id, [s.id for s in window])
         forced = _window_forced_terms(db, project_id, window)
+        # 独立 QA 在事实核对后给出的台词自然化修订：先过确定性护栏，
+        # 再写新版本；随后统一跑 deterministic_qa，避免绕过术语/结构检查。
+        accepted = qa_service.select_naturalness_edits(
+            segments=[
+                {
+                    "segment_id": s.id,
+                    "segment_type": s.segment_type,
+                    "speaker_name": s.speaker_name,
+                    "source_text": s.source_text,
+                    "line_count_optional": bool(preserved_title_for_segment(s)),
+                }
+                for s in window
+            ],
+            targets={sid: tr.target_text for sid, tr in polished.items()},
+            edits=semantic.naturalness_edits,
+            forced_terms=forced,
+            speaker_map=speaker_map,
+            exclude_sids=set(semantic_by_seg),
+        )
+        for sid, row in persist_naturalness_edits(
+            db, window=window, accepted=accepted, model=model
+        ).items():
+            polished[sid] = row
+        naturalness_count = len(accepted)
+
+        qa_service.clear_issues_for_segments(db, project_id, [s.id for s in window])
         for seg in window:
             det = qa_service.deterministic_qa(db, seg, polished[seg.id], forced)
             det_total += len(det)
@@ -327,6 +385,7 @@ async def process_window_qa_item(db_factory, task_id: str, item_id: str, model: 
 
     # 语义问题被修复后，再对修复段做一次聚焦语义复检；避免“改过但没人再看”。
     semantic_after_ok = True
+    coverage_after_stats = coverage_stats
     if repaired_ids and semantic_by_seg:
         with db_factory() as db:
             latest = {
@@ -343,8 +402,19 @@ async def process_window_qa_item(db_factory, task_id: str, item_id: str, model: 
                 f"[{s.id}] {latest[s.id].target_text}" for s in target_segs if s.id in latest
             )
         if source_block and target_block:
+            coverage_after_hint, coverage_after_stats = qa_service.build_coverage_signals(
+                [
+                    {"segment_id": s.id, "source_text": s.source_text}
+                    for s in target_segs
+                ],
+                {
+                    s.id: polished[s.id].target_text
+                    for s in target_segs if s.id in polished
+                },
+            )
             recheck = await qa_service.semantic_qa(
-                get_provider(), model, source_block, target_block, reference=qa_reference
+                get_provider(), model, source_block, target_block,
+                reference=qa_reference, coverage=coverage_after_hint,
             )
             if not recheck.ok:
                 semantic_after_ok = False
@@ -392,6 +462,8 @@ async def process_window_qa_item(db_factory, task_id: str, item_id: str, model: 
                 "unresolved": len(leftover) + unlocated_severe,
                 "rounds": rounds,
                 "translation_ids": latest_ids,
+                "coverage": coverage_after_stats,
+                "naturalness_edits": naturalness_count,
             },
         )
         db.commit()
@@ -478,6 +550,38 @@ def insert_translation_row(db: Session, *, segment_id: str, **kw) -> Translation
     raise last_exc
 
 
+def persist_naturalness_edits(
+    db: Session, *, window: list[SourceSegment], accepted: dict[str, str], model: str,
+) -> dict[str, Translation]:
+    """把 QA 已通过护栏的台词自然化文本写成新的 polished 版本。"""
+    if not accepted:
+        return {}
+    seg_by_id = {s.id: s for s in window}
+    rows: dict[str, Translation] = {}
+    for sid, text in accepted.items():
+        seg = seg_by_id.get(sid)
+        if seg is None or not str(text or "").strip():
+            continue
+        rows[sid] = insert_translation_row(
+            db,
+            segment_id=sid,
+            stage="polished",
+            target_text=text.strip(),
+            review_status="unreviewed",
+            freshness_status="current",
+            notes_json=json.dumps(["qa-naturalness-edit"], ensure_ascii=False),
+            ambiguity_json="[]",
+            model_name=model,
+            provider_id="default",
+            prompt_version=PROMPT_VERSION,
+            context_snapshot_json=json.dumps(
+                {"qa_naturalness_edit": True}, ensure_ascii=False
+            ),
+            source_hash=sha256(seg.source_text),
+        )
+    return rows
+
+
 def _persist_stage(
     db: Session, window: list[SourceSegment], entries: list[dict], stage: str,
     context, model: str, *, only_segment_ids: set[str] | None = None,
@@ -546,11 +650,13 @@ def _persist_window_translations(
 
 async def _window_material(
     db_factory, project_id: str, window: list[SourceSegment], carry_over: dict | None,
-    *, reserved_tokens: int = 0, lean: bool = False,
+    *, reserved_tokens: int = 0, lean: bool = False, draft_only: bool = False,
 ) -> tuple[list[dict], ContextResult, dict | None, dict | None]:
     """窗口公共材料：segment dicts、style guide、场景卡/知识/剧情卡、context。"""
     with db_factory() as db:
-        _card, knowledge, storyline = _load_window_context(db, project_id, window)
+        _card, knowledge, storyline, states, facts = _load_window_context(
+            db, project_id, window
+        )
         sg = db.scalar(
             select(StyleGuide)
             .where(StyleGuide.project_id == project_id)
@@ -569,15 +675,25 @@ async def _window_material(
         }
         for s in window
     ]
+    # Lean 是上下文撑满后的保命路径，不再塞完整项目前缀；正常 Draft/Polish
+    # 使用逐字稳定的项目前缀，才能让 Provider 缓存跨窗口复用。
+    project_bible = "" if lean else build_project_bible(
+        knowledge, None if draft_only else style_guide
+    )
+    context_style = None if draft_only else style_guide
     context = build_context(
         segments=seg_dicts,
         scene_card=_card,
         knowledge=knowledge,
-        style_guide=style_guide,
+        style_guide=context_style,
         carry_over=carry_over,
         storyline=storyline,
+        character_states=states,
+        story_facts=facts,
+        project_bible=project_bible,
         reserved_tokens=reserved_tokens,
         lean=lean,
+        draft_only=draft_only,
     )
     return seg_dicts, context, style_guide, _card
 
@@ -604,15 +720,194 @@ def _merge_split_contexts(parts: list[ContextResult]) -> ContextResult:
 _WINDOW_SPLIT_CODES = {"output_truncated", "context_length"}
 
 
+_HONORIFIC_RE = re.compile(
+    r"\b(Mr|Mrs|Ms|Miss|Madam)\.?\s+([A-Z][A-Za-z'’-]*)\b"
+)
+
+
+def _keep_possessive(original: str, replacement: str) -> str:
+    if original.endswith("’s"):
+        return replacement + "’s"
+    if original.endswith("'s"):
+        return replacement + "'s"
+    return replacement
+
+
+def apply_known_honorifics(text: str, family_by_given: dict[str, str]) -> str:
+    """将 Mr./Mrs. + 名字改为姓氏；家庭姓氏只来自项目人物知识。"""
+    if not text or not family_by_given:
+        return text
+
+    def repl(match: re.Match) -> str:
+        family = family_by_given.get(match.group(2).casefold())
+        if not family:
+            return match.group(0)
+        raw_title = match.group(1)
+        if raw_title.casefold() == "madam":
+            return _keep_possessive(match.group(0), f"Mrs. {family}")
+        if raw_title.casefold() == "miss":
+            return _keep_possessive(match.group(0), f"Miss {family}")
+        return _keep_possessive(match.group(0), f"{raw_title}. {family}")
+
+    return _HONORIFIC_RE.sub(repl, text)
+
+
+_ADDRESS_SOURCE_RE = re.compile(r"([A-Za-z][A-Za-z'’-]{1,20})(先生|夫人|小姐|女士)")
+_ADDRESS_TITLES = {"先生": "Mr.", "夫人": "Mrs.", "小姐": "Miss", "女士": "Ms."}
+_ELDER_SOURCE_RE = re.compile(r"([A-Z][A-Za-z'’-]+)老先生")
+_TARGET_ADDRESS_RE = re.compile(
+    r"\b(Mr|Mrs|Ms|Miss|Madam)\.?\s+([A-Z][A-Za-z'’-]*)\b"
+)
+
+
+def apply_source_honorifics(
+    text: str, source_text: str, family_by_given: dict[str, str],
+    approved_addresses: dict[str, str] | None = None,
+) -> str:
+    """按原文称谓顺序修正目标中的头衔组合。
+
+    例：源文「Cross先生，Damian先生」目标「Mr. Cross, Mr. Damian」
+    → 「Mr. Cross, Mr. Sterling」。同句多人时按出现顺序对齐，不能按姓氏全局替换。
+    """
+    if not text or not source_text:
+        return text
+    # “Sterling老先生”不是 Mr. + 姓氏的普通称谓，而是“老/先辈”限定；
+    # 保持这一限定，避免和 Damian 的 Mr. Sterling 混淆。
+    for elder in _ELDER_SOURCE_RE.finditer(source_text):
+        family = elder.group(1)
+        pattern = re.compile(rf"\bMr\.?\s+{re.escape(family)}\b")
+        if not re.search(rf"\bthe\s+elder\s+Mr\.?\s+{re.escape(family)}\b", text, re.I):
+            text = pattern.sub(f"the elder Mr. {family}", text, count=1)
+    addresses = list(_ADDRESS_SOURCE_RE.finditer(source_text))
+    targets = list(_TARGET_ADDRESS_RE.finditer(text))
+    if not addresses or not targets:
+        return text
+    known_families = {str(v).casefold() for v in family_by_given.values() if v}
+    expected: list[str | None] = []
+    for match in addresses:
+        given, suffix = match.group(1), match.group(2)
+        title = _ADDRESS_TITLES.get(suffix, "Mr.")
+        approved = (approved_addresses or {}).get(normalize(match.group(0)))
+        if approved:
+            expected.append(approved)
+            continue
+        family = family_by_given.get(given.casefold())
+        if family:
+            expected.append(f"{title} {family}")
+        elif given.casefold() in known_families:
+            expected.append(f"{title} {given}")
+        else:
+            expected.append(None)
+
+    if len(targets) == len(expected):
+        # 同句多人：按顺序一一替换；未知项的原文称谓保持不动。
+        out: list[str] = []
+        cursor = 0
+        for match, wanted in zip(targets, expected):
+            out.append(text[cursor:match.start()])
+            out.append(_keep_possessive(match.group(0), wanted) if wanted else match.group(0))
+            cursor = match.end()
+        out.append(text[cursor:])
+        return "".join(out)
+
+    if len(addresses) != 1 or expected[0] is None:
+        return text
+
+    # 单人且目标只有一处：允许修正错误姓氏（如 Helen 被写成 Mrs. Vance）。
+    # 目标有多处时，不改可能属于其他人的称谓，交给上面的顺序对齐或修复层。
+    if len(targets) == 1:
+        match = targets[0]
+        return text[:match.start()] + _keep_possessive(match.group(0), expected[0]) + text[match.end():]
+    return text
+
+
+def _honorific_family_map(db, project_id: str) -> dict[str, str]:
+    """从人物知识推出称呼姓氏；只做人名与直系关系可证实的映射。"""
+    items = get_project_knowledge(db, project_id)
+    chars = [x for x in items if x.get("item_type") == "character"]
+    full: list[tuple[str, str]] = []
+    for ch in chars:
+        data = ch.get("data") if isinstance(ch.get("data"), dict) else {}
+        name = str(data.get("translation") or ch.get("canonical_key") or "").strip()
+        tokens = re.findall(r"[A-Za-z][A-Za-z'’-]*", name)
+        if len(tokens) >= 2:
+            full.append((tokens[0], tokens[-1]))
+    mapping = {given.casefold(): family for given, family in full}
+    # Helen（Damian 的母亲）这类单名人物：从显式直系关系推导家族姓氏。
+    for ch in chars:
+        data = ch.get("data") if isinstance(ch.get("data"), dict) else {}
+        name = str(data.get("translation") or ch.get("canonical_key") or "").strip()
+        tokens = re.findall(r"[A-Za-z][A-Za-z'’-]*", name)
+        if len(tokens) != 1:
+            continue
+        desc = " ".join(
+            str(data.get(k) or "")
+            for k in ("role", "role_translation", "relationships")
+        )
+        # 只从显式的「X 的母亲/父亲/妻子/丈夫」取 X 的姓氏；
+        # 不能因为在关系描述里出现了孙辈 Leo 就误推成 Vance。
+        relation = re.search(
+            r"\b([A-Z][A-Za-z'’-]*)['’]s\s+(mother|father|wife|husband)\b",
+            desc,
+            re.I,
+        )
+        if relation:
+            given = relation.group(1)
+        else:
+            relation = re.search(
+                r"\b(mother|father|wife|husband)\s+of\s+([A-Z][A-Za-z'’-]*)\b",
+                desc,
+                re.I,
+            )
+            given = relation.group(2) if relation else ""
+        if not given:
+            continue
+        family = dict(full).get(given)
+        if family:
+            mapping.setdefault(tokens[0].casefold(), family)
+    return mapping
+
+
+def _approved_address_forms(db, project_id: str) -> dict[str, str]:
+    """读取知识库中已批准的有头衔称谓，如 Helen夫人 -> Madam Helen。
+
+    exact 术语表不收录称谓，但称谓也需要项目级唯一译名。这里只接受目标值
+    本身带 Mr./Mrs./Miss/Madam 的形式，避免把普通人名误当成称谓。
+    """
+    anchors = re.compile(r"^(?:Mr|Mrs|Ms|Miss|Madam)\.?\s+", re.I)
+    out: dict[str, str] = {}
+    for item in get_project_knowledge(db, project_id):
+        if item.get("item_type") != "character":
+            continue
+        data = item.get("data") if isinstance(item.get("data"), dict) else {}
+        target = str(data.get("translation") or "").strip()
+        if not anchors.match(target):
+            continue
+        forms = [item.get("canonical_key", ""), *(item.get("aliases") or [])]
+        forms.extend(data.get("forms_of_address") or [])
+        for form in forms:
+            form = str(form or "").strip()
+            if form and is_address_form(form):
+                out.setdefault(normalize(form), target)
+    return out
+
+
 async def _canonicalize_polished_terms(db_factory, project_id, window, polished):
     """专名大小写确定性归一（只改 exact 术语，不碰普通名词/事实/风格）。"""
     with db_factory() as db:
         forced = _window_forced_terms(db, project_id, window)
+        honorifics = _honorific_family_map(db, project_id)
+        approved_addresses = _approved_address_forms(db, project_id)
     for entry in polished:
         text = entry.get("target_text") or ""
         if forced:
             text = canonicalize_exact_terms(text, forced)
-        entry["target_text"] = localize_screenplay_marks(text)
+        text = localize_screenplay_marks(text)
+        source_text = next((s.source_text for s in window if s.id == entry.get("segment_id")), "")
+        text = apply_known_honorifics(text, honorifics)
+        entry["target_text"] = apply_source_honorifics(
+            text, source_text, honorifics, approved_addresses
+        )
     return polished
 
 
@@ -630,14 +925,18 @@ def _minimal_context(seg_dicts: list[dict]) -> ContextResult:
 
 async def translate_window_draft_direct(
     db_factory, project_id: str, window: list[SourceSegment], model: str,
-    *, _depth: int = 0,
+    *, _depth: int = 0, task_id: str | None = None, window_key: str | None = None,
 ) -> tuple[list[dict], dict | None, ContextResult]:
     """Draft 阶段（可并发）；截断/上下文超限时自动拆半，避免整窗永久卡死。"""
     try:
-        seg_dicts, context, _sg, _card = await _window_material(db_factory, project_id, window, None)
+        seg_dicts, context, _sg, _card = await _window_material(
+            db_factory, project_id, window, None, draft_only=True
+        )
         draft, carry = await translate_window_draft(
             provider=get_provider(), model=model, window_id="DRAFT", context=context,
             source_chars=sum(len(s["source_text"]) for s in seg_dicts),
+            segments=seg_dicts,
+            task_id=task_id, window_key=window_key,
         )
         return draft, carry, context
     except LLMError as exc:
@@ -661,16 +960,19 @@ async def translate_window_draft_direct(
                 provider=get_provider(), model=model, window_id="DRAFT-MIN",
                 context=context,
                 source_chars=sum(len(s["source_text"]) for s in seg_dicts),
+                segments=seg_dicts,
             )
             return draft, carry, context
         if len(window) <= 1 or _depth >= 3:
             raise
         mid = len(window) // 2
         left, _left_carry, ctx_a = await translate_window_draft_direct(
-            db_factory, project_id, window[:mid], model, _depth=_depth + 1
+            db_factory, project_id, window[:mid], model, _depth=_depth + 1,
+            task_id=task_id, window_key=window_key,
         )
         right, carry, ctx_b = await translate_window_draft_direct(
-            db_factory, project_id, window[mid:], model, _depth=_depth + 1
+            db_factory, project_id, window[mid:], model, _depth=_depth + 1,
+            task_id=task_id, window_key=window_key,
         )
         return [*left, *right], carry, _merge_split_contexts([ctx_a, ctx_b])
 
@@ -678,6 +980,7 @@ async def translate_window_draft_direct(
 async def translate_window_polish_direct(
     db_factory, project_id: str, window: list[SourceSegment], draft: list[dict],
     carry_over: dict | None, model: str, *, _depth: int = 0,
+    task_id: str | None = None, window_key: str | None = None,
 ) -> tuple[list[dict], dict]:
     """Polish 阶段；上下文撑满时先精简知识重试，再拆半，最后单段极简兜底。"""
 
@@ -693,6 +996,8 @@ async def translate_window_polish_direct(
             window_id="POLISH-LEAN" if lean else "POLISH",
             context=context, draft=draft, carry_over=carry_over, segments=seg_dicts,
             force_no_thinking=force_no_thinking,
+            task_id=None if lean else task_id,
+            window_key=None if lean else window_key,
         )
         return await _canonicalize_polished_terms(
             db_factory, project_id, window, polished
@@ -755,11 +1060,11 @@ async def translate_window_polish_direct(
         right_draft = [e for e in draft if e.get("segment_id") not in left_ids]
         left, middle_carry = await translate_window_polish_direct(
             db_factory, project_id, left_window, left_draft, carry_over, model,
-            _depth=_depth + 1,
+            _depth=_depth + 1, task_id=task_id, window_key=window_key,
         )
         right, carry = await translate_window_polish_direct(
             db_factory, project_id, right_window, right_draft, middle_carry, model,
-            _depth=_depth + 1,
+            _depth=_depth + 1, task_id=task_id, window_key=window_key,
         )
         return [*left, *right], carry
 
@@ -777,7 +1082,10 @@ async def process_window_draft_item(db_factory, task_id: str, item_id: str, mode
         project_id = task.project_id
         speaker_map = _speaker_map_for_project(db, project_id)
 
-    draft, carry, context = await translate_window_draft_direct(db_factory, project_id, window, model)
+    draft, carry, context = await translate_window_draft_direct(
+        db_factory, project_id, window, model,
+        task_id=task_id, window_key=item.window_id,
+    )
     errors = validate_window(
         [
             {
@@ -860,7 +1168,8 @@ async def process_window_polish_item(db_factory, task_id: str, item_id: str, mod
         ]
 
     polished, carry = await translate_window_polish_direct(
-        db_factory, project_id, window, draft, carry_over, model
+        db_factory, project_id, window, draft, carry_over, model,
+        task_id=task_id, window_key=window_id,
     )
     seg_dicts = [
         {"segment_id": s.id, "segment_no": s.segment_no, "segment_type": s.segment_type,

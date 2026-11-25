@@ -13,7 +13,7 @@ import json
 import time
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 
 import app.core.database as dbmod
 from app.models.task import Task, TaskItem
@@ -102,6 +102,46 @@ def _model_of(db, task_id: str) -> str:
     return payload.get("model", "fake-model")
 
 
+def _claim_pending_items(db, items: list[TaskItem]) -> list[TaskItem]:
+    """条件更新领取窗口：并发 Worker 同时选中同一项时只有一个能成功。"""
+    if not items:
+        return []
+    now = datetime.now(timezone.utc)
+    claimed_ids: list[str] = []
+    for item in items:
+        result = db.execute(
+            update(TaskItem)
+            .where(TaskItem.id == item.id, TaskItem.status == "pending")
+            .values(
+                status="running",
+                started_at=now,
+                attempts=TaskItem.attempts + 1,
+            )
+            .execution_options(synchronize_session=False)
+        )
+        if result.rowcount == 1:
+            claimed_ids.append(item.id)
+    if not claimed_ids:
+        db.rollback()
+        return []
+    claimed = list(
+        db.scalars(select(TaskItem).where(TaskItem.id.in_(claimed_ids)))
+    )
+    # 任务状态/计时只在真正领取到窗口时推进。
+    touched_tasks: set[str] = set()
+    for item in claimed:
+        if item.task_id in touched_tasks:
+            continue
+        touched_tasks.add(item.task_id)
+        task = db.get(Task, item.task_id)
+        if task is not None:
+            if task.status == "queued":
+                task.status = "running"
+            start_task_timer(task)
+    db.commit()
+    return claimed
+
+
 def claim_draft_batch(db, limit: int = DRAFT_CONCURRENCY) -> list[TaskItem]:
     """原子领取最多 limit 个 draft 待办（并发执行；只领取活动任务的窗口）。"""
     rows = list(
@@ -117,21 +157,12 @@ def claim_draft_batch(db, limit: int = DRAFT_CONCURRENCY) -> list[TaskItem]:
             .limit(limit)
         )
     )
-    claimed: list[TaskItem] = []
+    candidates: list[TaskItem] = []
     for item in rows:
         if not _task_usable(db, item.task_id):
             continue
-        task = db.get(Task, item.task_id)
-        if task is not None:
-            if task.status == "queued":
-                task.status = "running"
-            start_task_timer(task)
-        item.status = "running"
-        item.started_at = datetime.now(timezone.utc)
-        item.attempts += 1
-        claimed.append(item)
-    db.commit()
-    return claimed
+        candidates.append(item)
+    return _claim_pending_items(db, candidates)
 
 
 def claim_polish_batch(db, limit: int = POLISH_CONCURRENCY) -> list[TaskItem]:
@@ -149,9 +180,9 @@ def claim_polish_batch(db, limit: int = POLISH_CONCURRENCY) -> list[TaskItem]:
         )
     )
     terms_ready: dict[str, bool] = {}
-    claimed: list[TaskItem] = []
+    candidates: list[TaskItem] = []
     for item in rows:
-        if len(claimed) >= limit:
+        if len(candidates) >= limit:
             break
         if not _task_usable(db, item.task_id):
             continue
@@ -176,17 +207,8 @@ def claim_polish_batch(db, limit: int = POLISH_CONCURRENCY) -> list[TaskItem]:
             # 单 item 只在 Draft 成功后从 draft 转 polish；未完成时不能提前润色。
             if prev is not None and prev.phase == "draft" and prev.status in ("pending", "running"):
                 continue
-        task = db.get(Task, item.task_id)
-        if task is not None:
-            if task.status == "queued":
-                task.status = "running"
-            start_task_timer(task)
-        item.status = "running"
-        item.started_at = datetime.now(timezone.utc)
-        item.attempts += 1
-        claimed.append(item)
-    db.commit()
-    return claimed
+        candidates.append(item)
+    return _claim_pending_items(db, candidates)
 
 
 def claim_qa_batch(db, limit: int = QA_CONCURRENCY) -> list[TaskItem]:
@@ -204,21 +226,12 @@ def claim_qa_batch(db, limit: int = QA_CONCURRENCY) -> list[TaskItem]:
             .limit(limit)
         )
     )
-    claimed: list[TaskItem] = []
+    candidates: list[TaskItem] = []
     for item in rows:
         if not _task_usable(db, item.task_id):
             continue
-        task = db.get(Task, item.task_id)
-        if task is not None:
-            if task.status == "queued":
-                task.status = "running"
-            start_task_timer(task)
-        item.status = "running"
-        item.started_at = datetime.now(timezone.utc)
-        item.attempts += 1
-        claimed.append(item)
-    db.commit()
-    return claimed
+        candidates.append(item)
+    return _claim_pending_items(db, candidates)
 
 
 def _mark_failed(
