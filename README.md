@@ -39,7 +39,7 @@
 frontend/     React + TS + Tailwind（ChatGPT 风格浅色 UI）
 backend/      FastAPI sidecar：解析、知识库、翻译管线、任务系统、QA、导出
 src-tauri/    Tauri 2 桌面壳：生命周期、sidecar 管理、安装包
-AGENTS.md     开发执行速查与工程原则
+CLAUDE.md     开发执行速查与工程原则
 ```
 
 ### 常用命令
@@ -96,4 +96,4 @@ cd src-tauri && cargo tauri dev  # 终端 3（需 Rust 工具链）
 
 ## 📄 文档
 
-- [AGENTS.md](AGENTS.md)：工程原则、开发命令速查与执行约束
+- [CLAUDE.md](CLAUDE.md)：工程原则、开发命令速查与执行约束
